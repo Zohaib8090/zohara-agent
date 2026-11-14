@@ -293,6 +293,10 @@ For a restricted account every op in this block except `artifacts` answers `{"ok
 | `mcp_import` | `{"op":"mcp_import","config":"<JSON of mcpServers>"}` | `{"ok":true,"message":"..."}`; live error for `{}`: "No server was found in that. A server needs a \"command\" (a program) or a \"url\" (a remote server)." |
 | `mcp_toggle` | `{"op":"mcp_toggle","name":"x","enabled":false}` | `{"ok":true}`; unknown: "no such server" (live) |
 | `mcp_remove` | `{"op":"mcp_remove","name":"x"}` | `{"ok":true}`; unknown: "no server named x" |
+| `connectors` | `{"op":"connectors","q":"","cursor":null,"kind":"remote","category":"all"}` | `{"ok":true,"restricted":false,"featured":[entry],"entries":[entry],"next":"<cursor>|null","stale":false,"error":null}`; entry `{id,title,description,version,website,publisher,category,featured,trust,kind,remotes:[{url,headers:[{name,description,secret,required,value?}]}]}`; restricted: `{"restricted":true,"message":...,"entries":[]}`. Same data as `GET /api/connectors?q=&cursor=&kind=&category=` (docs/MCP.md "Browse connectors") |
+| `connector_preview` | `{"op":"connector_preview","id":"com.x/y","kind":"remote","name":"x","url":"optional","headers":{"Authorization":"..."}}` | `{"ok":true,"name","target","tools":[..],"trust","notice"}`; tries the server, saves nothing; restricted: refused |
+| `connector_add` / `connector_cancel` | `{"op":"connector_add","name":"x"}` | saves what was tried (`{"ok":true,"message"}`) / drops it |
+| `connector_accept_change` | `{"op":"connector_accept_change","name":"x"}` | uses the new address a connector's registry entry lists (`mcp_list` items then carry `registry` and `address_changed`) |
 
 ### 4.5 Computer relay op
 

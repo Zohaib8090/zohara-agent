@@ -77,7 +77,20 @@ val ZoJson: Json = Json {
 @Serializable data class ScheduledResp(val tasks: List<ScheduledTask> = emptyList())
 @Serializable data class Machine(val name: String, val host: String = "", val user: String = "", val port: Int = 22, val note: String = "", val hasKey: Boolean = false)
 @Serializable data class MachinesResp(val machines: List<Machine> = emptyList())
-@Serializable data class McpServer(val name: String, val command: String = "", val enabled: Boolean = true)
+@Serializable data class McpServer(val name: String, val command: String = "", val enabled: Boolean = true, val held: Boolean = false, val registry: String? = null, val addressChanged: String? = null)
+// ---- connectors directory (docs/MCP.md "Browse connectors"): `connectors` op and the connector_* ops ----
+@Serializable data class ConnectorHeader(val name: String, val description: String = "", val secret: Boolean = false, val required: Boolean = false, val value: String? = null)
+@Serializable data class ConnectorRemote(val url: String, val headers: List<ConnectorHeader> = emptyList())
+@Serializable data class ConnectorEntry(
+  val id: String, val title: String = "", val description: String = "", val version: String = "", val website: String? = null,
+  val publisher: String = "", val category: String = "other", val featured: Boolean = false, val trust: String = "", val kind: String = "remote",
+  val remotes: List<ConnectorRemote> = emptyList(),
+)
+@Serializable data class ConnectorsResp(
+  val restricted: Boolean = false, val message: String = "", val entries: List<ConnectorEntry> = emptyList(), val featured: List<ConnectorEntry> = emptyList(),
+  val next: String? = null, val stale: Boolean = false, val error: String? = null,
+)
+@Serializable data class ConnectorPreview(val id: String = "", val name: String, val kind: String = "remote", val target: String = "", val tools: List<String> = emptyList(), val publisher: String = "", val trust: String = "", val notice: String = "")
 @Serializable data class McpResp(val servers: List<McpServer> = emptyList())
 
 // ---- account ----

@@ -43,6 +43,18 @@ pub struct ServerConfig {
     /// When a remote server (an address) was added or changed (ms); the sync compares it between computers. Set by `save_servers`.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub updated: u64,
+    /// Added from the connectors directory: the id the registry gives it (`com.notion/mcp`). Never synced. Servers with an id are only
+    /// ever connected to at a public address (`connect_http`), and the directory is asked now and then whether the address changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry: Option<String>,
+    /// The registry now lists another address than the one saved (`registry` servers only). The server is held until the person
+    /// decides (`connectors::accept_change`, or the switch, which keeps the old address). Never synced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address_changed: Option<String>,
+    /// Names of headers whose values are in the key store, not in this file (a key typed into the connector form): they are added
+    /// to every request. Never synced.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_headers: Vec<String>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -177,6 +189,9 @@ pub fn import_json(text: &str) -> Result<Vec<ServerConfig>, String> {
             scope: oauth["scopes"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" ")).or_else(|| oauth["scope"].as_str().map(str::to_string)),
             held: false,
             updated: 0,
+            registry: None,
+            address_changed: None,
+            secret_headers: Vec::new(),
         })
     };
     let mut out = Vec::new();
@@ -263,6 +278,23 @@ pub fn token_id(server: &str) -> String {
     format!("mcp-{}", clean_name(server))
 }
 
+/// The keyring id under which the value of one of a remote server's headers is kept (`ServerConfig::secret_headers`).
+pub fn header_id(server: &str, header: &str) -> String {
+    format!("mcp-{}-header-{}", clean_name(server), header.trim().to_ascii_lowercase())
+}
+
+/// Forgets everything a server left in the key store: its access token or sign-in and its secret header values.
+pub fn clear_secrets(cfg: &ServerConfig) {
+    crate::ai::keys::clear(&token_id(&cfg.name));
+    for h in &cfg.secret_headers {
+        crate::ai::keys::clear(&header_id(&cfg.name, h));
+    }
+}
+
+/// Lets the tests of this crate reach a fake server on this computer from a server that came from the directory.
+#[cfg(test)]
+pub(crate) static TEST_ALLOW_PRIVATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The reply of a streamable-HTTP server is either one JSON document or an event stream; this finds the answer to `id`.
 fn answer_in(body: &str, is_stream: bool, id: u64) -> Option<Value> {
     let matches = |v: &Value| v["id"] == json!(id);
@@ -340,8 +372,20 @@ impl Connection {
             saved = Some(fresh);
         }
         let token = saved.as_ref().map(|s| s.access.clone()).or(stored);
-        let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(10)).build();
-        let mk = |url: String| Connection { server: cfg.name.clone(), t: Transport::Http { url, agent: agent.clone(), token: token.clone(), saved: saved.clone(), session: None, headers: cfg.headers.clone(), protocol: None }, next_id: 1, instructions: None, caps: Value::Null };
+        // a server that came from the directory is only reached at a public address (the address checked is the one connected to, no redirect)
+        #[cfg(test)]
+        let from_directory = cfg.registry.is_some() && !TEST_ALLOW_PRIVATE.load(std::sync::atomic::Ordering::SeqCst);
+        #[cfg(not(test))]
+        let from_directory = cfg.registry.is_some();
+        let agent = if from_directory { crate::tools::web::public_agent(Duration::from_secs(10), Duration::from_secs(60)) } else { ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(10)).build() };
+        // header values that live in the key store
+        let mut headers = cfg.headers.clone();
+        for h in &cfg.secret_headers {
+            if let Some(v) = crate::ai::keys::get(&header_id(&cfg.name, h)) {
+                headers.insert(h.clone(), v);
+            }
+        }
+        let mk = |url: String| Connection { server: cfg.name.clone(), t: Transport::Http { url, agent: agent.clone(), token: token.clone(), saved: saved.clone(), session: None, headers: headers.clone(), protocol: None }, next_id: 1, instructions: None, caps: Value::Null };
         let mut c = mk(url.clone());
         match c.handshake() {
             Ok(()) => Ok(c),

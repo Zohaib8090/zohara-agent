@@ -73,7 +73,19 @@ object McpLogic {
 
 /** Connected apps (MCP servers), administrators only. Parity rows: SET-APP-02..05, 07, 09, 10. */
 @Composable
-fun SettingsAppsScreen() = AdminOnly { AppsBody() }
+fun SettingsAppsScreen() {
+  val account = rememberAccount()
+  // a restricted account has no connectors: the page says why (and the directory, which it may look at, says the same)
+  if (account?.restricted != false) RestrictedConnectors() else AppsBody()
+}
+
+@Composable
+private fun RestrictedConnectors() {
+  SettingsPage("Connected apps") {
+    SectionHeader("Connectors")
+    SettingsCard { ActionRow("", ConnectorsLogic.RESTRICTED, divider = false) }
+  }
+}
 
 @Composable
 private fun AppsBody() {
@@ -83,6 +95,7 @@ private fun AppsBody() {
   val load by loader.state.collectAsState()
   var add by remember { mutableStateOf(false) }
   var paste by remember { mutableStateOf(false) }
+  var browse by remember { mutableStateOf(false) }
   var remove by remember { mutableStateOf<McpServer?>(null) }
   SettingsPage("Connected apps") {
     LoadBox(load, { loader.load() }) { servers ->
@@ -90,6 +103,8 @@ private fun AppsBody() {
         servers,
         onToggle = { s, on -> doer.run(onDone = { loader.load() }) { container.api.mcpToggle(s.name, on) } },
         onRemove = { remove = it }, onAdd = { add = true }, onPaste = { paste = true },
+        onBrowse = { browse = true },
+        onAcceptChange = { s -> doer.run(onDone = { loader.load() }) { container.api.connectorAcceptChange(s.name) } },
       )
     }
   }
@@ -101,6 +116,7 @@ private fun AppsBody() {
       msg
     }
   }
+  if (browse) BrowseConnectorsSheet(load.let { (it as? Load.Ready)?.value.orEmpty() }, onDismiss = { browse = false }, onAdded = { loader.load() })
   if (paste) PasteConfigSheet(onDismiss = { paste = false }) { cfg -> val m = container.api.mcpImport(cfg); loader.load(); m }
   remove?.let { s ->
     ConfirmSheet("Remove \"${s.name}\"?", "Zohara Agent stops using this server and forgets its sign-in.", "Remove", { doer.run(onDone = { loader.load() }) { container.api.mcpRemove(s.name) } }, { remove = null })
@@ -108,7 +124,7 @@ private fun AppsBody() {
 }
 
 @Composable
-fun AppsContent(servers: List<McpServer>, onToggle: (McpServer, Boolean) -> Unit, onRemove: (McpServer) -> Unit, onAdd: () -> Unit, onPaste: () -> Unit) {
+fun AppsContent(servers: List<McpServer>, onToggle: (McpServer, Boolean) -> Unit, onRemove: (McpServer) -> Unit, onAdd: () -> Unit, onPaste: () -> Unit, onBrowse: () -> Unit = {}, onAcceptChange: (McpServer) -> Unit = {}) {
   SectionHeader("MCP servers Zohara Agent can use")
   SettingsCard {
     if (servers.isEmpty()) {
@@ -116,8 +132,9 @@ fun AppsContent(servers: List<McpServer>, onToggle: (McpServer, Boolean) -> Unit
     }
     for (s in servers) {
       SettingsRow(
-        s.name, subtitle = s.command,
+        s.name, subtitle = ConnectorsLogic.rowSubtitle(s),
         control = {
+          if (s.addressChanged != null) PillButton("Use the new address", { onAcceptChange(s) })
           ZoIconButton(ZoIcons.Trash, "Remove this server", { onRemove(s) }, tint = ZoTheme.colors.danger, size = 36.dp)
           ZoSwitch(s.enabled, { onToggle(s, it) })
         },
@@ -125,7 +142,7 @@ fun AppsContent(servers: List<McpServer>, onToggle: (McpServer, Boolean) -> Unit
     }
     ActionRow(
       "Add a server", McpLogic.READ_ONLY_TEXT, divider = false,
-      actions = { PrimaryButton("Add server…", onAdd); PillButton("Paste a config…", onPaste) },
+      actions = { PrimaryButton("Browse connectors…", onBrowse); PillButton("Add server…", onAdd); PillButton("Paste a config…", onPaste) },
     )
   }
 }

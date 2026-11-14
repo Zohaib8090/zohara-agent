@@ -59,6 +59,20 @@ pub(crate) fn public_agent(connect: Duration, total: Duration) -> ureq::Agent {
     ureq::AgentBuilder::new().timeout_connect(connect).timeout(total).resolver(PublicOnly).redirects(0).build()
 }
 
+/// Does the host of this https address resolve to public addresses only? (A host with no private address behind it; a name that cannot
+/// be looked up is an error too.) The connection itself is made by `public_agent`, which checks again at connect time.
+pub(crate) fn host_resolves_public(url: &str) -> Result<(), String> {
+    use ureq::Resolver;
+    let rest = url.trim().strip_prefix("https://").ok_or("Only https addresses are used.")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let netloc = if authority.rsplit_once(':').is_some_and(|(_, p)| p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty()) { authority.to_string() } else { format!("{authority}:443") };
+    let addrs = PublicOnly.resolve(&netloc).map_err(|e| if e.kind() == std::io::ErrorKind::PermissionDenied { PRIVATE_MSG.to_string() } else { "That address could not be found: check the host name.".to_string() })?;
+    if addrs.is_empty() {
+        return Err("That address could not be found: check the host name.".into());
+    }
+    Ok(())
+}
+
 /// The address of a model server that a restricted tenant may use: https, a public host name or address, no user name or other
 /// tricks in front of the host, and no spelling of a number that the system would turn into a local address.
 pub(crate) fn public_https_url(url: &str) -> Result<(), String> {

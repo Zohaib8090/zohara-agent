@@ -28,6 +28,7 @@ pub mod uibridge;
 pub mod voice;
 pub mod tools;
 pub mod update;
+pub mod connectors;
 
 pub use policy::{Decision, Mode, Risk};
 pub use tools::{call, definitions, ToolDef};

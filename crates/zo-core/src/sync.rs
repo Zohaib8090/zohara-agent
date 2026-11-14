@@ -642,7 +642,8 @@ pub fn put_doc(kind: &str, id: &str, doc: &Value) -> Result<bool, String> {
                     // address, so none of them may go to the new one. It comes in without them and held until the person
                     // turns it on (and signs in again) on this computer.
                     let name = keep.name.clone();
-                    applying(|| crate::ai::keys::clear(&mcp_client::token_id(&name)));
+                    // (also the header keys typed into a connector form: they are forgotten, and the directory link is dropped)
+                    applying(|| mcp_client::clear_secrets(&keep));
                     s = mcp_client::ServerConfig { name, command: s.command, enabled: s.enabled, held: true, updated: s.updated, ..Default::default() };
                 }
                 all.retain(|x| mcp_id(&x.name) != id);

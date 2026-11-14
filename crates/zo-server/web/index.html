@@ -627,6 +627,18 @@ function netBanner(kind) {
   b.classList.remove("hide");
 }
 const op = (o, extra = {}) => api("/api/op", { op: o, ...extra });
+/* the connectors directory is a plain GET (the server keeps the registry's answer for an hour; this page never asks the registry) */
+async function apiGet(path) {
+  let r;
+  try { r = await fetch(path, { headers: { "X-ZO-Local": "1", Authorization: "Bearer " + await token() } }); }
+  catch { netBanner("offline"); throw new Error("Cannot reach the server."); }
+  let j = {}; try { j = await r.json(); } catch {}
+  if (r.status === 401) { netBanner("unauthorized"); throw new Error(j.error || "Sign in again."); }
+  netBanner(null);
+  if (r.status === 429) throw new Error(limitMsg(r));
+  if (!r.ok || j.ok === false) throw new Error(j.error || ("Error " + r.status));
+  return j;
+}
 function toast(t, ms) { if ([...document.querySelectorAll(".toast")].some(x => x.textContent === t)) return; const d = document.createElement("div"); d.className = "toast"; d.textContent = t; document.body.appendChild(d); setTimeout(() => d.remove(), ms || 2600); }
 
 /* ---------- markdown (headings, lists, quotes, code blocks, bold, italic, links) ---------- */
@@ -2723,9 +2735,17 @@ async function pageGeneral(b) {
   const vh = document.createElement("div"); vh.className = "field-hint"; vh.textContent = "In Chrome and Edge your voice goes to the browser maker's speech service for recognition, not to Zohara Agent's server. Zohara Agent only receives the text you send."; b.appendChild(vh);
 }
 async function pageApps(b) {
-  if (restricted()) { b.innerHTML = `<div class="msg-error">Connected apps are not available on this account.</div>`; return; }
+  if (restricted()) {
+    b.innerHTML = "";
+    b.appendChild(head("Connectors"));
+    const m = document.createElement("div"); m.className = "msg-error"; m.textContent = "Connected apps are not available on this account."; b.appendChild(m);
+    const w = document.createElement("div"); w.className = "note";
+    try { w.textContent = (await apiGet("/api/connectors")).message || ""; } catch { w.textContent = "Accounts on the cloud server get web search, page reading and memory only. Connectors (MCP servers) can run programs and reach your accounts, so they are for the app on your own computer."; }
+    b.appendChild(w); return;
+  }
   const r = await op("mcp_list"); b.innerHTML = "";
   const redo = () => pageApps(b);
+  const browse = btn("Browse connectors…", "primary", () => connectorsBrowse(redo));
   const add = btn("Add server…", "primary", () => {
     const w = document.createElement("div"); w.innerHTML = '<div class="field-label">Name</div><input class="field-input" id="an" placeholder="notes" autocomplete="off"><div class="field-label">Address</div><input class="field-input" id="aa" type="url" placeholder="https://example.com/mcp" autocomplete="off" spellcheck="false"><div class="field-label">Token (optional)</div><input class="field-input" id="at" type="password" autocomplete="off"><div class="field-hint" id="ae">Only servers with a web address. The token is stored on the server and never shown again.</div>';
     const q = i => w.querySelector("#" + i);
@@ -2737,19 +2757,108 @@ async function pageApps(b) {
     const w = document.createElement("div"); w.innerHTML = '<div class="field-label">Config (JSON)</div><textarea class="field-input" rows="8" spellcheck="false" placeholder=\'{"mcpServers": {"name": {"url": "https://…"}}}\'></textarea><div class="field-hint" id="pe">The same format other apps use. Servers that start a program (command) are skipped: they stay on the desktop.</div>'; const t = w.querySelector("textarea");
     const go = btn("Import", "primary", async () => { go.disabled = true; try { const x = await op("mcp_import", { config: t.value }); dlg.close(); toast(x.message || "Imported"); redo(); } catch (e) { w.querySelector("#pe").className = "field-hint bad"; w.querySelector("#pe").textContent = e.message; go.disabled = false; } });
     const dlg = sheet("Paste a config", w, [btn("Cancel", "", () => dlg.close()), go]); t.focus(); });
-  const acts = document.createElement("div"); acts.className = "acts"; acts.append(add, paste);
+  const acts = document.createElement("div"); acts.className = "acts"; acts.append(browse, add, paste);
   b.appendChild(head("MCP servers Zohara Agent can use"));
   const rows = r.servers.map(s => {
     const c = document.createElement("div"); c.className = "acts";
     const sw = document.createElement("input"); sw.type = "checkbox"; sw.className = "switch"; sw.checked = s.enabled; sw.setAttribute("aria-label", "Enable " + s.name);
     sw.onchange = async () => { try { await op("mcp_toggle", { name: s.name, enabled: sw.checked }); toast(s.name + (sw.checked ? " on" : " off")); } catch (e) { sw.checked = !sw.checked; toast(e.message); } };
     const rm = btn("Remove", "danger", () => confirmBox("Remove " + s.name + "?", "Zohara Agent stops using this server. Its saved token is deleted.", "Remove", async () => { try { await op("mcp_remove", { name: s.name }); redo(); } catch (e) { toast(e.message); } }));
+    if (s.address_changed) {
+      const ac = btn("Use the new address", "", async () => { try { toast((await op("connector_accept_change", { name: s.name })).message); redo(); } catch (e) { toast(e.message); } });
+      c.prepend(ac);
+    }
     c.append(sw, rm);
-    return row(s.name, (s.address || s.command || "") + (!s.address && s.command ? " · runs on the desktop" : ""), c);
+    return row(s.name, (s.address || s.command || "") + (!s.address && s.command ? " · runs on the desktop" : "") + (s.address_changed ? " · Address changed: the directory now lists " + s.address_changed + ". It is held until you decide." : ""), c);
   });
   b.appendChild(cardOf(...rows, row(rows.length ? "Add more" : "No servers yet", "Add a server by its web address, or paste a config.", acts)));
   b.insertAdjacentHTML("beforeend", '<div class="note">Servers that run a program on your computer (command or stdio) can only be added and run on the desktop. Remote servers sync from your desktop when you are signed in there. <a href="#" id="toSync2">Open Desktop sync</a></div>');
   $("toSync2").onclick = e => { e.preventDefault(); settingsPage("sync"); };
+}
+/* ---------- Browse connectors (docs/MCP.md): the directory of remote MCP servers, read from the public registry by the server ---------- */
+const CONN_CATS = [["all", "All"], ["dev", "Developer"], ["docs", "Documents"], ["chat", "Chat"], ["data", "Data"], ["finance", "Finance"], ["media", "Media"], ["search", "Search"], ["other", "Other"]];
+function connectorsBrowse(onChange) {
+  const st = { q: "", category: "all", kind: "remote", cursor: null, gen: 0 };
+  const w = document.createElement("div");
+  const intro = document.createElement("div"); intro.className = "field-hint"; intro.textContent = "Connectors are tools from other services that the chat can use. They come from the public MCP registry. Only the ones marked Featured were looked at by Zohara Agent. Every call of a connector still asks you first unless the mode is Bypass.";
+  const bar = document.createElement("div"); bar.className = "acts"; bar.style.margin = "10px 0";
+  const search = document.createElement("input"); search.className = "field-input"; search.type = "search"; search.placeholder = "Search connectors"; search.autocomplete = "off"; search.style.flex = "1 1 160px";
+  const cat = document.createElement("select"); CONN_CATS.forEach(([v, t]) => { const o = document.createElement("option"); o.value = v; o.textContent = t; cat.appendChild(o); });
+  const tRemote = btn("Remote", "primary"), tLocal = btn("Runs on this computer", "");
+  bar.append(search, cat); const tabs = document.createElement("div"); tabs.className = "acts"; tabs.append(tRemote, tLocal);
+  const note = document.createElement("div"); note.className = "field-hint"; note.style.margin = "8px 0";
+  const list = document.createElement("div");
+  const more = btn("Load more", "", () => load(true)); const showMore = on => { more.style.display = on ? "" : "none"; }; showMore(false);
+  w.append(intro, bar, tabs, note, list, more);
+  const sh = sheet("Browse connectors", w, [btn("Close", "", () => { sh.close(); })], true);
+  let added = new Set();
+  const card = (e) => {
+    const c = document.createElement("div"); c.className = "settings-row";
+    const col = document.createElement("div"); col.className = "col";
+    const t = document.createElement("div"); t.className = "pc-name2"; t.textContent = e.title;
+    const m = document.createElement("div"); m.className = "pc-meta2"; m.textContent = e.publisher + " · " + e.trust;
+    const d = document.createElement("div"); d.className = "pc-meta2"; d.textContent = e.description;
+    col.append(t, m, d); c.appendChild(col);
+    const isAdded = added.has(e.id);
+    const a = btn(isAdded ? "Added" : "Add", isAdded ? "" : "primary", () => connectorAdd(e, st.kind, () => { sh.close(); onChange(); }));
+    a.disabled = isAdded || st.kind === "local";
+    if (st.kind === "local") { a.textContent = "On the desktop"; a.title = "Programs that run on a computer are added in the desktop app."; }
+    c.appendChild(a); return c;
+  };
+  async function load(append) {
+    if (!append) { st.cursor = null; st.gen++; list.textContent = ""; }
+    const gen = st.gen; showMore(false); note.textContent = "Loading…";
+    const qs = new URLSearchParams({ kind: st.kind }); if (st.q) qs.set("q", st.q); if (st.category !== "all") qs.set("category", st.category); if (append && st.cursor) qs.set("cursor", st.cursor);
+    try {
+      const [r, mine] = await Promise.all([apiGet("/api/connectors?" + qs), op("mcp_list").catch(() => ({ servers: [] }))]);
+      if (gen !== st.gen) return;
+      added = new Set((mine.servers || []).map(s => s.registry).filter(Boolean));
+      if (r.restricted) { note.textContent = r.message; return; }
+      const all = [...(r.featured || []), ...(r.entries || [])];
+      note.textContent = all.length || list.children.length ? (r.error || "") : (r.error || "Nothing found.");
+      all.forEach(e => list.appendChild(card(e)));
+      st.cursor = r.next || null; showMore(!!st.cursor);
+    } catch (e) { if (gen === st.gen) note.textContent = e.message; }
+  }
+  search.onkeydown = e => { if (e.key === "Enter") { st.q = search.value.trim(); load(false); } };
+  cat.onchange = () => { st.category = cat.value; load(false); };
+  [[tRemote, "remote"], [tLocal, "local"]].forEach(([b, k]) => b.onclick = () => { st.kind = k; tRemote.classList.toggle("primary", k === "remote"); tLocal.classList.toggle("primary", k === "local"); load(false); });
+  load(false);
+}
+/* the Add steps: try it (its tools are listed), then save what was tried */
+function connectorAdd(e, kind, done) {
+  const w = document.createElement("div");
+  const meta = document.createElement("div"); meta.className = "pc-meta"; meta.textContent = e.publisher + " · " + e.trust; w.appendChild(meta);
+  const lab = (t) => { const l = document.createElement("div"); l.className = "field-label"; l.textContent = t; return l; };
+  const name = document.createElement("input"); name.className = "field-input"; name.autocomplete = "off"; name.value = (e.id.split("/")[1] || "connector").replace(/[^A-Za-z0-9_-]/g, "-");
+  w.append(lab("Name"), name);
+  let pick = null; const asks = [];
+  const remotes = e.remotes || [];
+  if (remotes.length > 1) { pick = document.createElement("select"); remotes.forEach(r => { const o = document.createElement("option"); o.textContent = r.url; pick.appendChild(o); }); w.append(lab("Address"), pick); }
+  else if (remotes[0]) { const a = document.createElement("div"); a.className = "field-hint"; a.textContent = "Address: " + remotes[0].url; w.appendChild(a); }
+  ((remotes[0] && remotes[0].headers) || []).filter(h => h.value === undefined).forEach(h => {
+    const i = document.createElement("input"); i.className = "field-input"; i.type = h.secret ? "password" : "text"; i.autocomplete = "off"; i.spellcheck = false;
+    w.append(lab("Header " + h.name + (h.required ? " (needed)" : "")), i);
+    if (h.description) { const d = document.createElement("div"); d.className = "field-hint"; d.textContent = h.description; w.appendChild(d); }
+    asks.push([h.name, i]);
+  });
+  const st = document.createElement("div"); st.className = "field-hint"; st.textContent = "It is tried first. The tools it offers are listed before it is saved."; w.appendChild(st);
+  let tried = null;
+  const go = btn("Try it", "primary", async () => {
+    go.disabled = true;
+    try {
+      if (tried) { const x = await op("connector_add", { name: tried }); tried = null; dlg.close(); toast(x.message || "Added", 4000); done(); return; }
+      const headers = {}; asks.forEach(([n, i]) => { if (i.value.trim()) headers[n] = i.value; });
+      const body = { id: e.id, kind, name: name.value.trim(), headers }; if (pick) body.url = remotes[pick.selectedIndex].url;
+      st.className = "field-hint"; st.textContent = "Trying it…";
+      const p = await op("connector_preview", body);
+      tried = p.name; st.className = "field-hint ok"; st.textContent = "It works. It offers these tools: " + (p.tools.length ? p.tools.join(", ") : "none") + ". " + p.notice;
+      go.textContent = "Add connector"; name.disabled = true;
+    } catch (x) { st.className = "field-hint bad"; st.textContent = x.message; }
+    go.disabled = false;
+  });
+  const cancel = btn("Cancel", "", () => { if (tried) op("connector_cancel", { name: tried }).catch(() => {}); dlg.close(); });
+  const dlg = sheet("Add " + e.title, w, [cancel, go]);
 }
 async function pageMachines(b) {
   const r = await op("machines"); b.innerHTML = "";

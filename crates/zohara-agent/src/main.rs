@@ -11,6 +11,7 @@ use zo_core::store::chats;
 use zo_core::store::artifacts;
 use zo_core::store::schedules;
 mod composer;
+mod connectors_ui;
 mod dock;
 mod markdown;
 mod modelpick;
