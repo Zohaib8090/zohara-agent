@@ -30,6 +30,7 @@
 mod account;
 mod auth;
 mod claude_api;
+mod cloudrun;
 mod db;
 mod devicelogin;
 mod devices;
@@ -135,7 +136,7 @@ pub fn route_of(method: &Method, path: &str) -> Option<Route> {
     }
     match path {
         "/api/op" => Some(Route::Op),
-        "/api/send" => Some(Route::Send),
+        "/api/send" | "/api/schedule/test" => Some(Route::Send),
         "/api/reply" => Some(Route::Reply),
         "/api/sync/manifest" | "/api/sync/get" | "/api/sync/put" | "/api/sync/delete" => Some(Route::Sync),
         "/api/auth/device_start" => Some(Route::DeviceStart),
@@ -503,7 +504,7 @@ fn op(v: &Value) -> Result<Value, String> {
 
 /// Sends a message and passes the answer on as it is written: one JSON object per line. The lease and the permit are held until
 /// the answer is over, so a deleted account waits for it and the limits count it.
-fn send(app: &Arc<App>, req: Request, v: Value, lease: Lease, tenant: zo_core::tenant::Tenant) {
+fn send(app: &Arc<App>, req: Request, v: Value, lease: Lease, tenant: zo_core::tenant::Tenant, service_op: &str) {
     let permit = match lease.permit_send() {
         Ok(p) => p,
         Err(r) => return fail(app, req, r.into()),
@@ -512,7 +513,7 @@ fn send(app: &Arc<App>, req: Request, v: Value, lease: Lease, tenant: zo_core::t
     // to notify; for everybody else the field is dropped and a closed connection stops the answer as before.
     let keep = v.get("keep_running").and_then(Value::as_bool) == Some(true) && app.push.has_any(&tenant.id);
     let mut v = for_service(v, &tenant);
-    v["op"] = json!("send");
+    v["op"] = json!(service_op);
     if let Some(o) = v.as_object_mut() {
         o.remove("keep_running");
         if keep {
@@ -763,11 +764,13 @@ fn route(app: Arc<App>, mut req: Request) {
     }
     match r {
         // "target": "desktop": the message runs on the person's own computer through the desktop link
-        Route::Send if v.get("target").and_then(Value::as_str) == Some("desktop") => {
+        Route::Send if path != "/api/schedule/test" && v.get("target").and_then(Value::as_str) == Some("desktop") => {
             drop(lease); // the relay may take an hour: it keeps no place of the person's, deleting the account ends it
             link::send_http(&app, req, v, &who)
         }
-        Route::Send => send(&app, req, v, lease, tenant),
+        // "Test" of a scheduled task streams like a message (docs/SCHEDULED.md): the same lease, place and approvals
+        Route::Send if path == "/api/schedule/test" => send(&app, req, v, lease, tenant, "schedule_test"),
+        Route::Send => send(&app, req, v, lease, tenant, "send"),
         Route::Sync => match sync_api::handle(&path, &v, &tenant, matches!(who.cred, Cred::Device { scope: Scope::Sync, .. })) {
             Ok(r) => reply(&app, req, 200, r),
             Err(e) => reply(&app, req, 400, json!({"ok": false, "error": e})),
@@ -829,7 +832,13 @@ fn route(app: Arc<App>, mut req: Request) {
             } else {
                 None
             };
-            match op(&for_service(v, &tenant)) {
+            // a change to the person's scheduled tasks: the cloud runner looks again at when they are next due
+            let scheduled = v.get("op").and_then(Value::as_str).is_some_and(|o| o == "scheduled" || o.starts_with("schedule_"));
+            let r = op(&for_service(v, &tenant));
+            if scheduled {
+                cloudrun::refresh(&app, &tenant);
+            }
+            match r {
                 Ok(r) => reply(&app, req, 200, r),
                 Err(e) => reply(&app, req, 502, json!({"ok": false, "error": e})),
             }
@@ -1071,6 +1080,8 @@ fn main() {
             a.term.sweep();
         });
     }
+    // scheduled tasks that run on the server (cloudrun.rs)
+    cloudrun::start(&app);
     serve(app, server);
 }
 

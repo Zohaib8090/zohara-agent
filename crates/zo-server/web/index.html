@@ -235,6 +235,7 @@ svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;stroke
 .pc-icon{background:var(--user);border-radius:8px;padding:9px;color:var(--text3);display:flex}.pc-icon svg{width:18px;height:18px}
 .pc-name{font-size:15px}.pc-meta{font-size:13px;color:var(--dim)}.pc-col{flex:1;min-width:0}
 .pc-col>*{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sch-card .pc-col>*{white-space:normal;overflow-wrap:anywhere}.sch-card .sch-last{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .search-input{width:100%;background:var(--card);color:var(--text);border:1px solid var(--line2);border-radius:12px;padding:10px 14px;font-size:15px;outline:none;margin-bottom:14px}
 .search-input:focus{border-color:var(--dimmer)}
 
@@ -2069,13 +2070,185 @@ async function showArtifacts() {
       b.appendChild(d); });
   } catch (e) { b.innerHTML = `<div class="msg-error">${esc(e.message)}</div>`; }
 }
+/* ===== SCHEDULED-BEGIN: scheduled tasks (docs/SCHEDULED.md). A task is something Zohara Agent does later, once or on a repeat. Kinds: task, reminder
+   (a notification only), browser task. On the web the tasks run on the cloud server (even when your computer is off); restricted accounts have
+   reminders and web search tasks with limits. The list shows next run and last result; each task has Test, Run now, History, Edit and on/off. ===== */
+Object.assign(P, {
+  play: '<path d="M8 5v14l11-7z"/>', hist: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  flask: '<path d="M9 3h6M10 3v6l-5 9a2 2 0 002 3h10a2 2 0 002-3l-5-9V3"/><path d="M7.5 15h9"/>'
+});
+const SCH_KINDS = [["task", "Task"], ["reminder", "Reminder (a notification only)"], ["browser", "Browser task (asks first)"]];
+const SCH_REPEATS = [["", "As the words say"], ["once", "Once"], ["hourly", "Every hour"], ["daily", "Every day"], ["weekdays", "Every weekday"], ["weekly", "Every week"], ["monthly", "Every month"]];
+const schTz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { return ""; } };
+const schKind = k => (SCH_KINDS.find(x => x[0] === k) || SCH_KINDS[0])[1].split(" (")[0];
+const schRepeat = r => (SCH_REPEATS.find(x => x[0] === r && r) || [0, r ? r[0].toUpperCase() + r.slice(1) : ""])[1];
+const schAgo = ms => { const s = Math.max(0, (Date.now() - ms) / 1000); return s < 60 ? "just now" : s < 3600 ? Math.floor(s / 60) + " min ago" : s < 86400 ? Math.floor(s / 3600) + " h ago" : Math.floor(s / 86400) + " d ago"; };
+let schInfo = null; /* the last list: where tasks can run, the kinds and the limits of this account */
+let schTimer = 0;
+
 async function showScheduled() {
-  setNav("scheduled"); setTitle("Scheduled"); const b = pageBox("Scheduled");
-  try { const r = await op("scheduled"); if (!r.tasks.length) return b.innerHTML = empty("Nothing scheduled", "Ask Zohara Agent in a chat to do something later or on repeat.");
-    r.tasks.forEach(t => { const d = document.createElement("div"); d.className = "card project-card"; d.innerHTML = `<div class="pc-icon">${icon("alarm")}</div><div class="pc-col"><div class="pc-name"></div><div class="pc-meta"></div></div><button class="icon-btn" title="Cancel this task" data-i="trash"></button>`; d.querySelector(".pc-name").textContent = t.title || t.prompt; d.querySelector(".pc-meta").textContent = (t.repeat ? t.repeat + " · " : "") + "next " + when(t.next_run); paint(d);
-      d.querySelector("button").onclick = () => confirmBox("Cancel this task?", "It will not run again.", "Cancel task", async () => { await op("schedule_cancel", { id: t.id }); showScheduled(); }); b.appendChild(d); });
+  setNav("scheduled"); setTitle("Scheduled");
+  const nb = document.createElement("button"); nb.className = "page-btn primary"; nb.textContent = "New task"; nb.onclick = () => schForm(null);
+  const b = pageBox("Scheduled", [nb]); b.id = "pbody";
+  clearTimeout(schTimer);
+  try {
+    const r = await op("scheduled"); schInfo = r;
+    if (!r.tasks.length) { b.innerHTML = empty("Nothing scheduled", "Ask Zohara Agent in a chat to do something later or on repeat (for example \"every weekday at 9, remind me to stand up\"), or press New task.") + '<div class="pc-meta" style="margin-top:10px;text-align:center">' + esc(schPlaceNote(r)) + "</div>"; return; }
+    const note = document.createElement("div"); note.className = "pc-meta"; note.style.margin = "0 2px 10px"; note.textContent = schPlaceNote(r); b.appendChild(note);
+    r.tasks.forEach(t => b.appendChild(schCard(t)));
+    /* a run that is going on: look again in a few seconds so the result shows */
+    if (r.tasks.some(t => t.running)) schTimer = setTimeout(() => { if ($("pbody") === b && document.querySelector('[data-nav="scheduled"].active, .nav-item.active[data-nav="scheduled"]')) showScheduled(); }, 4000);
   } catch (e) { b.innerHTML = `<div class="msg-error">${esc(e.message)}</div>`; }
 }
+function schPlaceNote(r) {
+  const cloud = r.host === "cloud";
+  return cloud ? "These tasks run on the Zohara Agent server, so they run even when your computer is off." + (restricted() ? " This account has reminders and web search tasks, with limits (" + (r.limits ? r.limits.max_tasks + " tasks, at most every " + r.limits.min_repeat_minutes + " minutes" : "") + ")." : "")
+    : "These tasks run on this computer while Zohara Agent is running.";
+}
+function schCard(t) {
+  const d = document.createElement("div"); d.className = "card project-card sch-card"; d.style.cursor = "default"; d.style.flexWrap = "wrap";
+  const late = t.enabled && !t.running && t.next_run + 300000 < Date.now();
+  const line = t.running ? "Running now" : t.enabled ? "Next " + when(t.next_run) + (late ? " (missed, runs once soon)" : "") : "Off";
+  d.innerHTML = `<div class="pc-icon">${icon(t.kind === "reminder" ? "alarm" : "list")}</div><div class="pc-col"><div class="pc-name"></div><div class="pc-meta"></div><div class="pc-meta sch-last"></div></div><input type="checkbox" class="switch" title="On or off" aria-label="On or off"><div class="sch-btns" style="display:flex;gap:2px;width:100%;justify-content:flex-end;flex-wrap:wrap"></div>`;
+  d.querySelector(".pc-name").textContent = t.title || t.prompt;
+  d.querySelector(".pc-meta").textContent = [line, schRepeat(t.repeat), schKind(t.kind), t.place].filter(Boolean).join(" · ");
+  const last = d.querySelector(".sch-last");
+  if (t.last_status && t.last_run) { last.textContent = "Last run: " + t.last_status + " " + schAgo(t.last_run) + (t.last_output ? " — " + t.last_output : ""); if (t.last_status !== "ok") last.style.color = "var(--danger)"; } else last.remove();
+  const sw = d.querySelector(".switch"); sw.checked = !!t.enabled;
+  sw.onchange = async () => { try { await op("schedule_enable", { id: t.id, on: sw.checked }); } catch (e) { toast(e.message); } showScheduled(); };
+  const bar = d.querySelector(".sch-btns");
+  const add = (ic, tip, fn) => { const x = document.createElement("button"); x.className = "icon-btn"; x.title = tip; x.setAttribute("aria-label", tip); x.dataset.i = ic; x.onclick = fn; bar.appendChild(x); return x; };
+  if (t.last_chat) add("chat", "Open the last result", () => openChat(t.last_chat));
+  add("flask", "Test: run it once now without changing its schedule", () => schTest({ id: t.id }, t.title || t.prompt));
+  const run = add("play", t.running ? "It is running now" : "Run it now", async () => { run.disabled = true; try { await op("schedule_run_now", { id: t.id }); toast("Started. The result shows here and as a notification."); } catch (e) { toast(e.message); } setTimeout(showScheduled, 600); });
+  if (t.running) run.disabled = true;
+  add("hist", "History: the last runs", () => schHistory(t));
+  add("edit", "Edit", () => schForm(t));
+  add("trash", "Remove", () => confirmBox("Remove this task?", "It will not run again.", "Remove", async () => { try { await op("schedule_cancel", { id: t.id }); } catch (e) { toast(e.message); } showScheduled(); }));
+  paint(d); return d;
+}
+async function schHistory(t) {
+  const box = document.createElement("div"); box.innerHTML = '<div class="pc-meta">Loading…</div>';
+  const sh = sheet("History: " + (t.title || t.prompt), box, [btn("Close", "primary", () => sh.close())], true);
+  try {
+    const r = await op("schedule_history", { id: t.id }); box.innerHTML = "";
+    if (!r.history.length) box.innerHTML = '<div class="pc-meta">It has not run yet.</div>';
+    r.history.forEach(h => {
+      const row = document.createElement("div"); row.className = "card"; row.style.cssText = "padding:10px 12px;margin-bottom:8px;display:flex;gap:10px;align-items:flex-start";
+      row.innerHTML = '<div class="pc-col" style="white-space:normal"><div class="pc-name2"></div><div class="pc-meta" style="white-space:normal"></div></div>';
+      row.querySelector(".pc-name2").textContent = h.status + " · " + when(h.time) + (h.missed ? " · missed " + when(h.missed) : "") + " · " + Math.round((h.ms || 0) / 1000) + " s" + (h.how === "manual" ? " · Run now" : "");
+      row.querySelector(".pc-meta").textContent = h.summary || "";
+      if (h.chat) { const o = btn("Open chat", "", () => { sh.close(); openChat(h.chat); }); row.appendChild(o); }
+      box.appendChild(row);
+    });
+  } catch (e) { box.innerHTML = `<div class="msg-error">${esc(e.message)}</div>`; }
+}
+/* Test: runs the task once now in test mode (a chat called "Test: ..."; its schedule, last run and history are not changed; every change still asks
+   first) and shows the output as it comes, then a result card: what it did, the answer, tools, time, success or failed. */
+async function schTest(payload, title) {
+  const box = document.createElement("div");
+  box.innerHTML = '<div class="field-hint" style="margin:0 0 8px"></div><div class="pc-meta sch-log" style="white-space:pre-wrap;overflow-wrap:anywhere"></div><div class="sch-ans" style="white-space:pre-wrap;overflow-wrap:anywhere;margin-top:8px"></div><div class="sch-ask"></div><div class="sch-res"></div>';
+  const hint = box.children[0], log = box.children[1], ans = box.children[2], asks = box.children[3], res = box.children[4];
+  hint.textContent = "It runs once now. Its schedule is not changed, and anything that changes something still asks first.";
+  const ctrl = new AbortController(); let stream = 0, over = false;
+  const stop = btn("Stop", "", () => { if (stream) api("/api/reply", { stream, op: "stop" }).catch(() => {}); stop.disabled = true; });
+  const sh = sheet("Test: " + title, box, [stop, btn("Close", "primary", () => { ctrl.abort(); sh.close(); })], true);
+  const closeOrig = sh.close; sh.close = () => { ctrl.abort(); closeOrig(); };
+  log.textContent = "Starting…";
+  const addLog = s => { log.textContent = (log.textContent === "Starting…" ? "" : log.textContent + "\n") + s; };
+  const fin = () => { over = true; stop.style.display = "none"; };
+  try {
+    const r = await fetch("/api/schedule/test", { method: "POST", signal: ctrl.signal, headers: { "Content-Type": "application/json", "X-ZO-Local": "1", Authorization: "Bearer " + await token() }, body: JSON.stringify({ ...payload, tz: schTz() }) });
+    if (!r.ok || !r.body) { let j = {}; try { j = await r.json(); } catch {} throw new Error(j.error || "Error " + r.status); }
+    const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "", acc = "";
+    for (;;) {
+      const { value, done } = await rd.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i; while ((i = buf.indexOf("\n")) >= 0) {
+        const l = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!l) continue;
+        let ev; try { ev = JSON.parse(l); } catch { continue; }
+        switch (ev.event) {
+          case "stream": stream = ev.id; break;
+          case "test": addLog("Test of a " + (ev.kind || "task") + ", on " + (ev.place || "this computer")); break;
+          case "delta": acc += ev.text; ans.textContent = acc; break;
+          case "text": if (!acc) { acc = ev.text; ans.textContent = acc; } break;
+          case "tool_start": addLog("▸ " + String(ev.summary || ev.name).split("\n").slice(0, 2).join(" ")); acc = ""; break;
+          case "tool_done": addLog((ev.ok ? "✓ " : "✗ ") + String(ev.output || "").slice(0, 200)); break;
+          case "approval": {
+            const d = document.createElement("div"); d.className = "ask"; d.style.marginTop = "8px";
+            d.innerHTML = `<div>Zohara Agent wants to: ${esc(ev.summary || ev.tool)}</div><div class="row"><button class="btn primary">Allow</button><button class="btn">Deny</button></div>`;
+            asks.appendChild(d); const [yes, no] = d.querySelectorAll("button");
+            const answer = ok => { api("/api/reply", { stream, op: "approve", id: ev.id, yes: ok }).catch(() => {}); d.innerHTML = `<span class="pc-meta">${ok ? "Allowed" : "Denied"}: ${esc(ev.summary || ev.tool)}</span>`; };
+            yes.onclick = () => answer(true); no.onclick = () => answer(false); break;
+          }
+          case "notify": if (ev.kind === "reminder") { const n = document.createElement("div"); n.className = "card"; n.style.cssText = "padding:10px 12px;margin-top:8px"; n.innerHTML = '<div class="pc-meta">The notification:</div><div class="pc-name2"></div><div class="pc-meta"></div>'; n.children[1].textContent = ev.title; n.children[2].textContent = ev.body; res.appendChild(n); } break;
+          case "result": {
+            const x = ev.result || {}, c = document.createElement("div"); c.className = "card"; c.style.cssText = "padding:10px 12px;margin-top:8px";
+            c.innerHTML = '<div class="pc-name2"></div><div class="pc-meta" style="white-space:normal"></div>';
+            c.children[0].textContent = (x.ok ? "Success" : x.status === "skipped" ? "Could not start" : "Failed") + " · " + ((x.ms || 0) / 1000).toFixed(1) + " s · " + (x.tools && x.tools.length ? "tools: " + x.tools.join(", ") : "no tools used");
+            if (!x.ok) c.children[0].style.color = "var(--danger)";
+            c.children[1].textContent = (x.summary || "") + (x.chat ? "\n\nThe run is saved as a chat called \"Test: ...\"." : "");
+            c.children[1].style.whiteSpace = "pre-wrap"; ans.textContent = ""; res.appendChild(c); break;
+          }
+          case "error": { const m = document.createElement("div"); m.className = "msg-error"; m.textContent = ev.message || ev.error; res.appendChild(m); break; }
+          case "done": fin(); break;
+        }
+      }
+    }
+  } catch (e) { if (e.name !== "AbortError") { const m = document.createElement("div"); m.className = "msg-error"; m.textContent = e.message; res.appendChild(m); } }
+  if (log.textContent === "Starting…") log.textContent = "";
+  fin();
+}
+/* the New / Edit form: kind, what, name, when (plain words), repeat, where it runs, the next runs, Test */
+function schForm(t) {
+  const info = schInfo || {}, editing = !!t, cur = t || {};
+  const kinds = SCH_KINDS.filter(k => !info.kinds || info.kinds.includes(k[0]));
+  const places = info.run_on && info.run_on.length ? info.run_on : [{ id: "", label: "This computer", note: "" }];
+  const w = document.createElement("div");
+  w.innerHTML = `<div class="field-label" style="margin-top:0">Kind</div><select id="sk"></select>
+    <div class="field-label" id="swl">What should Zohara Agent do?</div><textarea class="field-input" id="sw" rows="3" maxlength="8000" placeholder="e.g. check my disk space and tell me if it is above 90%"></textarea>
+    <div class="field-label">Name</div><input class="field-input" id="sn" maxlength="120" placeholder="a short name for the list (optional)">
+    <div class="field-label">When</div><input class="field-input" id="st" autocomplete="off">
+    <div class="field-label">Repeat</div><select id="sr"></select><input class="field-input" id="sc" style="margin-top:8px" placeholder="or your own: every 3 days, every 90 minutes, every 2 months">
+    <div class="field-label">Run on</div><select id="so"></select><div class="field-hint" id="son"></div>
+    <div class="field-hint" id="sp" style="font-size:12.5px;color:var(--dim)"></div><div class="msg-error" id="se"></div>`;
+  const q = s => w.querySelector(s);
+  kinds.forEach(k => q("#sk").add(new Option(k[1], k[0]))); q("#sk").value = kinds.some(k => k[0] === cur.kind) ? cur.kind : "task";
+  SCH_REPEATS.forEach(r => q("#sr").add(new Option(r[1], r[0])));
+  if (cur.repeat && SCH_REPEATS.some(r => r[0] === cur.repeat)) q("#sr").value = cur.repeat; else if (cur.repeat) q("#sc").value = cur.repeat;
+  places.forEach(p => q("#so").add(new Option(p.label, p.id))); q("#so").value = places.some(p => p.id === cur.run_on) ? cur.run_on : places[0].id;
+  q("#sw").value = cur.prompt || ""; q("#sn").value = cur.title || ""; q("#st").placeholder = editing ? "leave empty to keep the time" : "tomorrow 9am, in 2 hours, every weekday at 9, on the 1st of each month";
+  const note = () => { const p = places.find(x => x.id === q("#so").value); q("#son").textContent = p ? p.note || "" : ""; q("#swl").textContent = q("#sk").value === "reminder" ? "What should the reminder say?" : "What should Zohara Agent do?"; };
+  const base = () => editing ? "next run: " + when(cur.next_run) : "";
+  let tm = 0, seq = 0;
+  const preview = () => {
+    note(); clearTimeout(tm); const v = q("#st").value.trim(); if (!v) { q("#sp").textContent = base(); return; }
+    tm = setTimeout(async () => {
+      const my = ++seq; try { const r = await op("schedule_preview", { when: v, repeat: q("#sc").value.trim() || q("#sr").value, tz: schTz() }); if (my === seq) { q("#sp").textContent = r.text; q("#sp").style.color = ""; } }
+      catch (e) { if (my === seq) { q("#sp").textContent = "I can't use that time yet: " + e.message; q("#sp").style.color = "var(--danger)"; } }
+    }, 250);
+  };
+  ["#st", "#sc"].forEach(s => q(s).addEventListener("input", preview)); ["#sr", "#sk", "#so"].forEach(s => q(s).addEventListener("change", preview)); preview();
+  const fields = () => ({ kind: q("#sk").value, task: q("#sw").value.trim(), title: q("#sn").value.trim(), run_on: q("#so").value });
+  let sh;
+  const test = btn("Test", "", () => {
+    const f = fields(); q("#se").textContent = ""; if (!f.task) return q("#se").textContent = "Say what the task is.";
+    schTest({ draft: f }, f.title || f.task.slice(0, 40));
+  });
+  test.title = "Run it once now without saving or changing anything";
+  const save = btn(editing ? "Save" : "Create task", "primary", async () => {
+    const f = fields(), when1 = q("#st").value.trim(); q("#se").textContent = "";
+    if (!f.task) return q("#se").textContent = "Say what the task is.";
+    if (!editing && !when1) return q("#se").textContent = "Say when, for example \"tomorrow 9am\" or \"every weekday at 9\".";
+    const body = { ...f, tz: schTz() }; if (when1) body.when = when1;
+    const rep = q("#sc").value.trim() || q("#sr").value; if (rep) body.repeat = rep;
+    save.disabled = true;
+    try { await op(editing ? "schedule_update" : "schedule_add", editing ? { id: cur.id, ...body } : body); sh.close(); showScheduled(); }
+    catch (e) { q("#se").textContent = e.message; save.disabled = false; }
+  });
+  sh = sheet(editing ? "Edit scheduled task" : "New scheduled task", w, [btn("Cancel", "", () => sh.close()), test, save]);
+}
+/* ===== SCHEDULED-END ===== */
 
 /* ===== CLAUDE-LOGIN-BEGIN: one-click Claude Code login. The person sees steps (a link, a place for the code, a status), never a token. =====
    On the cloud server the server runs Claude's own sign-in for them (/api/claude/*, see claude_api.rs); on My computer a terminal opens there
@@ -3376,7 +3549,7 @@ async function start(u, agreed) {
   paint(); 
   /* only a refusal (401) signs the person out: a network error or a 5xx while the server restarts keeps the page, and the banner says Offline */
   try { acct = await acctOp("whoami"); } catch (e) { acct = null; }
-  document.querySelectorAll('[data-nav="projects"],[data-nav="artifacts"],[data-nav="scheduled"]').forEach(n => n.classList.toggle("hide", restricted()));
+  document.querySelectorAll('[data-nav="projects"],[data-nav="artifacts"]').forEach(n => n.classList.toggle("hide", restricted())); /* Scheduled is for everybody: reminders and web search tasks on the server */
   try { await op("status"); } catch (e) { if (!NOAUTH && e.status === 401) { $("app").classList.add("hide"); $("login").classList.remove("hide"); $("err").textContent = e.message; signOut(auth); return; } }
   showHome(); refreshChats(); actFetch(); noteReady();
   nativeAfterStart(u);

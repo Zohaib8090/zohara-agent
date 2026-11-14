@@ -7,7 +7,12 @@ import org.zohara.agent.core.net.ApiException
 import org.zohara.agent.core.net.ArtifactItem
 import org.zohara.agent.core.net.ChatDetail
 import org.zohara.agent.core.net.ChatSummary
+import org.zohara.agent.core.net.ScheduleRun
+import org.zohara.agent.core.net.ScheduledResp
 import org.zohara.agent.core.net.ScheduledTask
+import org.zohara.agent.core.net.SendEvent
+import kotlinx.coroutines.flow.Flow
+import kotlinx.serialization.json.put
 import org.zohara.agent.core.net.SearchHit
 import org.zohara.agent.core.net.ZoApi
 
@@ -24,6 +29,17 @@ interface PagesApi {
   suspend fun scheduled(): List<ScheduledTask>
   suspend fun scheduleAdd(task: String, whenText: String, repeat: String?): String
   suspend fun scheduleCancel(id: String)
+  // Scheduled v2 (docs/SCHEDULED.md)
+  suspend fun scheduledInfo(): ScheduledResp
+  /** makes a task, or changes the one in [f]`.editId`; [tz] is the phone's time zone */
+  suspend fun scheduleSave(f: TaskForm, tz: String): ScheduledTask?
+  suspend fun scheduleEnable(id: String, on: Boolean): ScheduledTask?
+  suspend fun scheduleRunNow(id: String)
+  suspend fun scheduleHistory(id: String): List<ScheduleRun>
+  /** "next runs: ..." for the form, or an [ApiException] with the sentence when the time cannot be read */
+  suspend fun schedulePreview(f: TaskForm, tz: String): String
+  /** Test: [id] of a saved task, or the form as a draft; the events of the run (SendEvent.Test, Delta, ToolStart, Approval, Notify, Result, Done) */
+  fun scheduleTest(id: String?, f: TaskForm?, tz: String): Flow<SendEvent>
   suspend fun activity(): ActivityResp
   suspend fun activityStop(id: Long)
   suspend fun terminalRun(cmd: String): String
@@ -41,6 +57,25 @@ class ZoPagesApi(private val api: ZoApi) : PagesApi {
   override suspend fun scheduled() = api.scheduled()
   override suspend fun scheduleAdd(task: String, whenText: String, repeat: String?) = api.scheduleAdd(task, whenText, repeat)
   override suspend fun scheduleCancel(id: String) = api.scheduleCancel(id)
+  override suspend fun scheduledInfo() = api.scheduledInfo()
+  override suspend fun scheduleSave(f: TaskForm, tz: String) = api.scheduleSave(
+    f.editId, f.prompt.trim(), f.whenText.takeIf { it.isNotBlank() }, PagesFormat.repeatValue(f.repeatChoice, f.ownInterval).takeIf { it.isNotBlank() },
+    f.title.trim(), f.kind, f.runOn, tz,
+  )
+  override suspend fun scheduleEnable(id: String, on: Boolean) = api.scheduleEnable(id, on)
+  override suspend fun scheduleRunNow(id: String) = api.scheduleRunNow(id)
+  override suspend fun scheduleHistory(id: String) = api.scheduleHistory(id).history
+  override suspend fun schedulePreview(f: TaskForm, tz: String) = api.schedulePreview(f.whenText, PagesFormat.repeatValue(f.repeatChoice, f.ownInterval).takeIf { it.isNotBlank() }, tz).text
+  override fun scheduleTest(id: String?, f: TaskForm?, tz: String): Flow<SendEvent> = api.scheduleTest(
+    id,
+    f?.let {
+      kotlinx.serialization.json.buildJsonObject {
+        put("task", it.prompt.trim()); put("kind", it.kind); put("run_on", it.runOn)
+        if (it.title.isNotBlank()) put("title", it.title.trim())
+      }
+    },
+    tz,
+  )
   override suspend fun activity() = api.activity()
   override suspend fun activityStop(id: Long) = api.activityStop(id)
   override suspend fun terminalRun(cmd: String) = api.terminalRun(cmd)

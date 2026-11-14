@@ -51,6 +51,15 @@ self.addEventListener("push", e => {
     if (wins.some(w => w.focused)) return;
     const chat = typeof d.chat === "string" ? d.chat : "";
     const title = typeof d.title === "string" && d.title ? d.title : "";
+    if (d.type === "task") {
+      /* a scheduled task ended or a reminder is due; the text comes only when the person allowed titles in notifications */
+      const body = typeof d.body === "string" && d.body ? d.body : "";
+      const what = d.reminder ? "A reminder is due" : d.ok === false ? "A scheduled task failed" : "A scheduled task finished";
+      await self.registration.showNotification(title || "Zohara Agent", {
+        body: body || what, tag: "zo-task-" + (chat || title || "x"), icon: "/icons/icon-192.png", data: { chat, task: true },
+      });
+      return;
+    }
     await self.registration.showNotification(title || "Zohara Agent", {
       body: title ? "Zohara Agent: your answer is ready" : "Your answer is ready",
       tag: "zo-chat-" + chat, icon: "/icons/icon-192.png", data: { chat },

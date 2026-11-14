@@ -9,6 +9,7 @@ import org.zohara.agent.core.net.ArtifactItem
 import org.zohara.agent.core.net.ChatEntry
 import org.zohara.agent.core.net.ChatSummary
 import org.zohara.agent.core.net.ClientSeen
+import org.zohara.agent.core.net.ScheduleRun
 import org.zohara.agent.core.net.ScheduledTask
 
 /**
@@ -147,6 +148,35 @@ object PagesFormat {
 
   /** the repeat choices of the New task sheet, label -> value for `schedule_add` */
   val REPEAT_CHOICES = listOf("Once" to "once", "Every hour" to "hourly", "Every day" to "daily", "Every week" to "weekly", "Every month" to "monthly")
+
+  /** the kinds of the New task sheet, label -> value (docs/SCHEDULED.md); the server's list of kinds says which of them this account has */
+  val KIND_CHOICES = listOf("Task" to "task", "Reminder" to "reminder", "Browser task" to "browser")
+  /** the repeat choices of Scheduled v2: "" means "as the time words say" ("every weekday at 9") */
+  val REPEAT_CHOICES_V2 = listOf("As the words say" to "", "Once" to "once", "Every hour" to "hourly", "Every day" to "daily", "Every weekday" to "weekdays", "Every week" to "weekly", "Every month" to "monthly")
+
+  fun taskKindWord(kind: String) = KIND_CHOICES.firstOrNull { it.second == kind }?.first ?: "Task"
+  fun repeatWord(r: String): String = REPEAT_CHOICES_V2.firstOrNull { it.second == r && r.isNotEmpty() }?.first ?: r.replaceFirstChar { it.uppercase() }
+
+  /** the meta line of a task card: "Next: <date> · Every day · Reminder · the cloud server", "Running now · ..." or "Off · ..."; a late task says it runs once soon */
+  fun taskMeta(t: ScheduledTask, now: Long, locale: Locale = Locale.getDefault(), zone: TimeZone = TimeZone.getDefault()): String {
+    val state = when {
+      t.running -> "Running now"
+      t.enabled -> "Next: ${whenText(t.nextRun, locale, zone)}" + if (t.nextRun + 300_000 < now) " (missed, runs once soon)" else ""
+      else -> "Off"
+    }
+    return listOf(state, repeatWord(t.repeat.ifBlank { "once" }), taskKindWord(t.kind), t.place).filter { it.isNotBlank() }.joinToString(" · ")
+  }
+
+  /** "Last run: ok 5 min ago - <what it said>", or null before the first run */
+  fun taskLast(t: ScheduledTask, now: Long, zone: TimeZone = TimeZone.getDefault()): String? {
+    val at = t.lastRun ?: return null
+    val st = t.lastStatus ?: return null
+    return "Last run: $st ${relative(at, now, zone)}" + (t.lastOutput?.takeIf { it.isNotBlank() }?.let { " — $it" } ?: "")
+  }
+
+  /** a line of a task's history: "ok · 5 min ago · missed Nov 14, 9:00 AM · 3 s · Run now" */
+  fun runLine(r: ScheduleRun, now: Long, locale: Locale = Locale.getDefault(), zone: TimeZone = TimeZone.getDefault()): String =
+    listOfNotNull(r.status, relative(r.time, now, zone), r.missed?.let { "missed ${whenText(it, locale, zone)}" }, "${r.ms / 1000} s", if (r.how == "manual") "Run now" else null).joinToString(" · ")
 
   /** the own interval wins over the choice (SCHED-04) */
   fun repeatValue(choice: String, own: String): String = own.trim().ifEmpty { choice }

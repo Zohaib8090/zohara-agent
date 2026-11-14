@@ -276,16 +276,22 @@ limits (2 at once, 8 server-wide): `compact`, `memory_edit`, `personality_genera
 ### 4.4 Projects, artifacts, schedules, machines, MCP (admin only)
 
 For a restricted account every op in this block except `artifacts` answers `{"ok":false,"error":"<refusal>"}` (live): machines "Machines (SSH) are not available to this account."; `mcp_*` "MCP servers are not available to this account.";
-`schedule*` "Scheduled tasks are not available to this account."; `scheduled` and `project*` "Projects and scheduled tasks are not available to this account.".
+`project*` "Projects are not available to this account.". **Scheduled tasks (changed 2026-11-14, Scheduled v2, see `docs/SCHEDULED.md`)** are available to a restricted account too, on the server only: reminders and web search tasks, 5 tasks, repeats of at least 60 minutes, 24 runs a day; the operator's `ZO_CLOUD_TASKS=admins|off` can narrow it, then `scheduled` and `schedule*` answer "Scheduled tasks are not available to this account.".
 
 | Op | Request | Response |
 |---|---|---|
 | `projects` | `{"op":"projects"}` | live: `{"ok":true,"text":"p1794509093697 \| Demo \| g \| 0 memory notes"}` (one line per project: id, name, goal, "N memory notes", separated by vertical bars; none: `"There are no projects."`) |
 | `project_create` | `{"op":"project_create","name":"Demo","goal":"g"}` | live: `{"ok":true,"message":"Created the project \"Demo\" (id p1794509093697). It is on the Projects page."}`; duplicate name: error |
 | `artifacts` | `{"op":"artifacts"}` | live: `{"ok":true,"items":[]}`; items `{id, kind ("code"/"screenshot"/"file"), title, path, text (<= 20,000 characters or null), chat, created}`, at most 100 (code) |
-| `scheduled` | `{"op":"scheduled"}` | live: `{"ok":true,"tasks":[{"id":"t17945090995370","title":"t","prompt":"t","next_run":1794512699000,"repeat":"once","enabled":true}]}` |
-| `schedule_add` | `{"op":"schedule_add","task":"check disk","when":"tomorrow 9am","repeat":"daily","title":"Disk"}` (`repeat`, `title` optional; `repeat` is once, hourly, daily, weekly, monthly or "every 3 days"/"every 90 minutes"/"every 2 months", at least 5 minutes) | live: `{"ok":true,"message":"Scheduled \"t\" for ... (once). It is on the Scheduled page, id t17945090995431."}`. **Known server bug (live)**: `when` is parsed with GNU `date -d`, so `"in 2 hours"` fails with `{"ok":false,"error":"I couldn't read \"in 2 hours\" as a time. Try \"tomorrow 9am\", \"in 2 hours\" or \"2026-11-05 18:30\"."}` while `"now + 1 hour"`, `"tomorrow 9am"`, `"2026-11-20 18:30"` work; the app rewrites a leading "in " to "now + " |
+| `scheduled` | `{"op":"scheduled"}` | `{"ok":true,"tasks":[{"id","title","prompt","next_run","repeat","enabled","kind" (task/reminder/browser),"run_on" ("this"/"cloud"/"machine:<name>"),"tz","day","last_run","last_chat","last_status" (ok/failed/skipped),"last_output","history_count","running","place"}],"host":"cloud","run_on":[{"id","label","note"}],"kinds":["reminder","task"],"limits":{"max_tasks","min_repeat_minutes","runs_per_day","runs_today"},"now"}`; every field after `enabled` is new and optional (an older server gives the first six only) |
+| `schedule_add` | `{"op":"schedule_add","task":"check disk","when":"every weekday at 9","title":"Disk","kind":"task","run_on":"cloud","tz":"Asia/Karachi"}` (`repeat` optional: once, hourly, daily, weekdays, weekly, monthly or "every 3 days"/"every 90 minutes"/"every 2 months"; it wins over a repeat in the words; the account's limits apply) | `{"ok":true,"task":{...},"message":"Scheduled ..."}`. `when` is plain words: "tomorrow 9am", "**in 2 hours**" (works since 2026-11-14; the old "GNU date" bug is fixed on the server, the app still rewrites a leading "in " to "now + " for older servers), "every weekday at 9", "on the 1st of each month" |
+| `schedule_update` | `{"op":"schedule_update","id":"t..","task":"...","kind":"reminder","when":"..."}` (every field optional; no `when` keeps the time) | `{"ok":true,"task":{...}}` |
+| `schedule_enable` | `{"op":"schedule_enable","id":"t..","on":false}` | `{"ok":true,"task":{...}}`; unknown: "That task is gone." |
+| `schedule_run_now` | `{"op":"schedule_run_now","id":"t.."}` | `{"ok":true,"started":true,"task":{...}}`; the run is in the background, its result shows in the task and as a notification |
+| `schedule_history` | `{"op":"schedule_history","id":"t.."}` | `{"ok":true,"task":{...},"history":[{"time","status","summary","chat","ms","missed","how" ("scheduled"/"manual")}]}` (20 at most, newest first) |
+| `schedule_preview` | `{"op":"schedule_preview","when":"every weekday at 9","repeat":"","tz":"Asia/Karachi"}` | `{"ok":true,"repeat":"weekdays","runs":[{"at","label"}],"text":"next run: ..."}`; unreadable time: `{"ok":false,"error":"..."}` |
 | `schedule_cancel` | `{"op":"schedule_cancel","id":"t..."}` | `{"ok":true}`; unknown: "That task is gone." (live) |
+| Test | `POST /api/schedule/test` with `{"id":"t.."}` or `{"draft":{"task","kind","title","run_on"},"tz"}` | an NDJSON stream like `/api/send`: `stream`, `test`, `delta`, `tool_start`, `tool_done`, `approval` (answer with `/api/reply`), `notify`, `result {ok,status,summary,tools,ms,chat}`, `done` |
 | `machines` | `{"op":"machines"}` | live: `{"ok":true,"machines":[]}`; items `{name, host, user, port, note, has_key}` |
 | `machine_add` | `{"op":"machine_add","name":"vm1","host":"203.0.113.7","user":"ubuntu","port":22,"note":"n","key":"-----BEGIN OPENSSH PRIVATE KEY-----\n..."}` | `{"ok":true}`; **the key is required** (live without: `{"ok":false,"error":"Paste the private key that this machine accepts."}`); `port` is a number or a string |
 | `machine_test` | `{"op":"machine_test","name":"vm1"}` | `{"ok":true,"message":"..."}` (code) |
@@ -358,7 +364,7 @@ bodies 1 MB (`/api/op`, `/api/reply`), 14 MB (`/api/send`), 20 MB (sync), arrivi
 ## 11. Notes on what the server does not give the phone
 
 * No paging of chats: `chats` returns the newest 60; `search` covers up to 100 stored chats.
-* No op returns the Context breakdown, the project workspace, scheduled-task run state (`last_run`, `last_chat`, run now, on/off) or the model's vision setting for `select`.
+* No op returns the Context breakdown, the project workspace, the model's vision setting for `select`.
 * `question` events and `needs_you` pushes are specified but not built (INTERACTION.md); approvals are live. A push for an approval does not exist yet: the "needs you" notification can only be made while a stream is open.
 * The desktop's `edit` is not forwarded to a linked computer.
 * Keys are never returned by any op (`has_key` only).
