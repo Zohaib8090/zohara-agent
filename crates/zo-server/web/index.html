@@ -1831,6 +1831,9 @@ async function setHidden(list) {
   if (!cur.local) { try { await op("settings_set", { hidden_providers: list }); dropCache("settings"); return; } catch (e) { if (!/unknown/i.test(e.message)) throw e; } }
   jsSet("zo.hidden", list); cache.settings = { t: Date.now(), v: { hidden_providers: list, local: true } };
 }
+/* the Custom endpoint providers (chat, responses, claude): the list says so with `custom`; the id check is for an older server */
+const isCustomProv = p => !!(p && (p.custom || p.id === "custom"));
+const fmtOf = (prov, id) => (prov.formats || []).find(f => f.id === id) || { id: id || "chat", name: "OpenAI Chat", path: "/v1/chat/completions" };
 const isLocalProv = p => p.local || /^(ollama|lmstudio|llamacpp|vllm|sglang|claude-code)$/.test(p.id);
 /* providers that may be offered: restricted people get no local providers and no Claude Code; hidden ones are left out, except the one in use */
 function shownProviders(prov, hidden, keep) {
@@ -1893,6 +1896,7 @@ async function modelSheet() {
     <details class="adv" id="mAdv"${dsk ? " hidden" : ""}><summary id="mAdvT">Advanced: address</summary>
       <div class="field-label" id="mUrlL" style="margin-top:8px">Address (endpoint URL)</div><input class="field-input" id="mUrl" type="url" inputmode="url" spellcheck="false" autocomplete="off" autocapitalize="off">
       <div class="field-hint" id="mUrlHint"></div>
+      <div id="mFmtBox" class="hide"><div class="field-label" style="margin-top:8px">API format</div><select id="mFmt"></select><div class="field-hint" id="mFmtHint"></div></div>
       <div class="inline"><button class="btn" id="mTestB">Test connection</button><span class="field-hint" id="mTest" role="status"></span></div></details>
     <div id="mKeyBox"${dsk ? " hidden" : ""}><div class="field-label">API key <span class="chip" id="mKeySt"></span></div>
       <div class="inline"><input class="field-input" id="mKey" type="password" placeholder="Paste the key" autocomplete="off"><button class="btn primary" id="mKeyB">Save</button></div>
@@ -1913,7 +1917,7 @@ async function modelSheet() {
     else { const b = btn(cc && cc.present && cc.source === "own" ? "Log in again" : "Log in", cc && cc.present ? "mini" : "mini primary", () => claudeLogin(() => { sh.close(); modelSheet(); })); h.appendChild(b); }
   };
   const majorIds = new Set(["anthropic", "openai", "gemini"]), opt = p => `<option value="${esc(p.id)}"${p.id === prov.current ? " selected" : ""}>${esc(p.name)}${p.has_key || p.local ? " ✓" : ""}</option>`;
-  const groups = [["Your subscription", p => p.id === "claude-code"], ["Popular Providers", p => majorIds.has(p.id)], ["Cloud & Open-Weight", p => !majorIds.has(p.id) && p.id !== "custom" && !isLocalProv(p)], ["Local Models (This Computer)", p => p.id !== "custom" && p.id !== "claude-code" && !majorIds.has(p.id) && isLocalProv(p)], ["Custom Endpoint", p => p.id === "custom"]];
+  const groups = [["Your subscription", p => p.id === "claude-code"], ["Popular Providers", p => majorIds.has(p.id)], ["Cloud & Open-Weight", p => !majorIds.has(p.id) && !isCustomProv(p) && !isLocalProv(p)], ["Local Models (This Computer)", p => !isCustomProv(p) && p.id !== "claude-code" && !majorIds.has(p.id) && isLocalProv(p)], ["Custom endpoints", isCustomProv]];
   if (!prov.current) sp.insertAdjacentHTML("afterbegin", '<option value="" selected>Choose…</option>');
   groups.forEach(([lbl, f]) => { const g = list.filter(f); if (g.length) sp.insertAdjacentHTML("beforeend", `<optgroup label="${lbl}">${g.map(opt).join("")}</optgroup>`); });
   let models = [], chosen = st.model || "", effort = "", loading = false, error = "", seq = 0, dirty = false, filter = "";
@@ -1921,12 +1925,17 @@ async function modelSheet() {
   /* the address saved for the provider in use (the providers answer carries it; it is empty when the normal address is used) */
   const saved = p => (p && p.id === prov.current && p.base_url && p.base_url !== p.default_url) ? p.base_url : "";
   const pinned = () => new Set(activePins(prof));
+  /* the API format picked for a hosted provider ("default" = its normal one); only sent when the provider takes one */
+  const fmtBody = p => (p && p.takes_format && !dsk && !$$("mFmtBox").classList.contains("hide")) ? { api_format: $$("mFmt").value || "default" } : {};
 
   function setAddrUi() {
     const p = cur(); const needs = !!(p && p.needs_url);
     $$("mAdv").open = needs || $$("mAdv").open; $$("mAdvT").textContent = needs ? "Address (endpoint URL)" : "Advanced: address";
     $$("mAdv").classList.toggle("hide", !p); $$("mUrlL").classList.toggle("hide", needs);
-    $$("mUrlHint").textContent = needs ? "The base address of the service, for example https://api.example.com/v1. " + (restricted() ? "Only public https addresses work here." : "") : (p && p.default_url ? "Leave it as it is to use the normal address: " + p.default_url : "Only change this for a proxy or your own gateway.");
+    const f = fmtOf(prov, p && p.format), fb = $$("mFmtBox"), tf = !!(p && p.takes_format && !dsk);
+    fb.classList.toggle("hide", !tf);
+    if (tf) { const fs = prov.formats && prov.formats.length ? prov.formats : [fmtOf(prov, "chat")]; $$("mFmt").innerHTML = '<option value="">Default (' + esc(f.name) + ")</option>" + fs.map(x => `<option value="${esc(x.id)}"${x.id === p.api_format ? " selected" : ""}>${esc(x.name)} (${esc(x.path)})</option>`).join(""); $$("mFmtHint").textContent = "Only change this if the server answers in another format. The key is only sent to " + (p.default_url || "this provider").replace(/^https?:\/\//, "").split("/")[0] + "."; }
+    $$("mUrlHint").textContent = needs ? "The base address of the service, for example https://api.example.com/v1. " + (isCustomProv(p) ? "Requests go to the address plus " + f.path.replace(/^\/v1/, "") + " (" + f.name + "). " : "") + (restricted() ? "Only public https addresses work here." : "") : (p && p.default_url ? "Leave it as it is to use the normal address: " + p.default_url : "Only change this for a proxy or your own gateway.");
     url.placeholder = (p && p.default_url) || "https://";
     $$("mKeyBox").classList.toggle("hide", !p || isLocalProv(p));
     const has = p && (p.has_key || isLocalProv(p)); const k = $$("mKeySt"); k.textContent = has ? "Key saved" : "No key yet"; k.className = "chip " + (has ? "ok" : "warn");
@@ -1957,7 +1966,7 @@ async function modelSheet() {
     if (bad) { models = []; error = bad; loading = false; renderList(); return; }
     loading = true; error = ""; renderList();
     try {
-      const r = await mop("models", dsk ? { provider: p.id } : { provider: p.id, base_url: url.value.trim() });
+      const r = await mop("models", dsk ? { provider: p.id } : { provider: p.id, base_url: url.value.trim(), ...fmtBody(p) });
       if (my !== seq) return;
       models = r.models || []; error = r.error || "";
       if (r.base_url && !dirty && !url.value.trim() && p.needs_url) url.value = r.base_url;
@@ -1973,7 +1982,7 @@ async function modelSheet() {
     try {
       const ap = prof.profiles.find(x => x.id === prof.active); let id = prof.active, on = !pinned().has(m), note = on ? "Pinned" : "Unpinned";
       if (on && (!ap || ap.provider !== p.id)) {
-        await op("select", { provider: p.id, model: m, base_url: url.value.trim() });
+        await op("select", { provider: p.id, model: m, base_url: url.value.trim(), ...fmtBody(p) });
         const c = await op("profile_create", { name: p.name }); id = c.id; note = "Pinned to a new profile, " + p.name;
       }
       await op("profile_pin", { id, model: m, on });
@@ -1987,18 +1996,19 @@ async function modelSheet() {
     try {
       const body = { provider: p.id, model: chosen, base_url: url.value.trim() };
       if (!$$("mEffBox").classList.contains("hide")) body.effort = $$("mEff").value;
-      if (dsk) { delete body.base_url; }
+      if (dsk) { delete body.base_url; } else Object.assign(body, fmtBody(p));
       await mop("select", body); dropCache("profiles"); sh.close(); await refreshModel(); toast("Using " + chosen);
     } catch (e) { toast(e.message); useBtn.disabled = false; }
   }
   sp.onchange = () => { dirty = false; const p = cur(); url.value = saved(p); chosen = p && p.id === prov.current ? st.model || "" : ""; models = []; filter = ""; $$("mQ").value = ""; setAddrUi(); if (p && p.needs_url && !url.value) { error = ""; renderList(); $$("mUrl").focus(); } else fetchModels(); };
   url.oninput = () => { dirty = true; };
+  $$("mFmt").onchange = () => { $$("mTest").textContent = ""; fetchModels(); };
   url.onchange = () => { const p = cur(); const bad = (dsk ? () => "" : validAddr)(url.value, p && p.needs_url); $$("mUrlHint").textContent = bad; if (!bad) fetchModels(); };
   $$("mTestB").onclick = async () => {
     const p = cur(), t = $$("mTest"), b = $$("mTestB"); if (!p) return;
     const bad = (dsk ? () => "" : validAddr)(url.value, p.needs_url); if (bad) { t.className = "field-hint bad"; t.textContent = bad; return; }
     b.disabled = true; t.className = "field-hint"; t.innerHTML = '<span class="spin"></span> Testing…';
-    try { const r = await op("model_test", { provider: p.id, base_url: url.value.trim(), model: chosen || undefined }); const good = r.works !== false; t.className = "field-hint " + (good ? "ok" : "bad"); t.textContent = r.message || (good ? "Connected." : "The test failed."); }
+    try { const r = await op("model_test", { provider: p.id, base_url: url.value.trim(), model: chosen || undefined, ...fmtBody(p) }); const good = r.works !== false; t.className = "field-hint " + (good ? "ok" : "bad"); t.textContent = r.message || (good ? "Connected." : "The test failed."); }
     catch (e) { t.className = "field-hint bad"; t.textContent = /unknown request/i.test(e.message) ? "This server cannot test connections yet." : e.message; }
     b.disabled = false;
   };
