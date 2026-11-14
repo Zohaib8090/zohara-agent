@@ -37,6 +37,10 @@ fn remember(p: &Provider, base: &str, list: &[String]) {
 
 /// What went wrong, in words a person can act on.
 pub(crate) fn friendly_error(e: &str) -> String {
+    // the format hints and the sentences probe already made are final
+    if e.starts_with("This server speaks") || e.starts_with("The server does not take") || e.starts_with("No API key") || e.starts_with("Nothing answers at") || e.contains(" refused the key") {
+        return e.to_string();
+    }
     let l = e.to_lowercase();
     if l.contains("answered 401") || l.contains("answered 403") {
         "The provider did not accept the key (401). Check it and try again.".into()
@@ -68,11 +72,12 @@ pub(crate) fn fetch_models(p: &'static Provider, base: String, typed_key: Option
         let b2 = base.clone();
         let r = gtk::gio::spawn_blocking(move || {
             let key = typed_key.filter(|k| !k.trim().is_empty()).or_else(|| profiles::get_key(&Selection::load(), p.id));
-            if !p.local && p.id != "custom" && p.protocol != Protocol::ClaudeCode && key.is_none() {
+            if !p.local && !p.is_custom() && p.protocol != Protocol::ClaudeCode && key.is_none() {
                 return Err("No API key yet. Paste it above, then press Retry.".to_string());
             }
             let b = if base.trim().is_empty() { p.base_url.to_string() } else { base };
-            agent::list_models(p, &b, key.as_deref()).map_err(|e| friendly_error(&e))
+            // probe::list checks the address and words the failure, including "this server speaks another format: pick ..."
+            zo_core::ai::probe::list(p, &b, key.as_deref()).map_err(|e| friendly_error(&e))
         })
         .await
         .unwrap_or_else(|_| Err("The check stopped unexpectedly.".to_string()));
@@ -83,11 +88,42 @@ pub(crate) fn fetch_models(p: &'static Provider, base: String, typed_key: Option
     });
 }
 
-/// "Test connection": the same list call, reported as one friendly line.
-pub(crate) fn test_connection(p: &'static Provider, base: String, typed_key: Option<String>, done: impl FnOnce(Result<String, String>) + 'static) {
-    fetch_models(p, base, typed_key, true, move |r| {
-        done(r.map(|l| if l.is_empty() { "Connected, but it listed no models.".to_string() } else { format!("Connected. {} models available.", l.len()) }));
+/// "Test connection". With a model name it asks one tiny question in the provider's wire format and, when the server speaks another
+/// one, says which provider to pick; without a model it is the list call, reported as one friendly line.
+pub(crate) fn test_connection(p: &'static Provider, base: String, typed_key: Option<String>, model: String, done: impl FnOnce(Result<String, String>) + 'static) {
+    if model.trim().is_empty() {
+        fetch_models(p, base, typed_key, true, move |r| {
+            done(r.map(|l| if l.is_empty() { "Connected, but it listed no models.".to_string() } else { format!("Connected. {} models available.", l.len()) }));
+        });
+        return;
+    }
+    glib::spawn_future_local(async move {
+        let r = gtk::gio::spawn_blocking(move || {
+            let key = typed_key.filter(|k| !k.trim().is_empty()).or_else(|| profiles::get_key(&Selection::load(), p.id));
+            if !p.local && !p.is_custom() && p.protocol != Protocol::ClaudeCode && key.is_none() {
+                return Err("No API key yet. Paste it above, then press Test.".to_string());
+            }
+            let b = if base.trim().is_empty() { p.base_url.to_string() } else { base };
+            zo_core::ai::probe::test(p, &b, key, &model)
+        })
+        .await
+        .unwrap_or_else(|_| Err("The check stopped unexpectedly.".to_string()));
+        done(r);
     });
+}
+
+/// The line under the address of a custom endpoint: which wire format it speaks and what an address looks like.
+fn endpoint_hint(p: &Provider) -> &'static str {
+    match p.protocol {
+        Protocol::OpenAiResponses => "Any server that speaks the OpenAI Responses API (it answers at /v1/responses), for example an agent router: https://my-host.example/v1.",
+        Protocol::Anthropic => "Any server that speaks the Claude format (it answers at /v1/messages): https://my-host.example/v1.",
+        _ => "The address of any OpenAI-compatible server (it answers at /v1/chat/completions), for example http://192.168.1.20:8000/v1 or https://my-host.example/v1.",
+    }
+}
+
+/// The three custom endpoint providers, in the order they are offered.
+fn endpoint_providers() -> Vec<&'static Provider> {
+    providers::all().iter().filter(|p| p.is_custom()).collect()
 }
 
 /// The providers shown in the pickers: the ones that are not hidden, and always the one in use.
@@ -98,7 +134,7 @@ pub(crate) fn visible_providers(keep: &str) -> Vec<&'static Provider> {
 
 /// A provider where the person types the address: custom endpoints and local servers.
 fn needs_url(p: &Provider) -> bool {
-    p.id == "custom" || (p.local && p.protocol != Protocol::ClaudeCode)
+    p.is_custom() || (p.local && p.protocol != Protocol::ClaudeCode)
 }
 
 /// The pinned models of the active profile, when it belongs to this provider.
@@ -500,7 +536,7 @@ pub fn models_sheet(ui: &Rc<Ui>) {
 
     // test the connection
     {
-        let (provider_dd, url, key, status, current) = (provider_dd.clone(), url.clone(), key.clone(), status.clone(), current.clone());
+        let (provider_dd, url, key, status, current, model) = (provider_dd.clone(), url.clone(), key.clone(), status.clone(), current.clone(), model.clone());
         let load = load.clone();
         test.connect_clicked(move |b| {
             let p = current(&provider_dd);
@@ -508,7 +544,7 @@ pub fn models_sheet(ui: &Rc<Ui>) {
             status.set_text("Testing the connection…");
             b.set_sensitive(false);
             let (status, b, load) = (status.clone(), b.clone(), load.clone());
-            test_connection(p, url.text().trim().to_string(), typed, move |r| {
+            test_connection(p, url.text().trim().to_string(), typed, model.text().trim().to_string(), move |r| {
                 b.set_sensitive(true);
                 match r {
                     Ok(m) => {
@@ -534,7 +570,7 @@ pub fn models_sheet(ui: &Rc<Ui>) {
             url_rev.set_visible(p.protocol != Protocol::ClaudeCode);
             url_rev.set_reveal_child(needs_url(p));
             advanced.set_visible(p.protocol != Protocol::ClaudeCode && !needs_url(p));
-            url_hint.set_text(if p.id == "custom" { "The address of any OpenAI-compatible server, for example http://192.168.1.20:8000/v1 or https://my-host.example/v1." } else if needs_url(p) { "Where the server runs. The default is right unless you changed its port." } else { "Only change this for a proxy or a regional endpoint." });
+            url_hint.set_text(if p.is_custom() { endpoint_hint(p) } else if needs_url(p) { "Where the server runs. The default is right unless you changed its port." } else { "Only change this for a proxy or a regional endpoint." });
             key.set_text("");
             key.set_placeholder_text(Some("Paste the key (a saved one is used when this stays empty)"));
             model.set_text(if s.provider == p.id { &s.model } else { p.models.first().copied().unwrap_or("") });
@@ -652,8 +688,24 @@ pub fn add_endpoint_sheet(ui: &Rc<Ui>, done: impl Fn() + 'static) {
     let url = gtk::Entry::new();
     url.add_css_class("field-input");
     url.set_placeholder_text(Some("https://my-host.example/v1"));
+    let kinds = endpoint_providers();
+    let kind_names: Vec<&str> = kinds.iter().map(|p| p.name).collect();
+    let kind_dd = gtk::DropDown::from_strings(&kind_names);
+    body.append(&crate::field("API format", &kind_dd));
+    let kind_hint = lbl("", "field-hint");
+    kind_hint.set_wrap(true);
+    body.append(&kind_hint);
+    {
+        let (kinds, kind_hint) = (kinds.clone(), kind_hint.clone());
+        let set = move |dd: &gtk::DropDown| {
+            if let Some(p) = kinds.get(dd.selected() as usize) {
+                kind_hint.set_text(endpoint_hint(p));
+            }
+        };
+        set(&kind_dd);
+        kind_dd.connect_selected_notify(set);
+    }
     body.append(&crate::field("Address", &url));
-    body.append(&lbl("Any server that speaks the OpenAI chat API: vLLM, LM Studio, a company gateway, a proxy.", "field-hint"));
     let key = gtk::PasswordEntry::new();
     key.set_show_peek_icon(true);
     key.add_css_class("field-input");
@@ -677,9 +729,9 @@ pub fn add_endpoint_sheet(ui: &Rc<Ui>, done: impl Fn() + 'static) {
         cancel.connect_clicked(move |_| w.close());
     }
     {
-        let (url, key, model, status) = (url.clone(), key.clone(), model.clone(), status.clone());
+        let (url, key, model, status, kinds, kind_dd) = (url.clone(), key.clone(), model.clone(), status.clone(), kinds.clone(), kind_dd.clone());
         test.connect_clicked(move |b| {
-            let Some(p) = providers::find("custom") else { return };
+            let Some(&p) = kinds.get(kind_dd.selected() as usize) else { return };
             if url.text().trim().is_empty() {
                 status.set_text("Type the address first.");
                 return;
@@ -689,14 +741,23 @@ pub fn add_endpoint_sheet(ui: &Rc<Ui>, done: impl Fn() + 'static) {
             let typed = Some(key.text().to_string()).filter(|k| !k.trim().is_empty());
             let (status, b, model) = (status.clone(), b.clone(), model.clone());
             // a custom endpoint is asked without a key when none is typed: some servers need none
+            // with a model typed, one tiny question is asked, so a server of another format is named ("pick Custom endpoint: ...")
+            if !model.text().trim().is_empty() {
+                test_connection(p, url.text().trim().to_string(), typed, model.text().trim().to_string(), move |r| {
+                    b.set_sensitive(true);
+                    status.set_text(&match r {
+                        Ok(m) => m,
+                        Err(e) => e,
+                    });
+                });
+                return;
+            }
             fetch_models(p, url.text().trim().to_string(), typed, true, move |r| {
                 b.set_sensitive(true);
                 match r {
                     Ok(list) => {
-                        if model.text().trim().is_empty() {
-                            if let Some(m) = list.first() {
-                                model.set_text(m);
-                            }
+                        if let Some(m) = list.first() {
+                            model.set_text(m);
                         }
                         status.set_text(&format!("Connected. {} models available.", list.len()));
                     }
@@ -706,8 +767,9 @@ pub fn add_endpoint_sheet(ui: &Rc<Ui>, done: impl Fn() + 'static) {
         });
     }
     {
-        let (w, ui2) = (win.clone(), ui.clone());
+        let (w, ui2, kinds, kind_dd) = (win.clone(), ui.clone(), kinds.clone(), kind_dd.clone());
         save.connect_clicked(move |_| {
+            let Some(&kind) = kinds.get(kind_dd.selected() as usize) else { return };
             let (n, address, m) = (name.text().trim().to_string(), url.text().trim().to_string(), model.text().trim().to_string());
             if n.is_empty() || address.is_empty() {
                 status.set_text("A name and an address are needed.");
@@ -719,9 +781,9 @@ pub fn add_endpoint_sheet(ui: &Rc<Ui>, done: impl Fn() + 'static) {
             }
             let mut sel = Selection::load();
             sel.profile = None; // do not borrow another profile's key
-            sel.provider = "custom".to_string();
+            sel.provider = kind.id.to_string();
             sel.model = m.clone();
-            sel.base_urls.insert("custom".to_string(), address);
+            sel.base_urls.insert(kind.id.to_string(), address);
             let p = match profiles::create(&n, &sel) {
                 Ok(p) => p,
                 Err(e) => {
@@ -729,7 +791,7 @@ pub fn add_endpoint_sheet(ui: &Rc<Ui>, done: impl Fn() + 'static) {
                     return;
                 }
             };
-            let kid = format!("custom@{}", p.id);
+            let kid = format!("{}@{}", kind.id, p.id);
             let typed = key.text().to_string();
             if typed.trim().is_empty() {
                 keys::clear(&kid); // the new profile must not carry the shared custom key to another address
@@ -752,4 +814,30 @@ pub fn add_endpoint_sheet(ui: &Rc<Ui>, done: impl Fn() + 'static) {
     }
     win.present();
     name_focus.grab_focus();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_three_custom_endpoint_formats_are_offered_and_alike() {
+        let ids: Vec<&str> = endpoint_providers().iter().map(|p| p.id).collect();
+        assert_eq!(ids, ["custom", "custom-responses", "custom-claude"]);
+        let mut hints = Vec::new();
+        for p in endpoint_providers() {
+            assert!(needs_url(p), "{} asks for an address", p.id);
+            hints.push(endpoint_hint(p));
+        }
+        hints.dedup();
+        assert_eq!(hints.len(), 3, "each format has its own line");
+        assert!(endpoint_hint(providers::find("custom-responses").unwrap()).contains("/v1/responses"));
+        assert!(endpoint_hint(providers::find("custom-claude").unwrap()).contains("/v1/messages"));
+    }
+
+    #[test]
+    fn format_hints_from_the_core_are_not_reworded() {
+        let h = zo_core::ai::wire::wrong_format_hint(Protocol::OpenAiResponses);
+        assert_eq!(friendly_error(&format!("{h} (The provider answered 404)")), format!("{h} (The provider answered 404)"));
+    }
 }
