@@ -3210,3 +3210,42 @@ fn test_of_a_scheduled_task_streams_over_http_and_changes_nothing_in_the_task() 
     let res = ureq::post(&format!("{}/api/schedule/test", r2.base)).set("Authorization", "Bearer tok-x").send_string(&json!({"id": id}).to_string()).unwrap().into_string().unwrap();
     assert!(res.contains("gone"), "{res}");
 }
+
+#[test]
+fn the_connectors_directory_needs_a_sign_in_is_rate_limited_and_a_restricted_account_only_gets_the_explanation() {
+    let r = rig(&[("tok-a", &uniq("conn-a"), "a@x.test"), ("tok-o", &uniq("conn-o"), "owner@x.test")], "owner@x.test", 200, 6000);
+    let get = |token: &str, qs: &str| {
+        let mut req = ureq::get(&format!("{}/api/connectors{qs}", r.base));
+        if !token.is_empty() {
+            req = req.set("Authorization", &format!("Bearer {token}"));
+        }
+        match req.call() {
+            Ok(res) => (res.status(), res.into_json::<Value>().unwrap_or(Value::Null)),
+            Err(ureq::Error::Status(c, res)) => (c, res.into_json::<Value>().unwrap_or(Value::Null)),
+            Err(e) => panic!("{e}"),
+        }
+    };
+    // no sign-in: refused; a POST is not a route
+    assert_eq!(get("", "").0, 401);
+    assert!(matches!(ureq::post(&format!("{}/api/connectors", r.base)).send_string("{}"), Err(ureq::Error::Status(404, _))));
+    // a restricted person: the explanation, no list, and the registry is not asked
+    let (st, v) = get("tok-a", "?q=notion");
+    assert_eq!(st, 200);
+    assert_eq!((v["restricted"].as_bool(), v["entries"].as_array().map(Vec::len)), (Some(true), Some(0)));
+    assert!(v["message"].as_str().unwrap().contains("cannot add connectors"));
+    // bad input is refused before anything is asked of the registry
+    assert_eq!(get("tok-o", "?kind=x").0, 400);
+    assert_eq!(get("tok-o", &format!("?q={}", "a".repeat(81))).0, 400);
+    assert_eq!(get("tok-o", "?category=nope").0, 400);
+    // the owner with the registry down (port 9): an error, not a crash
+    assert_eq!(get("tok-o", "").0, 502);
+    // 30 a minute per person
+    let mut limited = false;
+    for _ in 0..40 {
+        if get("tok-a", "").0 == 429 {
+            limited = true;
+            break;
+        }
+    }
+    assert!(limited, "the 31st request in a minute is refused");
+}

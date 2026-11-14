@@ -428,6 +428,28 @@ pub fn show(ui: &Rc<Ui>) {
 
     // ---- MCP servers Zohara Agent can use ----
     let (sec, card) = section("MCP servers Zohara Agent can use");
+    // once per run: ask the directory whether the address of a connector from it changed (a changed one is held until decided)
+    static CHECKED: std::sync::Once = std::sync::Once::new();
+    if mcp_client::load_servers().iter().any(|s| s.registry.is_some()) {
+        CHECKED.call_once(|| {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let n = zo_core::connectors::check_changes(&zo_core::connectors::Source::from_env(), &zo_core::connectors::CACHE, zo_core::connectors::now_secs()).len();
+                let _ = tx.send(n);
+            });
+            let ui2 = ui.clone();
+            gtk::glib::timeout_add_local(std::time::Duration::from_millis(500), move || match rx.try_recv() {
+                Ok(n) => {
+                    if n > 0 {
+                        show(&ui2);
+                    }
+                    gtk::glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+                Err(_) => gtk::glib::ControlFlow::Break,
+            });
+        });
+    }
     let servers = mcp_client::load_servers();
     let add = secondary("Add server");
     let ui2 = ui.clone();
@@ -435,7 +457,14 @@ pub fn show(ui: &Rc<Ui>) {
     let import = secondary("Paste a config");
     let ui2 = ui.clone();
     import.connect_clicked(move |_| import_servers_sheet(&ui2));
+    let browse = crate::primary("Browse connectors");
+    let ui2 = ui.clone();
+    browse.connect_clicked(move |_| {
+        let ui3 = ui2.clone();
+        crate::connectors_ui::browse_sheet(&ui2, Rc::new(move || show(&ui3)));
+    });
     let both = hbox(8);
+    both.append(&browse);
     both.append(&import);
     both.append(&add);
     card.append(&row("Add tools from other programs", "Add an MCP server (a program, or a remote one by its address) and the chat can use its tools. Tools that only read run on their own; the rest ask first, unless the mode is Bypass.", Some(&both)));
@@ -455,6 +484,19 @@ pub fn show(ui: &Rc<Ui>) {
         let cmdl = lbl(&s.command, "pc-meta");
         cmdl.set_ellipsize(gtk::pango::EllipsizeMode::End);
         col.append(&cmdl);
+        if let Some(new) = &s.address_changed {
+            let n = lbl(&format!("Address changed: the directory now lists {new}. It is held until you decide."), "field-hint");
+            n.set_wrap(true);
+            n.set_xalign(0.0);
+            col.append(&n);
+            let accept = secondary("Use the new address");
+            let (ui2, name) = (ui.clone(), s.name.clone());
+            accept.connect_clicked(move |_| {
+                let _ = zo_core::connectors::accept_change(&name);
+                show(&ui2);
+            });
+            col.append(&accept);
+        }
         r.append(&col);
         let sw = gtk::Switch::new();
         sw.set_active(s.enabled && !s.held);
@@ -465,6 +507,9 @@ pub fn show(ui: &Rc<Ui>) {
             if let Some(x) = all.iter_mut().find(|x| x.name == name) {
                 x.enabled = on;
                 x.held = false;
+                if on {
+                    x.address_changed = None; // switched on as it is: the old address is kept
+                }
             }
             mcp_client::save_servers(&all);
             gtk::glib::Propagation::Proceed
@@ -476,9 +521,13 @@ pub fn show(ui: &Rc<Ui>) {
             let (ui3, name3) = (ui2.clone(), name.clone());
             crate::confirm_delete(&ui2, &format!("Remove \"{name}\"?"), "Zohara Agent stops using this server and forgets its sign-in.", move || {
                 let mut all = mcp_client::load_servers();
+                let gone: Vec<_> = all.iter().filter(|x| x.name == name3).cloned().collect();
                 all.retain(|x| x.name != name3);
                 mcp_client::save_servers(&all);
                 zo_core::ai::keys::clear(&mcp_client::token_id(&name3));
+                for g in &gone {
+                    mcp_client::clear_secrets(g);
+                }
                 show(&ui3);
             });
         });
@@ -1542,6 +1591,7 @@ fn add_server_sheet(ui: &Rc<Ui>) {
                 scope: nonempty(&scopes.text()),
                 held: false,
                 updated: 0,
+                ..Default::default()
             };
             let typed_token = token.text().to_string();
             if cfg.name.is_empty() || cfg.command.is_empty() {
@@ -1691,7 +1741,7 @@ fn import_servers_sheet(ui: &Rc<Ui>) {
 }
 
 /// A row that shows the sign-in link a server gave, with Copy and Open, so it can go to any browser or profile. Hidden until a link arrives.
-fn link_row() -> (gtk::Box, Rc<dyn Fn(&str)>) {
+pub(crate) fn link_row() -> (gtk::Box, Rc<dyn Fn(&str)>) {
     let row = hbox(8);
     row.set_visible(false);
     let label = lbl("", "field-hint");

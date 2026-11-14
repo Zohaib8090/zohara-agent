@@ -169,6 +169,10 @@ fn restricted_refusal(op: &str, req: &Value) -> Option<&'static str> {
     if op.starts_with("mcp_") {
         return Some("MCP servers are not available to this account.");
     }
+    // the directory itself may be looked at (the `connectors` op answers a restricted account with an explanation and no way to add)
+    if op.starts_with("connector_") {
+        return Some(crate::connectors::RESTRICTED_MESSAGE);
+    }
     // scheduled tasks on the server (reminders and web search tasks, with limits) when the operator allows them; the checks are in `scheduler`
     if sched::handles(op) || op == "schedule_test" {
         return if crate::scheduler::cloud_allowed_here() { None } else { Some("Scheduled tasks are not available to this account.") };
@@ -663,7 +667,7 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
         }
         "mcp_list" => {
             let all = crate::mcp_client::load_servers();
-            Ok(json!({"servers": all.iter().map(|s| json!({"name": s.name, "command": s.command, "enabled": s.enabled && !s.held, "held": s.held})).collect::<Vec<_>>()}))
+            Ok(json!({"servers": all.iter().map(|s| json!({"name": s.name, "command": s.command, "enabled": s.enabled && !s.held, "held": s.held, "registry": s.registry, "address_changed": s.address_changed})).collect::<Vec<_>>()}))
         }
         "mcp_add" => {
             let mut a = json!({"name": s(req, "name"), "address": s(req, "address")});
@@ -677,11 +681,15 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             let name = s(req, "name");
             let mut all = crate::mcp_client::load_servers();
             let before = all.len();
+            let gone: Vec<_> = all.iter().filter(|x| x.name == name).cloned().collect();
             all.retain(|x| x.name != name);
             if all.len() == before {
                 return Err(format!("no server named {name}"));
             }
             crate::mcp_client::save_servers(&all);
+            for g in &gone {
+                crate::mcp_client::clear_secrets(g);
+            }
             Ok(json!({}))
         }
         "mcp_toggle" => {
@@ -690,9 +698,33 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             let x = all.iter_mut().find(|x| x.name == name).ok_or("no such server")?;
             x.enabled = on;
             x.held = false; // the person's own choice here
+            if on {
+                x.address_changed = None; // switched on as it is: the old address is kept
+            }
             crate::mcp_client::save_servers(&all);
             Ok(json!({}))
         }
+        // the connectors directory (docs/MCP.md "Browse connectors"); adding is two steps: try it, then save what was tried
+        "connectors" => {
+            let q = crate::connectors::Query::parse(req.get("q").and_then(Value::as_str), req.get("cursor").and_then(Value::as_str), req.get("kind").and_then(Value::as_str), req.get("category").and_then(Value::as_str))?;
+            crate::connectors::browse_for_client(&q)
+        }
+        "connector_preview" => {
+            let input = crate::connectors::add::Input::from_json(req)?;
+            let open = |u: &str| crate::mcp_client::open_in_browser(u);
+            let opts = crate::connectors::add::Opts { allow_private: false, open: &open };
+            Ok(crate::connectors::add::preview(&crate::connectors::Source::from_env(), crate::connectors::now_secs(), &input, &opts)?.to_json())
+        }
+        "connector_add" => Ok(json!({"message": crate::connectors::add::commit(s(req, "name"), crate::connectors::now_secs())?})),
+        "connector_cancel" => {
+            crate::connectors::add::cancel(s(req, "name"));
+            Ok(json!({}))
+        }
+        "connector_check" => {
+            let changed = crate::connectors::check_changes(&crate::connectors::Source::from_env(), &crate::connectors::CACHE, crate::connectors::now_secs());
+            Ok(json!({"changed": changed.iter().map(|c| json!({"name": c.name, "old": c.old, "new": c.new})).collect::<Vec<_>>()}))
+        }
+        "connector_accept_change" => Ok(json!({"message": crate::connectors::accept_change(s(req, "name"))?})),
         other => Err(format!("unknown request: {other}")),
     }
 }

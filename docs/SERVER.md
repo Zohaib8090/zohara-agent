@@ -12,6 +12,7 @@ The same brain as the desktop app, on a server that is always on, behind a Fireb
   (Firestore `users/<tenant>/meta/devices` and the index `deviceidx/<sha256>`). Kind `desktop` gets scope `sync`, which may call only `/api/sync/*`; kind `cli`
   gets `full`, which also allows `/api/op`, `/api/send`, `/api/reply` (the `zo` client). A credential is tied to its own tenant, can be revoked
   (Account > signed-in devices, or `/api/auth/signout`), and is never logged. `/api/account/device_create` is gone. At most 10 per person.
+`GET /api/connectors` (any sign-in, 30 a minute per person) is the connectors directory, read from the public MCP registry and cached an hour; see `MCP.md` "Browse connectors".
 * **Login**: every call needs a Firebase ID token or a device credential (`Authorization: Bearer ...`). The Firebase token is checked against
   Google's keys, must be for this Firebase project and a verified account: Google, or e-mail and password with a **verified e-mail** (anonymous, custom, phone and unverified sign-ins are refused). Any such account may register, except addresses in
   `ZO_BLOCKED_EMAILS` and once `ZO_MAX_USERS` (200) is reached. Addresses in `ZO_ADMIN_EMAILS` are **admins** (all tools, Claude Code, SSH

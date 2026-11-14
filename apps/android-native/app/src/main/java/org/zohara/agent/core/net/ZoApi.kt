@@ -295,6 +295,23 @@ class ZoApi(
   suspend fun mcpToggle(name: String, enabled: Boolean) { op("mcp_toggle") { put("name", name); put("enabled", enabled) } }
   suspend fun mcpRemove(name: String) { op("mcp_remove") { put("name", name) } }
 
+  // connectors directory: the server reads the public MCP registry (cached an hour); the phone never asks the registry itself
+  suspend fun connectors(q: String = "", cursor: String? = null, category: String = "all", kind: String = "remote"): ConnectorsResp = opAs("connectors", true) {
+    put("kind", kind); put("category", category)
+    if (q.isNotBlank()) put("q", q.trim())
+    if (!cursor.isNullOrBlank()) put("cursor", cursor)
+  }
+  /** Step one of adding: the server tries the connector (keys in [headers] by header name) and lists its tools. Nothing is saved yet. */
+  suspend fun connectorPreview(id: String, name: String, url: String? = null, headers: Map<String, String> = emptyMap()): ConnectorPreview = opAs("connector_preview") {
+    put("id", id); put("kind", "remote"); put("name", name)
+    if (!url.isNullOrBlank()) put("url", url)
+    putJsonObject("headers") { headers.forEach { (k, v) -> put(k, v) } }
+  }
+  /** Step two: saves what [connectorPreview] tried. */
+  suspend fun connectorAdd(name: String): String = opAs<TextResp>("connector_add") { put("name", name) }.message
+  suspend fun connectorCancel(name: String) { op("connector_cancel") { put("name", name) } }
+  suspend fun connectorAcceptChange(name: String): String = opAs<TextResp>("connector_accept_change") { put("name", name) }.message
+
   /** 4.5: an op relayed to a linked computer. Returns the computer's own answer. */
   suspend fun desktopOp(device: String, inner: JsonObject): JsonObject {
     val r = op("desktop_op") { put("device", device); put("inner", inner) }

@@ -31,6 +31,7 @@ mod account;
 mod auth;
 mod claude_api;
 mod cloudrun;
+mod connectors_api;
 mod db;
 mod devicelogin;
 mod devices;
@@ -646,6 +647,28 @@ fn route(app: Arc<App>, mut req: Request) {
         (Method::Get, "/terms") => return html(&app, req, pages::page("Zohara Agent terms of use", &pages::fill(pages::TERMS_MD, &app.legal)), pages::PLAIN_CSP),
         (Method::Get, "/delete-account") => return html(&app, req, pages::page("Zohara Agent: delete your account", &pages::fill(pages::DELETE_MD, &app.legal)), pages::PLAIN_CSP),
         _ => {}
+    }
+    // the connectors directory: a GET by anybody signed in (it is not one of the POST routes, so the scope table does not change)
+    if matches!(method, Method::Get | Method::Head) && connectors_api::is_path(&path) {
+        let who = match who(&app, &req, &path) {
+            Ok(w) => w,
+            Err(f) => return fail(&app, req, f),
+        };
+        if matches!(who.cred, Cred::Account { .. }) && !app.no_auth {
+            match app.has_accepted(&who.tenant) {
+                Ok(true) => {}
+                Ok(false) => return reply(&app, req, 403, json!({"ok": false, "error": "Accept the privacy notice and the terms first.", "terms_required": true, "version": pages::TERMS_VERSION})),
+                Err(e) => {
+                    eprintln!("zo-server: {e}");
+                    return fail(&app, req, Fail::new(503, "The storage is not reachable right now. Try again in a moment."));
+                }
+            }
+        }
+        let query = req.url().split_once('?').map(|(_, q)| q.to_string()).unwrap_or_default();
+        return match connectors_api::handle(&app, &query, &who) {
+            Ok(v) => reply(&app, req, 200, v),
+            Err(f) => fail(&app, req, f),
+        };
     }
     let Some(r) = route_of(&method, &path) else { return text(&app, req, 404, "not found") };
     let ip = source(&req);
