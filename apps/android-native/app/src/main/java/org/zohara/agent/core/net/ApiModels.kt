@@ -73,8 +73,27 @@ val ZoJson: Json = Json {
 @Serializable data class ProjectsResp(val text: String = "")
 @Serializable data class ArtifactItem(val id: String = "", val kind: String = "", val title: String = "", val path: String = "", val text: String? = null, val chat: String = "", val created: Long = 0)
 @Serializable data class ArtifactsResp(val items: List<ArtifactItem> = emptyList())
-@Serializable data class ScheduledTask(val id: String, val title: String = "", val prompt: String = "", val nextRun: Long = 0, val repeat: String = "once", val enabled: Boolean = true)
-@Serializable data class ScheduledResp(val tasks: List<ScheduledTask> = emptyList())
+/**
+ * A scheduled task (docs/SCHEDULED.md). [kind] is task, reminder or browser; [runOn] is "this", "cloud" or "machine:<name>"; [lastStatus] is ok, failed or
+ * skipped. Every field after [enabled] is new and optional, so an older server still gives a task that shows.
+ */
+@Serializable data class ScheduledTask(
+  val id: String, val title: String = "", val prompt: String = "", val nextRun: Long = 0, val repeat: String = "once", val enabled: Boolean = true,
+  val kind: String = "task", val runOn: String = "", val tz: String? = null, val lastRun: Long? = null, val lastChat: String? = null,
+  val lastStatus: String? = null, val lastOutput: String? = null, val historyCount: Int = 0, val running: Boolean = false, val place: String = "",
+)
+@Serializable data class ScheduleRunOn(val id: String = "", val label: String = "", val note: String = "")
+@Serializable data class ScheduleLimits(val maxTasks: Int = 0, val minRepeatMinutes: Int = 0, val runsPerDay: Int? = null, val runsToday: Int = 0)
+@Serializable data class ScheduledResp(
+  val tasks: List<ScheduledTask> = emptyList(), val host: String = "", val runOn: List<ScheduleRunOn> = emptyList(),
+  val kinds: List<String> = emptyList(), val limits: ScheduleLimits = ScheduleLimits(), val now: Long = 0,
+)
+@Serializable data class ScheduledOne(val task: ScheduledTask? = null, val message: String = "", val started: Boolean = false)
+/** one run in a task's history: [how] is "scheduled" or "manual"; [missed] is the time it should have run when the computer was off */
+@Serializable data class ScheduleRun(val time: Long = 0, val status: String = "", val summary: String = "", val chat: String? = null, val ms: Long = 0, val missed: Long? = null, val how: String = "")
+@Serializable data class ScheduleHistoryResp(val task: ScheduledTask? = null, val history: List<ScheduleRun> = emptyList())
+@Serializable data class SchedulePreviewRun(val at: Long = 0, val label: String = "")
+@Serializable data class SchedulePreview(val repeat: String = "", val runs: List<SchedulePreviewRun> = emptyList(), val text: String = "")
 @Serializable data class Machine(val name: String, val host: String = "", val user: String = "", val port: Int = 22, val note: String = "", val hasKey: Boolean = false)
 @Serializable data class MachinesResp(val machines: List<Machine> = emptyList())
 @Serializable data class McpServer(val name: String, val command: String = "", val enabled: Boolean = true)

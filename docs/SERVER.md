@@ -17,6 +17,7 @@ The same brain as the desktop app, on a server that is always on, behind a Fireb
   `ZO_BLOCKED_EMAILS` and once `ZO_MAX_USERS` (200) is reached. Addresses in `ZO_ADMIN_EMAILS` are **admins** (all tools, Claude Code, SSH
   machines, Bypass); everybody else is **restricted** (web search, page fetch and memory tools only, no MCP servers, provider addresses must be public https, quotas).
 * **Tenant**: first 32 hex characters of `sha256("zo-tenant:" + uid)`. Disk `$ZO_TENANT_ROOT/<tenant>/{config,data}`; no raw uid or e-mail in any path.
+* **Scheduled tasks on the server** (`cloudrun.rs`, SCHEDULED.md): `ZO_CLOUD_TASKS` = `all` (default: everybody signed in; restricted people have reminders and web search tasks with limits) | `admins` | `off`. The runner wakes every 10 seconds; its index of who is due is the Firestore collection `sched_index`. `POST /api/schedule/test` streams the Test of a task.
 * **Limits**: 60 requests/minute and 2 concurrent `/api/send` per user, `ZO_MAX_RUNS` (8) answers at once, bodies 1 MB (`/api/op`, `/api/reply`), 14 MB (`/api/send`, it may carry attachments: see PUBLIC.md) and 20 MB (`/api/sync/*`); over the limit: 429 with `Retry-After`.
 * **Firestore**: Render's disk is lost on every redeploy, so at start everything is fetched from Firestore and every change is
   sent back within about 3 seconds. One sync manager per tenant (pulled on its first request, idle ones are evicted from disk after 30 minutes with nothing unsynced). Layout under `users/<tenant>`: `chats/{id}`, `memory/{id}`, `files/{name}` (model choice,

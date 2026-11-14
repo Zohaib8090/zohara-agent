@@ -183,4 +183,22 @@ class PagesFormatTest {
     assertEquals("It will not run again.", PagesFormat.CANCEL_TASK_TEXT)
     assertEquals("Older chats can be found with Search", PagesFormat.OLDER_CHATS_NOTE)
   }
+
+  // ---- Scheduled v2
+  @Test fun taskCardLines() {
+    val t = org.zohara.agent.core.net.ScheduledTask("t", "Stretch", "Stand up", 2_000_000, "weekdays", true, kind = "reminder", place = "the cloud server", lastRun = 1_000_000, lastStatus = "ok", lastOutput = "Stand up")
+    val utc = java.util.TimeZone.getTimeZone("UTC")
+    val meta = PagesFormat.taskMeta(t, now = 1_500_000, locale = java.util.Locale.US, zone = utc)
+    assertTrue(meta, meta.startsWith("Next: ") && meta.endsWith("Every weekday · Reminder · the cloud server"))
+    assertTrue(PagesFormat.taskMeta(t.copy(running = true), 1_500_000, java.util.Locale.US, utc).startsWith("Running now · "))
+    assertTrue(PagesFormat.taskMeta(t.copy(enabled = false), 1_500_000, java.util.Locale.US, utc).startsWith("Off · "))
+    assertTrue("a late task says it runs once", PagesFormat.taskMeta(t.copy(nextRun = 1), 1_000_000, java.util.Locale.US, utc).contains("missed, runs once soon"))
+    assertEquals("Last run: ok 8 min ago — Stand up", PagesFormat.taskLast(t, 1_500_000, utc))
+    assertEquals(null, PagesFormat.taskLast(t.copy(lastRun = null, lastStatus = null), 1_500_000, utc))
+    val run = org.zohara.agent.core.net.ScheduleRun(time = 1_000_000, status = "ok", ms = 3500, missed = 900_000, how = "manual")
+    val line = PagesFormat.runLine(run, 1_500_000, java.util.Locale.US, utc)
+    assertTrue(line, line.startsWith("ok · ") && line.contains("missed ") && line.endsWith("3 s · Run now"))
+    assertEquals("Every weekday", PagesFormat.repeatWord("weekdays")); assertEquals("Every 3 days", PagesFormat.repeatWord("every 3 days"))
+    assertEquals("Browser task", PagesFormat.taskKindWord("browser")); assertEquals("Task", PagesFormat.taskKindWord("shell"))
+  }
 }

@@ -227,13 +227,40 @@ class ZoApi(
   suspend fun projects(): String = opAs<ProjectsResp>("projects", true).text
   suspend fun projectCreate(name: String, goal: String = ""): String = opAs<TextResp>("project_create") { put("name", name); put("goal", goal) }.message
   suspend fun artifacts(): List<ArtifactItem> = opAs<ArtifactsResp>("artifacts", true).items
-  suspend fun scheduled(): List<ScheduledTask> = opAs<ScheduledResp>("scheduled", true).tasks
-  /** [`when`] is plain words; a leading "in " is rewritten to "now + " because the server parses it with GNU date (API.md 4.4 known bug) */
+  suspend fun scheduled(): List<ScheduledTask> = scheduledInfo().tasks
+  /** the list with where tasks can run, the kinds and the limits of this account (docs/SCHEDULED.md) */
+  suspend fun scheduledInfo(): ScheduledResp = opAs("scheduled", true)
+  /** [`when`] is plain words ("tomorrow 9am", "in 2 hours", "every weekday at 9"); a leading "in " is still rewritten to "now + " for servers older than 2026-11-14 */
   suspend fun scheduleAdd(task: String, `when`: String, repeat: String? = null, title: String? = null): String = opAs<TextResp>("schedule_add") {
     put("task", task); put("when", fixWhen(`when`))
     if (!repeat.isNullOrBlank()) put("repeat", repeat)
     if (!title.isNullOrBlank()) put("title", title)
   }.message
+  /** a task with every field: [kind] task | reminder | browser, [runOn] "" | "cloud" | "machine:<name>"; [tz] the phone's time zone so "9am" is the person's 9am */
+  suspend fun scheduleSave(
+    id: String?, task: String, `when`: String?, repeat: String?, title: String?, kind: String, runOn: String, tz: String,
+  ): ScheduledTask? = opAs<ScheduledOne>(if (id == null) "schedule_add" else "schedule_update") {
+    if (id != null) put("id", id)
+    put("task", task); put("kind", kind); put("run_on", runOn); put("tz", tz)
+    if (!`when`.isNullOrBlank()) put("when", `when`.trim())
+    if (!repeat.isNullOrBlank()) put("repeat", repeat)
+    if (title != null) put("title", title)
+  }.task
+  suspend fun scheduleEnable(id: String, on: Boolean): ScheduledTask? = opAs<ScheduledOne>("schedule_enable") { put("id", id); put("on", on) }.task
+  /** starts the task now; its result shows in the task (last result, history) and as a notification */
+  suspend fun scheduleRunNow(id: String) { op("schedule_run_now") { put("id", id) } }
+  suspend fun scheduleHistory(id: String): ScheduleHistoryResp = opAs("schedule_history", true) { put("id", id) }
+  /** "next runs: ..." for what is typed in the form; an error sentence when the time cannot be read */
+  suspend fun schedulePreview(`when`: String, repeat: String?, tz: String): SchedulePreview = opAs("schedule_preview", true) {
+    put("when", `when`.trim()); put("tz", tz)
+    if (!repeat.isNullOrBlank()) put("repeat", repeat)
+  }
+  /** Test: runs the task once now in test mode, streamed like a send (`test`, `delta`, `tool_start`, `approval`, `notify`, `result`, `done`); for a saved task [id], else the [draft] */
+  fun scheduleTest(id: String?, draft: JsonObject?, tz: String): Flow<SendEvent> =
+    stream("/api/schedule/test", buildJsonObject {
+      if (id != null) put("id", id) else if (draft != null) put("draft", draft)
+      put("tz", tz); put("client", "phone")
+    })
   suspend fun scheduleCancel(id: String) { op("schedule_cancel") { put("id", id) } }
   suspend fun machines(): List<Machine> = opAs<MachinesResp>("machines", true).machines
   suspend fun machineAdd(name: String, host: String, user: String, port: Int, note: String, key: String) {
@@ -326,8 +353,11 @@ class ZoApi(
    * A refused request (400, 401, 403, 413, 429) throws an [ApiException] when the flow is collected. Cancelling the collector closes the
    * connection, which stops the answer on the server unless `keep_running` was set.
    */
-  fun send(r: SendRequest): Flow<SendEvent> = channelFlow {
-    val call = streamHttp.newCall(request("/api/send", sendBody(r)).newBuilder().header("Accept", "application/x-ndjson").build())
+  fun send(r: SendRequest): Flow<SendEvent> = stream("/api/send", sendBody(r))
+
+  /** The NDJSON stream of one request (a send, or the Test of a scheduled task); see [send]. */
+  private fun stream(path: String, body: JsonObject): Flow<SendEvent> = channelFlow {
+    val call = streamHttp.newCall(request(path, body).newBuilder().header("Accept", "application/x-ndjson").build())
     val reader = launch(Dispatchers.IO) {
       var sawDone = false
       try {

@@ -11,6 +11,7 @@ https://zohara-agent.duckdns.org, the repository is Zohaib8090/zohara-agent. Eng
 | [CLI.md](CLI.md) | The terminal client `zo`: one-shot questions, interactive chat, memory, `zo login`, `--remote` |
 | [MCP.md](MCP.md) | MCP: Zohara Agent as an MCP client (other people's servers) and as an MCP server (`zo-mcp`) |
 | [MEMORY.md](MEMORY.md) | The memory (one store for the app, the phone service and the MCP tools) and the memory agent |
+| [SCHEDULED.md](SCHEDULED.md) | Scheduled tasks: kinds, times in plain words, Test, Run now, history, where they run (computer, cloud, machine), limits, notifications, the ops |
 | [ACTIVITY.md](ACTIVITY.md) | What is running now (tray icon, Activity page, web menu) and how to stop it |
 | [SSH.md](SSH.md) | Running commands on other computers over SSH (machines) |
 | [INTERACTION.md](INTERACTION.md) | Question cards and "needs you" notifications on every platform (the contract) |

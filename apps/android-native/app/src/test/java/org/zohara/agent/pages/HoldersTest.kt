@@ -55,6 +55,17 @@ class FakeApi : PagesApi {
   override suspend fun scheduled() = run { hit("scheduled"); tasks }
   override suspend fun scheduleAdd(task: String, whenText: String, repeat: String?) = run { hit("schedule_add", task, whenText, repeat); "Scheduled" }
   override suspend fun scheduleCancel(id: String) { hit("schedule_cancel", id); tasks = tasks.filter { it.id != id } }
+  var info = org.zohara.agent.core.net.ScheduledResp()
+  var runs = listOf<org.zohara.agent.core.net.ScheduleRun>()
+  var previewText = "next runs: Mon 9:00"
+  var testEvents = listOf<org.zohara.agent.core.net.SendEvent>()
+  override suspend fun scheduledInfo() = run { hit("scheduled"); info.copy(tasks = tasks) }
+  override suspend fun scheduleSave(f: TaskForm, tz: String) = run { hit("schedule_save", f.editId, f.prompt, f.whenText, PagesFormat.repeatValue(f.repeatChoice, f.ownInterval), f.title, f.kind, f.runOn, tz); null }
+  override suspend fun scheduleEnable(id: String, on: Boolean) = run { hit("schedule_enable", id, on); tasks = tasks.map { if (it.id == id) it.copy(enabled = on) else it }; null }
+  override suspend fun scheduleRunNow(id: String) { hit("schedule_run_now", id) }
+  override suspend fun scheduleHistory(id: String) = run { hit("schedule_history", id); runs }
+  override suspend fun schedulePreview(f: TaskForm, tz: String) = run { hit("schedule_preview", f.whenText, tz); previewText }
+  override fun scheduleTest(id: String?, f: TaskForm?, tz: String): kotlinx.coroutines.flow.Flow<org.zohara.agent.core.net.SendEvent> = kotlinx.coroutines.flow.flow { calls += "schedule_test $id ${f?.prompt} $tz"; testEvents.forEach { emit(it) } }
   override suspend fun activity() = run { hit("activity"); activityResp }
   override suspend fun activityStop(id: Long) { hit("activity_stop", id) }
   override suspend fun terminalRun(cmd: String) = run { hit("terminal_run", cmd); terminalOut }
@@ -213,16 +224,63 @@ class HoldersTest {
     assertEquals(listOf("t2"), h.state.value.value?.map { it.id })
   }
 
-  @Test fun addTaskSendsTheChoiceOrTheOwnInterval() = runTest {
+  @Test fun addTaskSendsTheChoiceOrTheOwnIntervalAndThePhonesTimeZone() = runTest {
     val api = FakeApi()
     val h = ScheduledHolder(api, backgroundScope)
-    h.add(TaskForm("check disk", "tomorrow 9am", "daily", "")).getOrThrow()
-    h.add(TaskForm("check disk", "in 2 hours", "daily", "every 90 minutes")).getOrThrow()
-    h.add(TaskForm("once only", "2026-11-20 18:30", "once", "")).getOrThrow()
+    h.add(TaskForm("check disk", "tomorrow 9am", "daily", ""), "Asia/Karachi").getOrThrow()
+    h.add(TaskForm("check disk", "in 2 hours", "daily", "every 90 minutes"), "Asia/Karachi").getOrThrow()
+    h.add(TaskForm("stand up", "every weekday at 9", "", "", title = "Stretch", kind = "reminder", runOn = "cloud"), "UTC").getOrThrow()
     assertEquals(
-      listOf("schedule_add check disk tomorrow 9am daily", "schedule_add check disk in 2 hours every 90 minutes", "schedule_add once only 2026-11-20 18:30 null"),
-      api.calls.filter { it.startsWith("schedule_add") },
+      listOf(
+        "schedule_save null check disk tomorrow 9am daily  task  Asia/Karachi",
+        "schedule_save null check disk in 2 hours every 90 minutes  task  Asia/Karachi",
+        "schedule_save null stand up every weekday at 9  Stretch reminder cloud UTC",
+      ),
+      api.calls.filter { it.startsWith("schedule_save") },
     )
+  }
+
+  @Test fun editingKeepsTheTimeWhenItIsLeftEmpty() = runTest {
+    val api = FakeApi()
+    val form = TaskForm("new text", "", "", "", editId = "t1")
+    assertTrue(form.valid)
+    ScheduledHolder(api, backgroundScope).add(form, "UTC").getOrThrow()
+    assertEquals(listOf("schedule_save t1 new text    task  UTC"), api.calls.filter { it.startsWith("schedule_save") })
+  }
+
+  @Test fun theSwitchChangesTheCardAtOnceAndGoesBackWhenRefused() = runTest {
+    val api = FakeApi().apply { tasks = listOf(ScheduledTask("t1", "A", "a", enabled = true)) }
+    val h = ScheduledHolder(api, backgroundScope)
+    h.refresh(); runCurrent()
+    assertNull(h.enable("t1", false)); runCurrent()
+    assertTrue(api.calls.contains("schedule_enable t1 false"))
+    assertEquals(false, h.state.value.value?.single()?.enabled)
+    api.failWith = "That task is gone."; api.failOps = mutableSetOf("schedule_enable")
+    assertEquals("That task is gone.", h.enable("t1", true)); runCurrent()
+    assertEquals("it stays as it was", false, h.state.value.value?.single()?.enabled)
+  }
+
+  @Test fun runNowHistoryAndPreviewAskTheServer() = runTest {
+    val api = FakeApi().apply {
+      runs = listOf(org.zohara.agent.core.net.ScheduleRun(time = 5, status = "ok", summary = "done", chat = "c1", ms = 3000, how = "manual"))
+    }
+    val h = ScheduledHolder(api, backgroundScope)
+    assertNull(h.runNow("t1"))
+    assertEquals("c1", h.history("t1").getOrThrow().single().chat)
+    assertEquals("next runs: Mon 9:00", h.preview(TaskForm("x", "every weekday at 9"), "UTC").getOrThrow())
+    assertEquals(listOf("schedule_run_now t1", "schedule_history t1", "schedule_preview every weekday at 9 UTC"), api.calls.filter { it.startsWith("schedule_") })
+    api.failWith = "I can't read that."; api.failOps = mutableSetOf("schedule_preview")
+    assertEquals("I can't read that.", h.preview(TaskForm("x", "soon"), "UTC").exceptionOrNull()?.sentence())
+  }
+
+  @Test fun theListCarriesWhereTasksCanRunAndTheLimits() = runTest {
+    val api = FakeApi().apply {
+      info = org.zohara.agent.core.net.ScheduledResp(host = "cloud", runOn = listOf(org.zohara.agent.core.net.ScheduleRunOn("cloud", "Cloud server", "Runs on the server.")), kinds = listOf("reminder", "task"))
+    }
+    val h = ScheduledHolder(api, backgroundScope)
+    h.refresh(); runCurrent()
+    assertEquals("cloud", h.info.value.host)
+    assertEquals(listOf("reminder", "task"), h.info.value.kinds)
   }
 
   @Test fun taskFormNeedsTextAndTime() {
@@ -232,8 +290,8 @@ class HoldersTest {
   }
 
   @Test fun addTaskErrorIsTheServersSentence() = runTest {
-    val api = FakeApi().apply { failWith = "I couldn't read \"soon\" as a time."; failOps = mutableSetOf("schedule_add") }
-    val r = ScheduledHolder(api, backgroundScope).add(TaskForm("x", "soon"))
+    val api = FakeApi().apply { failWith = "I couldn't read \"soon\" as a time."; failOps = mutableSetOf("schedule_save") }
+    val r = ScheduledHolder(api, backgroundScope).add(TaskForm("x", "soon"), "UTC")
     assertEquals("I couldn't read \"soon\" as a time.", r.exceptionOrNull()?.sentence())
   }
 

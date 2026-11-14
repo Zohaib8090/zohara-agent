@@ -26,6 +26,12 @@ sealed interface SendEvent {
   data class Approval(val id: Long, val tool: String, val summary: String, val local: Boolean = false) : SendEvent
   data class Question(val id: Long, val questions: List<QuestionSpec>) : SendEvent
   data class Usage(val input: Long, val output: Long) : SendEvent
+  /** Test of a scheduled task (docs/SCHEDULED.md): the first line says what is being tested and where it runs */
+  data class Test(val title: String, val kind: String, val place: String) : SendEvent
+  /** Test: the notification the task would show (a reminder shows it here instead of sending it) */
+  data class Notify(val title: String, val body: String, val kind: String, val ok: Boolean) : SendEvent
+  /** Test: the result card; [status] is ok, failed or skipped */
+  data class Result(val ok: Boolean, val status: String, val summary: String, val tools: List<String>, val ms: Long, val chat: String?) : SendEvent
   /** [code] is the raw `error` field (for example `desktop_offline`), [message] what to show */
   data class Error(val code: String, val message: String) : SendEvent
   data object Stopped : SendEvent
@@ -59,6 +65,15 @@ object SendEventParser {
         SendEvent.Approval(obj.long("id") ?: 0, obj.str("tool").orEmpty(), obj.str("summary").orEmpty(), obj.bool("local") ?: false)
       "question" -> SendEvent.Question(obj.long("id") ?: 0, parseQuestions(obj["questions"]))
       "usage" -> SendEvent.Usage(obj.long("input") ?: 0, obj.long("output") ?: 0)
+      "test" -> SendEvent.Test(obj.str("title").orEmpty(), obj.str("kind").orEmpty(), obj.str("place").orEmpty())
+      "notify" -> SendEvent.Notify(obj.str("title").orEmpty(), obj.str("body").orEmpty(), obj.str("kind").orEmpty(), obj.bool("ok") ?: true)
+      "result" -> {
+        val r = obj["result"] as? JsonObject
+        SendEvent.Result(
+          r?.bool("ok") ?: false, r?.str("status").orEmpty(), r?.str("summary").orEmpty(),
+          (r?.get("tools") as? JsonArray)?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }.orEmpty(), r?.long("ms") ?: 0, r?.str("chat"),
+        )
+      }
       "error" -> {
         val code = obj.str("error").orEmpty()
         val msg = obj.str("message")?.takeIf { it.isNotBlank() } ?: friendlyCode(code)

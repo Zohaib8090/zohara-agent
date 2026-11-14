@@ -287,7 +287,7 @@ class ChatSession(
         return true
       }
       SendEvent.Done -> answered = true
-      SendEvent.Ping, is SendEvent.Unknown -> Unit
+      SendEvent.Ping, is SendEvent.Unknown, is SendEvent.Test, is SendEvent.Notify, is SendEvent.Result -> Unit // the last three belong to the Test of a scheduled task (ScheduledScreen)
     }
     return false
   }

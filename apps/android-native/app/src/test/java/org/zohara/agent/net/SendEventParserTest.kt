@@ -95,4 +95,12 @@ class SendEventParserTest {
     assertEquals(emptyList<String>(), b.feed("""{"event":"done"}""".toByteArray()))
     assertEquals(listOf("""{"event":"done"}"""), b.finish())
   }
+
+  @Test fun testOfAScheduledTaskHasItsOwnEvents() {
+    assertEquals(SendEvent.Test("Stretch", "reminder", "the cloud server"), p("""{"event":"test","title":"Stretch","kind":"reminder","place":"the cloud server"}"""))
+    assertEquals(SendEvent.Notify("Test: Stretch", "Stand up", "reminder", true), p("""{"event":"notify","title":"Test: Stretch","body":"Stand up","kind":"reminder","ok":true}"""))
+    val r = p("""{"event":"result","result":{"ok":false,"status":"skipped","summary":"No model is chosen.","tools":["zohara_web_search"],"ms":1500,"chat":"c9"}}""")
+    assertEquals(SendEvent.Result(false, "skipped", "No model is chosen.", listOf("zohara_web_search"), 1500, "c9"), r)
+    assertEquals(SendEvent.Result(false, "", "", emptyList(), 0, null), p("""{"event":"result"}"""))
+  }
 }
