@@ -2,6 +2,7 @@
 //! cannot be loaded, and a connection test. Nothing here changes any setting.
 
 use super::agent::{self, Config};
+use super::wire;
 use super::providers::{Protocol, Provider};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -24,7 +25,7 @@ pub fn check_address(base_url: &str) -> Result<(), String> {
 pub fn friendly(p: &Provider, base_url: &str, has_key: bool, err: &str) -> String {
     let low = err.to_lowercase();
     let name = p.name;
-    if err.starts_with("A restricted account") || err.starts_with("Claude Code is not available") {
+    if err.starts_with("A restricted account") || err.starts_with("Claude Code is not available") || err.starts_with("This server speaks") || err.starts_with("The server does not take") {
         return err.to_string();
     }
     if low.contains("answered 401") || low.contains("answered 403") {
@@ -81,6 +82,40 @@ pub fn test(p: &'static Provider, base_url: &str, key: Option<String>, model: &s
         let n = list(p, base_url, key.as_deref())?.len();
         return Ok(format!("Connected to {}: {n} model{} available.", p.name, if n == 1 { "" } else { "s" }));
     }
+    let first = try_answer(p, base_url, key.clone(), model, TEST_WAIT);
+    match first {
+        Ok(_) => Ok(format!("{} answered with {}: it works.", p.name, model.trim())),
+        Err(e) => {
+            // a server that does not understand this wire format may well speak another one: try those, and say which provider fits
+            if (p.is_custom() || p.takes_format()) && may_be_other_format(&e) {
+                for proto in [Protocol::OpenAi, Protocol::OpenAiResponses, Protocol::Anthropic].into_iter().filter(|x| *x != p.protocol) {
+                    if let Some(other) = p.sibling(proto) {
+                        if try_answer(other, base_url, key.clone(), model, ALTERNATE_WAIT).is_ok() {
+                            return Err(wire::wrong_format_hint(proto));
+                        }
+                    }
+                }
+            }
+            Err(friendly(p, base_url, has_key, &e))
+        }
+    }
+}
+
+/// How long each of the other wire formats is tried for when the first one failed.
+const ALTERNATE_WAIT: Duration = Duration::from_secs(8);
+
+/// Would another wire format perhaps work? Yes when the server answered "no such endpoint" or in a shape that is not the one asked for;
+/// no for a refused key, a busy server or one that cannot be reached.
+fn may_be_other_format(err: &str) -> bool {
+    if err.starts_with("This server speaks") || err.starts_with("The server does not take") || err.starts_with("The answer had no") || err.starts_with("The answer was not valid JSON") {
+        return true;
+    }
+    let status: u16 = err.strip_prefix("The provider answered ").and_then(|r| r.get(..3)).and_then(|n| n.parse().ok()).unwrap_or(0);
+    matches!(status, 400 | 404 | 405 | 415 | 422 | 501)
+}
+
+/// One tiny question, `wait` at most.
+fn try_answer(p: &'static Provider, base_url: &str, key: Option<String>, model: &str, wait: Duration) -> Result<String, String> {
     let cfg = Config { provider: p, base_url: base_url.to_string(), model: model.trim().to_string(), key, system: "Reply with the single word: ok".into(), vision: false };
     let cancel = Arc::new(AtomicBool::new(false));
     let (tx, rx) = std::sync::mpsc::channel();
@@ -88,12 +123,11 @@ pub fn test(p: &'static Provider, base_url: &str, key: Option<String>, model: &s
     crate::tenant::spawn(move || {
         let _ = tx.send(agent::complete(&cfg, &cfg.system, "ok?", &c2));
     });
-    match rx.recv_timeout(TEST_WAIT) {
-        Ok(Ok(_)) => Ok(format!("{} answered with {}: it works.", p.name, model.trim())),
-        Ok(Err(e)) => Err(friendly(p, base_url, has_key, &e)),
+    match rx.recv_timeout(wait) {
+        Ok(r) => r,
         Err(_) => {
             cancel.store(true, Ordering::SeqCst);
-            Err(format!("{} did not answer within {} seconds.", p.name, TEST_WAIT.as_secs()))
+            Err(format!("{} did not answer within {} seconds.", p.name, wait.as_secs()))
         }
     }
 }
@@ -116,5 +150,83 @@ mod tests {
         assert!(friendly(o, "https://x", true, "The provider answered 503: x").contains("503"));
         assert!(check_address("ftp://x").is_err() && check_address("https://").is_err() && check_address("https://a b").is_err());
         assert!(check_address("http://127.0.0.1:8000/v1").is_ok() && check_address(" https://api.example.com/v1 ").is_ok());
+    }
+
+    use crate::ai::mock::{Answer, Mock};
+    use serde_json::json;
+
+    fn text_answer(t: &str) -> Value {
+        json!({"object": "response", "status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": t}]}]})
+    }
+
+    use serde_json::Value;
+
+    /// A server that answers only the one path, in the one format.
+    fn only(path_end: &'static str, ok: Value) -> Mock {
+        Mock::start(move |method, path, _| {
+            if method == "POST" && path.ends_with(path_end) {
+                Answer::json(200, ok.clone())
+            } else if method == "GET" && path.ends_with("/models") {
+                Answer::json(200, json!({"data": [{"id": "m1"}]}))
+            } else {
+                Answer::json(404, json!({"error": {"message": "Not Found"}}))
+            }
+        })
+    }
+
+    #[test]
+    fn friendly_leaves_the_format_hints_alone() {
+        let c = providers::find("custom").unwrap();
+        let hint = "This server speaks the OpenAI Responses format: pick \"Custom endpoint: OpenAI Responses\" (or set the API format to OpenAI Responses).";
+        assert_eq!(friendly(c, "https://x/v1", true, hint), hint);
+        let e = "The server does not take /chat/completions (The provider answered 404: Not Found). It may speak another API format: try \"Custom endpoint: OpenAI Responses\".";
+        assert_eq!(friendly(c, "https://x/v1", true, e), e);
+    }
+
+    #[test]
+    fn the_test_of_a_chat_endpoint_that_speaks_responses_says_which_provider_to_pick() {
+        let m = only("/v1/responses", text_answer("ok"));
+        let c = providers::find("custom").unwrap();
+        let e = test(c, &m.url, Some("k".into()), "m").unwrap_err();
+        assert!(e.starts_with("This server speaks the OpenAI Responses format") && e.contains("Custom endpoint: OpenAI Responses"), "{e}");
+        // the right provider works
+        let r = providers::find("custom-responses").unwrap();
+        assert!(test(r, &m.url, Some("k".into()), "m").unwrap().contains("it works"));
+        // and a server that speaks the Claude format is found from the Responses provider
+        let claude = only("/v1/messages", json!({"type": "message", "role": "assistant", "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"}));
+        let e = test(r, &claude.url, Some("k".into()), "m").unwrap_err();
+        assert!(e.contains("Claude format") && e.contains("Custom endpoint: Claude format"), "{e}");
+        // a hosted provider with an API format hint gets the same help
+        let o = providers::find("openai").unwrap();
+        let e = test(o, &m.url, Some("k".into()), "m").unwrap_err();
+        assert!(e.contains("OpenAI Responses"), "{e}");
+    }
+
+    #[test]
+    fn the_test_does_not_guess_formats_when_the_key_is_refused_or_nothing_speaks() {
+        let c = providers::find("custom").unwrap();
+        let m = Mock::start(|_, _, _| Answer::json(401, json!({"error": {"message": "bad key"}})));
+        let e = test(c, &m.url, Some("k".into()), "m").unwrap_err();
+        assert!(e.contains("refused the key") && !e.contains("speaks"), "{e}");
+        assert_eq!(m.paths().len(), 1, "a refused key is not tried again in other formats: {:?}", m.paths());
+        // nothing speaks any format: the plain failure, after every format was tried once
+        let m = Mock::start(|_, _, _| Answer::json(404, json!({"error": {"message": "Not Found"}})));
+        let e = test(c, &m.url, Some("k".into()), "m").unwrap_err();
+        assert!(e.contains("does not take /chat/completions") && !e.contains("This server speaks"), "{e}");
+        assert_eq!(m.paths(), ["POST /v1/chat/completions", "POST /v1/responses", "POST /v1/messages"]);
+    }
+
+    #[test]
+    fn the_model_list_of_every_format_is_read_from_models() {
+        let m = only("/nothing", Value::Null);
+        for id in ["custom", "custom-responses", "custom-claude"] {
+            let p = providers::find(id).unwrap();
+            assert_eq!(list(p, &m.url, Some("k")).unwrap(), ["m1"], "{id}");
+        }
+        let seen = m.seen.lock().unwrap();
+        assert!(seen.iter().all(|(meth, path, ..)| meth == "GET" && path == "/v1/models"));
+        // the Claude-format list carries the key in both places, the others as a bearer only
+        assert_eq!((seen[2].3.as_str(), seen[2].4.as_str()), ("Bearer k", "k"));
+        assert_eq!((seen[1].3.as_str(), seen[1].4.as_str()), ("Bearer k", ""));
     }
 }

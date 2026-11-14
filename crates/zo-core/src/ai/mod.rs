@@ -5,6 +5,8 @@ pub mod claude_code;
 pub mod context;
 pub mod keys;
 pub mod memory_agent;
+#[cfg(test)]
+pub(crate) mod mock;
 pub mod personality_gen;
 pub mod models;
 pub mod probe;
@@ -36,6 +38,10 @@ pub struct Selection {
     /// The saved profile in use (see `profiles`): it decides which API key is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// The "API format" hint of a hosted provider that is compatible with OpenAI (`chat`, `responses` or `claude`, by provider id);
+    /// none means the provider's own.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub api_formats: HashMap<String, String>,
 }
 
 impl Selection {
@@ -58,6 +64,11 @@ impl Selection {
                 let _ = std::fs::rename(&tmp, Self::file());
             }
         }
+    }
+
+    /// The provider with the API format the person chose for it (`Provider::with_format`); the provider itself when none was.
+    pub fn provider_with_format(&self, p: &'static Provider) -> &'static Provider {
+        p.with_format(self.api_formats.get(p.id).map(String::as_str))
     }
 
     pub fn base_url_for(&self, p: &Provider) -> String {

@@ -529,6 +529,16 @@ mod tests {
                 assert!(from_sel(&sel).is_err(), "{url}");
                 assert!(crate::tools::web::public_https_url(url).is_err(), "{url}");
             }
+            // the Responses and Claude-format custom endpoints are held to the same rule
+            for id in ["custom-responses", "custom-claude"] {
+                for url in ["http://127.0.0.1:11434/v1", "https://10.0.0.5/v1", "http://api.example.com/v1", "https://169.254.169.254/latest", "https://127.1/v1", ""] {
+                    let mut sel = crate::ai::Selection { provider: id.into(), model: "m".into(), ..Default::default() };
+                    sel.base_urls.insert(id.into(), url.into());
+                    crate::ai::keys::set(id, "k").unwrap();
+                    assert!(from_sel(&sel).is_err(), "{id} {url}");
+                }
+                assert!(agent::list_models(crate::ai::providers::find(id).unwrap(), "http://127.0.0.1:1/v1", None).is_err());
+            }
             // a local provider keeps its address on the same machine: refused as well
             let sel = crate::ai::Selection { provider: "ollama".into(), model: "m".into(), ..Default::default() };
             assert!(from_sel(&sel).is_err());
