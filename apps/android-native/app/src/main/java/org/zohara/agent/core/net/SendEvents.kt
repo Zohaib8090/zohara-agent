@@ -25,6 +25,10 @@ sealed interface SendEvent {
   data class ToolDone(val name: String, val ok: Boolean, val output: String) : SendEvent
   data class Approval(val id: Long, val tool: String, val summary: String, val local: Boolean = false) : SendEvent
   data class Question(val id: Long, val questions: List<QuestionSpec>) : SendEvent
+  /** the number of tool calls made so far in this answer ("Step n"); sent after each `tool_start`. Not saved in the chat. */
+  data class Steps(val n: Int) : SendEvent
+  /** the agent repeats the same call ([n] times, tool [tool]); the person may stop it, nothing stops by itself */
+  data class Stuck(val n: Int, val tool: String) : SendEvent
   data class Usage(val input: Long, val output: Long) : SendEvent
   /** Test of a scheduled task (docs/SCHEDULED.md): the first line says what is being tested and where it runs */
   data class Test(val title: String, val kind: String, val place: String) : SendEvent
@@ -64,6 +68,8 @@ object SendEventParser {
       "approval", "approval_wait", "waiting_approval" ->
         SendEvent.Approval(obj.long("id") ?: 0, obj.str("tool").orEmpty(), obj.str("summary").orEmpty(), obj.bool("local") ?: false)
       "question" -> SendEvent.Question(obj.long("id") ?: 0, parseQuestions(obj["questions"]))
+      "steps" -> SendEvent.Steps((obj.long("n") ?: 0).coerceIn(0, Int.MAX_VALUE.toLong()).toInt())
+      "stuck" -> SendEvent.Stuck((obj.long("n") ?: 0).coerceIn(0, Int.MAX_VALUE.toLong()).toInt(), obj.str("tool").orEmpty())
       "usage" -> SendEvent.Usage(obj.long("input") ?: 0, obj.long("output") ?: 0)
       "test" -> SendEvent.Test(obj.str("title").orEmpty(), obj.str("kind").orEmpty(), obj.str("place").orEmpty())
       "notify" -> SendEvent.Notify(obj.str("title").orEmpty(), obj.str("body").orEmpty(), obj.str("kind").orEmpty(), obj.bool("ok") ?: true)

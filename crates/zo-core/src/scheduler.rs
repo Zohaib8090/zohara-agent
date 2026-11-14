@@ -394,7 +394,7 @@ pub fn execute(task: &Task, o: &RunOpts, on: &mut dyn FnMut(Event)) -> Outcome {
                     let short: String = output.chars().take(300).collect();
                     entries.push(entry(if *ok { "msg-tool-out" } else { "msg-error" }, format!("{} {short}", if *ok { "✓" } else { "✗" })));
                 }
-                Event::TextDelta(_) | Event::Usage(_) => {}
+                Event::TextDelta(_) | Event::Usage(_) | Event::Steps(_) | Event::Stuck { .. } => {}
             }
             on(e);
         };

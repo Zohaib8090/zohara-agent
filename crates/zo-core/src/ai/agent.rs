@@ -143,7 +143,8 @@ pub struct Config<'a> {
 impl Config<'static> {
     /// The saved choice, with its key from the keyring.
     pub fn from_selection(sel: &Selection, system: &str) -> Result<Config<'static>, String> {
-        let provider = providers::find(&sel.provider).ok_or("No provider is chosen yet.")?;
+        let named = providers::find(&sel.provider).ok_or("No provider is chosen yet.")?;
+        let provider = sel.provider_with_format(named);
         if sel.model.is_empty() {
             return Err("No model is chosen yet.".into());
         }
@@ -186,6 +187,88 @@ pub enum Event {
     ToolDone { name: String, ok: bool, output: String },
     /// What the last request used (tokens in, out, from the provider's cache).
     Usage(Usage),
+    /// The number of tool calls made so far in this answer (on every tool start).
+    Steps(usize),
+    /// The agent keeps making the same call: `n` calls in the repeating pattern, the tool of the latest one. Only a notice for the
+    /// person (who may press Stop); nothing is stopped and the model is not told.
+    Stuck { n: usize, tool: String },
+}
+
+/// Identical calls in a row that make a notice.
+pub const STUCK_SAME: usize = 8;
+/// Calls alternating between the same two identical calls that make a notice.
+pub const STUCK_ALTERNATING: usize = 12;
+/// A second notice in the same answer needs this many calls more.
+pub const STUCK_AGAIN: usize = 10;
+
+/// Counts the tool calls of one answer and notices when the agent goes round in circles (pure: no clock, no I/O).
+#[derive(Default)]
+pub struct StepWatch {
+    n: usize,
+    /// hashes of the last two calls (name + arguments)
+    last: [Option<u64>; 2],
+    /// length of the identical run (1 when the last call differs from the one before)
+    same: usize,
+    /// length of the tail that alternates between two different calls (0 when there is none)
+    alt: usize,
+    warned_at: Option<usize>,
+}
+
+fn call_hash(name: &str, args: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut h);
+    args.to_string().hash(&mut h);
+    h.finish()
+}
+
+impl StepWatch {
+    pub fn steps(&self) -> usize {
+        self.n
+    }
+
+    /// Notes one tool call; returns the number of calls in the repeating pattern when a notice is due now.
+    pub fn note(&mut self, name: &str, args: &Value) -> Option<usize> {
+        let h = call_hash(name, args);
+        self.n += 1;
+        let [prev, prev2] = self.last;
+        if prev == Some(h) {
+            self.same += 1;
+            self.alt = 0;
+        } else {
+            self.same = 1;
+            self.alt = if prev.is_none() {
+                0
+            } else if prev2 == Some(h) && self.alt >= 2 {
+                self.alt + 1
+            } else {
+                2
+            };
+        }
+        self.last = [Some(h), prev];
+        let pattern = if self.same >= STUCK_SAME {
+            Some(self.same)
+        } else if self.alt >= STUCK_ALTERNATING {
+            Some(self.alt)
+        } else {
+            None
+        }?;
+        if self.warned_at.is_some_and(|w| self.n < w + STUCK_AGAIN) {
+            return None;
+        }
+        self.warned_at = Some(self.n);
+        Some(pattern)
+    }
+
+    /// The events for one tool call that is about to start: the step number, and the notice when it is due.
+    pub fn events(&mut self, name: &str, args: &Value) -> Vec<Event> {
+        let stuck = self.note(name, args);
+        let mut v = vec![Event::Steps(self.n)];
+        if let Some(n) = stuck {
+            v.push(Event::Stuck { n, tool: name.to_string() });
+        }
+        v
+    }
 }
 
 /// What a restricted tenant may reach: no Claude Code, and only a model server with a public https address.
@@ -261,19 +344,62 @@ fn stream_request(req: wire::Request, protocol: Protocol, tx: &std::sync::mpsc::
     }
     let resp = r.send_json(req.body).map_err(http_error)?;
     let streaming = resp.header("content-type").is_some_and(|c| c.contains("text/event-stream"));
-    if !streaming {
-        // a server that answers all at once
-        let v: Value = resp.into_json().map_err(|e| format!("The answer was not valid JSON: {e}"))?;
-        return wire::parse(protocol, &v);
-    }
     let mut acc = wire::StreamAcc::default();
+    if !streaming {
+        // a server that answers all at once (or sends the pieces under a wrong content type)
+        let body = resp.into_string().map_err(|e| format!("The answer could not be read: {e}"))?;
+        return match serde_json::from_str::<Value>(&body) {
+            Ok(v) => wire::parse(protocol, &v),
+            Err(_) if body.trim_start().starts_with("data:") || body.trim_start().starts_with("event:") => {
+                for line in body.lines() {
+                    if let Some(d) = acc.feed(protocol, line)? {
+                        let _ = tx.send(Chunk::Delta(d));
+                    }
+                }
+                finish_stream(acc)
+            }
+            Err(e) => Err(format!("The answer was not valid JSON: {e} (it starts: {})", body.trim().chars().take(80).collect::<String>())),
+        };
+    }
     for line in std::io::BufReader::new(resp.into_reader()).lines() {
         let line = line.map_err(|e| format!("The connection broke while the answer was coming: {e}"))?;
         if let Some(d) = acc.feed(protocol, &line)? {
             let _ = tx.send(Chunk::Delta(d));
         }
     }
-    Ok(acc.finish())
+    finish_stream(acc)
+}
+
+/// The whole answer of a stream; an empty one from a server that spoke another wire format says which provider fits.
+fn finish_stream(acc: wire::StreamAcc) -> Result<Reply, String> {
+    let foreign = acc.foreign();
+    let reply = acc.finish();
+    match foreign {
+        Some(f) if reply.text.is_empty() && reply.calls.is_empty() => Err(wire::wrong_format_hint(f)),
+        _ => Ok(reply),
+    }
+}
+
+/// An error from a request to a custom endpoint (or a compatible host), with the plain hint added when the server seems to speak another
+/// wire format: it names another endpoint, or does not have this one at all.
+pub(crate) fn with_format_hint(p: &Provider, err: String) -> String {
+    if !(p.is_custom() || p.takes_format()) || err.contains("This server speaks") {
+        return err;
+    }
+    let status: u16 = err.strip_prefix("The provider answered ").and_then(|r| r.get(..3)).and_then(|n| n.parse().ok()).unwrap_or(0);
+    if let Some(other) = wire::format_in_error(&err, p.protocol) {
+        return format!("{} ({err})", wire::wrong_format_hint(other));
+    }
+    let low = err.to_lowercase();
+    if matches!(status, 404 | 405 | 501) || low.contains("unsupported") || low.contains("not supported") || low.contains("unknown endpoint") || low.contains("unknown url") {
+        let (path, others) = match p.protocol {
+            Protocol::OpenAiResponses => ("/responses", ["OpenAI Chat", "Claude format"]),
+            Protocol::Anthropic => ("/messages", ["OpenAI Chat", "OpenAI Responses"]),
+            _ => ("/chat/completions", ["OpenAI Responses", "Claude format"]),
+        };
+        return format!("The server does not take {path} ({err}). It may speak another API format: try \"Custom endpoint: {}\" or \"Custom endpoint: {}\".", others[0], others[1]);
+    }
+    err
 }
 
 fn ask(cfg: &Config, turns: &[Turn], specs: &[wire::ToolSpec], cancel: &AtomicBool, on_event: &mut dyn FnMut(Event)) -> Result<Reply, String> {
@@ -289,6 +415,7 @@ fn ask(cfg: &Config, turns: &[Turn], specs: &[wire::ToolSpec], cancel: &AtomicBo
         let out = stream_request(req, protocol, &tx);
         let _ = tx.send(Chunk::Done(out));
     });
+    let provider = cfg.provider;
     loop {
         // checked on every round: a model that streams without pause never lets the wait below time out
         if cancel.load(Ordering::Relaxed) {
@@ -296,7 +423,7 @@ fn ask(cfg: &Config, turns: &[Turn], specs: &[wire::ToolSpec], cancel: &AtomicBo
         }
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Chunk::Delta(t)) => on_event(Event::TextDelta(t)),
-            Ok(Chunk::Done(r)) => return r,
+            Ok(Chunk::Done(r)) => return r.map_err(|e| with_format_hint(provider, e)),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if cancel.load(Ordering::Relaxed) {
                     return Err(STOPPED.into());
@@ -417,6 +544,7 @@ pub fn run_with(cfg: &Config, history: &mut Vec<Turn>, user: &str, extra: Extra,
     let _scope = crate::activity::RunScope::enter(cancel);
     // at most one question card per answer (INTERACTION.md section 1)
     let mut asked = false;
+    let mut watch = StepWatch::default();
     for step in 0..max_steps {
         if cancel.load(Ordering::Relaxed) {
             return Err(STOPPED.into());
@@ -468,6 +596,9 @@ pub fn run_with(cfg: &Config, history: &mut Vec<Turn>, user: &str, extra: Extra,
                 return Err(STOPPED.into());
             }
             on_event(Event::ToolStart { name: call.name.clone(), summary: mcp::summarize(&call.name, &call.args) });
+            for e in watch.events(&call.name, &call.args) {
+                on_event(e);
+            }
             let outcome = if restricted && !crate::tools::allowed_for_restricted(&call.name) {
                 Err(crate::tools::refusal(&call.name))
             } else if call.name == "zohara_ask_user" {
@@ -672,7 +803,12 @@ pub fn list_models(p: &Provider, base_url: &str, key: Option<&str>) -> Result<Ve
     let base = base_url.trim_end_matches('/');
     let mut r = quick_agent(Duration::from_secs(20)).get(&format!("{base}/models"));
     match (p.protocol, key) {
-        (Protocol::Anthropic, Some(k)) => r = r.set("x-api-key", k).set("anthropic-version", "2023-06-01"),
+        (Protocol::Anthropic, Some(k)) => {
+            r = r.set("x-api-key", k).set("anthropic-version", "2023-06-01");
+            if p.is_custom() {
+                r = r.set("authorization", &format!("Bearer {k}"));
+            }
+        }
         (Protocol::Gemini, Some(k)) => r = r.set("x-goog-api-key", k),
         (_, Some(k)) => r = r.set("authorization", &format!("Bearer {k}")),
         _ => {}
@@ -698,6 +834,91 @@ mod tests {
     use serde_json::json;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    fn feed(w: &mut StepWatch, calls: &[(&str, &str)]) -> Vec<Option<usize>> {
+        calls.iter().map(|(n, a)| w.note(n, &json!({"a": a}))).collect()
+    }
+
+    #[test]
+    fn eight_identical_calls_in_a_row_make_one_notice() {
+        let mut w = StepWatch::default();
+        let r = feed(&mut w, &[("zohara_shell", "ls"); 8]);
+        assert!(r[..7].iter().all(Option::is_none), "{r:?}");
+        assert_eq!(r[7], Some(8));
+        assert_eq!(w.steps(), 8);
+        // not again for the next nine calls, then again at ten more
+        let r = feed(&mut w, &[("zohara_shell", "ls"); 10]);
+        assert!(r[..9].iter().all(Option::is_none), "{r:?}");
+        assert_eq!(r[9], Some(18));
+    }
+
+    #[test]
+    fn seven_identical_calls_or_different_arguments_make_no_notice() {
+        let mut w = StepWatch::default();
+        assert!(feed(&mut w, &[("zohara_shell", "ls"); 7]).iter().all(Option::is_none));
+        assert!(feed(&mut w, &[("zohara_shell", "pwd")]).iter().all(Option::is_none)); // different arguments break the run
+        let mut w = StepWatch::default();
+        let calls: Vec<(&str, &str)> = (0..40).map(|i| ("zohara_shell", ["a", "b", "c"][i % 3])).collect();
+        assert!(feed(&mut w, &calls).iter().all(Option::is_none)); // three different calls going round is not the pattern
+    }
+
+    #[test]
+    fn two_calls_alternating_for_twelve_calls_make_a_notice() {
+        let mut w = StepWatch::default();
+        let calls: Vec<(&str, &str)> = (0..12).map(|i| ("zohara_read", ["a", "b"][i % 2])).collect();
+        let r = feed(&mut w, &calls);
+        assert!(r[..11].iter().all(Option::is_none), "{r:?}");
+        assert_eq!(r[11], Some(12));
+        // a break in the pattern starts over
+        let mut w = StepWatch::default();
+        let mut calls: Vec<(&str, &str)> = (0..11).map(|i| ("zohara_read", ["a", "b"][i % 2])).collect();
+        calls.push(("zohara_read", "c"));
+        calls.extend((0..11).map(|i| ("zohara_read", ["a", "b"][i % 2])));
+        assert!(feed(&mut w, &calls).iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn the_tool_name_is_part_of_the_call() {
+        let mut w = StepWatch::default();
+        let calls: Vec<(&str, &str)> = (0..16).map(|i| (["zohara_a", "zohara_b", "zohara_c", "zohara_d"][i % 4], "x")).collect();
+        assert!(feed(&mut w, &calls).iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn events_carry_the_step_number_and_the_notice() {
+        let mut w = StepWatch::default();
+        let mut all = Vec::new();
+        for _ in 0..9 {
+            all.extend(w.events("zohara_shell", &json!({"cmd": "ls"})).into_iter().map(|e| match e {
+                Event::Steps(n) => format!("steps:{n}"),
+                Event::Stuck { n, tool } => format!("stuck:{n}:{tool}"),
+                _ => "?".into(),
+            }));
+        }
+        assert_eq!(all, ["steps:1", "steps:2", "steps:3", "steps:4", "steps:5", "steps:6", "steps:7", "steps:8", "stuck:8:zohara_shell", "steps:9"]);
+    }
+
+    #[test]
+    fn a_looping_model_gets_steps_and_one_notice_and_is_never_stopped() {
+        let _g = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let call = |i: usize| json!({"choices":[{"message":{"tool_calls":[{"id":format!("c{i}"),"function":{"name":"zohara_shell","arguments":json!({"cmd":"echo same"}).to_string()}}]}}]});
+        let mut answers: Vec<Value> = (0..9).map(call).collect();
+        answers.push(json!({"choices":[{"message":{"content":"Done."}}]}));
+        let (url, server) = mock(answers);
+        let mut history = Vec::new();
+        let mut events = Vec::new();
+        let r = run(&cfg(url, "openai"), &mut history, "loop", Mode::Auto, &Deny, &AtomicBool::new(false), &mut |e| match e {
+            Event::Steps(n) => events.push(format!("steps:{n}")),
+            Event::Stuck { n, tool } => events.push(format!("stuck:{n}:{tool}")),
+            _ => {}
+        });
+        server.join().unwrap();
+        assert!(r.is_ok(), "{r:?}");
+        let stucks: Vec<&String> = events.iter().filter(|e| e.starts_with("stuck")).collect();
+        assert_eq!(stucks, ["stuck:8:zohara_shell"], "{events:?}");
+        assert_eq!(events.iter().filter(|e| e.starts_with("steps")).count(), 9);
+        assert_eq!(events.last().unwrap(), "steps:9");
+    }
 
     fn run(cfg: &Config, history: &mut Vec<Turn>, user: &str, mode: Mode, approver: &dyn Approver, cancel: &AtomicBool, on_event: &mut dyn FnMut(Event)) -> Result<(), String> {
         super::run(cfg, history, user, mode, approver, &NoQuestions, cancel, on_event)
@@ -911,8 +1132,10 @@ mod tests {
             Event::ToolStart { name, .. } => format!("start:{name}"),
             Event::ToolDone { ok, output, .. } => format!("done:{ok}:{output}"),
             Event::Usage(_) => "usage".to_string(),
+            Event::Steps(n) => format!("steps:{n}"),
+            Event::Stuck { n, .. } => format!("stuck:{n}"),
         })).unwrap();
-        assert_eq!(events, ["text:Checking.", "start:zohara_shell", "done:true:zo-loop-ok", "text:It printed zo-loop-ok."]);
+        assert_eq!(events, ["text:Checking.", "start:zohara_shell", "steps:1", "done:true:zo-loop-ok", "text:It printed zo-loop-ok."]);
         assert_eq!(history.len(), 4);
         let seen = server.join().unwrap();
         assert_eq!(seen[1]["messages"].as_array().unwrap().last().unwrap()["content"], "zo-loop-ok");
@@ -999,8 +1222,10 @@ mod tests {
             Event::ToolStart { name, .. } => format!("start:{name}"),
             Event::ToolDone { ok, output, .. } => format!("done:{ok}:{output}"),
             Event::Usage(_) => "usage".to_string(),
+            Event::Steps(n) => format!("steps:{n}"),
+            Event::Stuck { n, .. } => format!("stuck:{n}"),
         })).unwrap();
-        assert_eq!(events, ["delta:Checking ", "delta:now.", "text:Checking now.", "start:zohara_shell", "done:true:stream-ok", "delta:It said ", "delta:stream-ok.", "text:It said stream-ok."]);
+        assert_eq!(events, ["delta:Checking ", "delta:now.", "text:Checking now.", "start:zohara_shell", "steps:1", "done:true:stream-ok", "delta:It said ", "delta:stream-ok.", "text:It said stream-ok."]);
         let seen = server.join().unwrap();
         assert_eq!(seen[0]["stream"], true);
     }
@@ -1134,5 +1359,186 @@ mod tests {
         let (url, seen) = mock(vec![json!({"choices":[{"message":{"content":"ok"}}]})]);
         run(&cfg(url, "openai"), &mut Vec::new(), "hi", Mode::Auto, &Deny, &AtomicBool::new(false), &mut |_| {}).unwrap();
         assert!(!seen.join().unwrap()[0]["tools"].to_string().contains("zohara_ask_user"));
+    }
+
+    // ---- the three wire formats of a custom endpoint, against servers that speak only one of them
+
+    use crate::ai::mock::{Answer, Mock};
+    use std::sync::atomic::AtomicUsize;
+
+    const CALL: &str = r#"{"cmd":"echo zo-resp-ok"}"#;
+
+    /// A router that knows only POST /v1/responses; every other path is a 404 like a real router's.
+    fn responses_router(streaming: bool) -> Mock {
+        let n = AtomicUsize::new(0);
+        Mock::start(move |method, path, _body| {
+            if method != "POST" || !path.ends_with("/v1/responses") {
+                return Answer::json(404, json!({"error": {"message": "Not Found", "type": "invalid_request_error"}}));
+            }
+            let first = n.fetch_add(1, Ordering::SeqCst) == 0;
+            let item_call = json!({"type": "function_call", "id": "fc_1", "call_id": "call_r1", "name": "zohara_shell", "arguments": CALL, "status": "completed"});
+            let item_text = |t: &str| json!({"type": "message", "id": "msg_1", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": t, "annotations": []}]});
+            let usage = json!({"input_tokens": 20, "output_tokens": 5, "input_tokens_details": {"cached_tokens": 8}});
+            if !streaming {
+                let out = if first { vec![json!({"type": "reasoning", "id": "rs_1", "summary": []}), item_text("Checking."), item_call] } else { vec![item_text("It printed zo-resp-ok.")] };
+                return Answer::json(200, json!({"id": "resp_1", "object": "response", "status": "completed", "error": null, "output": out, "usage": usage}));
+            }
+            let ev = |v: Value| format!("event: {}\ndata: {}\n\n", v["type"].as_str().unwrap(), v);
+            let mut pieces = Vec::new();
+            let mut all = String::new();
+            all.push_str(&ev(json!({"type": "response.created", "response": {"id": "resp_1", "status": "in_progress", "output": []}})));
+            if first {
+                all.push_str(&ev(json!({"type": "response.output_item.added", "output_index": 0, "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": []}})));
+                all.push_str(&ev(json!({"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": "Check"})));
+                all.push_str(&ev(json!({"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": "ing."})));
+                all.push_str(&ev(json!({"type": "response.output_item.done", "output_index": 0, "item": item_text("Checking.")})));
+                all.push_str(&ev(json!({"type": "response.output_item.added", "output_index": 1, "item": {"type": "function_call", "id": "fc_1", "call_id": "call_r1", "name": "zohara_shell", "arguments": ""}})));
+                all.push_str(&ev(json!({"type": "response.function_call_arguments.delta", "output_index": 1, "item_id": "fc_1", "delta": &CALL[..9]})));
+                all.push_str(&ev(json!({"type": "response.function_call_arguments.delta", "output_index": 1, "item_id": "fc_1", "delta": &CALL[9..]})));
+                all.push_str(&ev(json!({"type": "response.function_call_arguments.done", "output_index": 1, "item_id": "fc_1", "arguments": CALL})));
+                all.push_str(&ev(json!({"type": "response.output_item.done", "output_index": 1, "item": item_call})));
+            } else {
+                all.push_str(&ev(json!({"type": "response.output_text.delta", "output_index": 0, "delta": "It printed "})));
+                all.push_str(&ev(json!({"type": "response.output_text.delta", "output_index": 0, "delta": "zo-resp-ok."})));
+            }
+            all.push_str(&ev(json!({"type": "response.completed", "response": {"status": "completed", "output": [], "usage": usage}})));
+            all.push_str("data: [DONE]\n\n");
+            // cut into pieces that end in the middle of lines
+            let bytes: Vec<char> = all.chars().collect();
+            for c in bytes.chunks(37) {
+                pieces.push(c.iter().collect());
+            }
+            Answer::sse(pieces)
+        })
+    }
+
+    fn run_loop(provider: &str, url: &str) -> (Result<(), String>, Vec<Turn>, Vec<String>) {
+        let _g = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut history = Vec::new();
+        let mut events = Vec::new();
+        let r = run(&cfg(url.to_string(), provider), &mut history, "say it", Mode::Auto, &Deny, &AtomicBool::new(false), &mut |e| match e {
+            Event::TextDelta(t) => events.push(format!("delta:{t}")),
+            Event::Text(t) => events.push(format!("text:{t}")),
+            Event::ToolStart { name, .. } => events.push(format!("start:{name}")),
+            Event::ToolDone { ok, output, .. } => events.push(format!("done:{ok}:{output}")),
+            Event::Usage(u) => events.push(format!("usage:{}:{}:{}", u.input, u.cached, u.output)),
+            _ => {}
+        });
+        (r, history, events)
+    }
+
+    #[test]
+    fn the_loop_works_against_a_server_that_speaks_only_responses_without_streaming() {
+        let m = responses_router(false);
+        let (r, history, events) = run_loop("custom-responses", &m.url);
+        assert!(r.is_ok(), "{r:?} {events:?}");
+        assert_eq!(history.len(), 4);
+        assert!(events.contains(&"done:true:zo-resp-ok".to_string()) && events.contains(&"text:It printed zo-resp-ok.".to_string()), "{events:?}");
+        assert!(events.contains(&"usage:12:8:5".to_string()), "{events:?}");
+        let seen = m.seen.lock().unwrap();
+        assert!(seen.iter().all(|(meth, p, ..)| meth == "POST" && p == "/v1/responses"), "{:?}", m.paths());
+        assert_eq!(seen.len(), 2);
+        let (_, _, first, auth, _) = &seen[0];
+        assert_eq!(auth, "Bearer k");
+        assert_eq!(first["stream"], true);
+        assert_eq!(first["store"], false);
+        assert!(first["instructions"].as_str().unwrap().starts_with("sys"));
+        assert_eq!(first["input"][0]["content"][0]["text"], "say it");
+        assert!(first["tools"].as_array().unwrap().iter().all(|t| t["type"] == "function" && t["name"].is_string() && t["parameters"].is_object()));
+        // the second request sends the call and its result back, joined by call_id
+        let second = seen[1].2["input"].as_array().unwrap();
+        let kinds: Vec<&str> = second.iter().map(|i| i["type"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["message", "message", "function_call", "function_call_output"]);
+        assert_eq!((second[2]["call_id"].clone(), second[3]["call_id"].clone(), second[3]["output"].clone()), (json!("call_r1"), json!("call_r1"), json!("zo-resp-ok")));
+        assert_eq!(second[2]["arguments"], CALL);
+    }
+
+    #[test]
+    fn the_loop_works_against_a_server_that_speaks_only_responses_and_streams_in_split_chunks() {
+        let m = responses_router(true);
+        let (r, history, events) = run_loop("custom-responses", &m.url);
+        assert!(r.is_ok(), "{r:?} {events:?}");
+        assert_eq!(history.len(), 4);
+        let deltas: Vec<&String> = events.iter().filter(|e| e.starts_with("delta:")).collect();
+        assert_eq!(deltas, ["delta:Check", "delta:ing.", "delta:It printed ", "delta:zo-resp-ok."]);
+        assert!(events.contains(&"done:true:zo-resp-ok".to_string()), "{events:?}");
+        assert!(events.contains(&"usage:12:8:5".to_string()), "{events:?}");
+        assert!(matches!(&history[3], Turn::Assistant { text, .. } if text == "It printed zo-resp-ok."));
+        assert!(matches!(&history[1], Turn::Assistant { text, calls } if text == "Checking." && calls[0].id == "call_r1"));
+    }
+
+    #[test]
+    fn the_chat_provider_against_a_responses_only_server_says_which_provider_to_pick() {
+        // a plain 404 on /chat/completions: the server has no such endpoint, so another format is suggested
+        let m = responses_router(false);
+        let (r, ..) = run_loop("custom", &m.url);
+        let e = r.unwrap_err();
+        assert!(e.contains("/chat/completions") && e.contains("OpenAI Responses") && e.contains("Claude format"), "{e}");
+        assert_eq!(m.paths(), ["POST /v1/chat/completions"]);
+    }
+
+    #[test]
+    fn an_error_that_names_the_responses_endpoint_becomes_the_plain_hint() {
+        let m = Mock::start(|_, _, _| Answer::json(400, json!({"error": {"message": "This model is not supported in the chat completions API. Use /v1/responses instead."}})));
+        let (r, ..) = run_loop("custom", &m.url);
+        let e = r.unwrap_err();
+        assert!(e.starts_with("This server speaks the OpenAI Responses format: pick \"Custom endpoint: OpenAI Responses\""), "{e}");
+        // 405 and "unsupported" are hinted too; a 401 or a 500 are left alone
+        for (status, msg, hinted) in [(405, "Method Not Allowed", true), (400, "unsupported operation", true), (401, "bad key", false), (500, "boom", false)] {
+            let m = Mock::start(move |_, _, _| Answer::json(status, json!({"error": {"message": msg}})));
+            let e = run_loop("custom", &m.url).0.unwrap_err();
+            assert_eq!(e.contains("another API format"), hinted, "{status}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_responses_body_or_stream_sent_to_the_chat_provider_is_recognised() {
+        let body = json!({"object": "response", "status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "hi"}]}]});
+        let m = Mock::start(move |_, _, _| Answer::json(200, body.clone()));
+        let e = run_loop("custom", &m.url).0.unwrap_err();
+        assert!(e.starts_with("This server speaks the OpenAI Responses format"), "{e}");
+        let m = Mock::start(|_, _, _| Answer::sse(vec!["data: {\"type\":\"response.created\",\"response\":{}}\n\n".into(), "data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n".into()]));
+        let e = run_loop("custom", &m.url).0.unwrap_err();
+        assert!(e.starts_with("This server speaks the OpenAI Responses format"), "{e}");
+        // and the Claude shape sent to the Responses provider
+        let claude = json!({"type": "message", "role": "assistant", "content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"});
+        let m = Mock::start(move |_, _, _| Answer::json(200, claude.clone()));
+        let e = run_loop("custom-responses", &m.url).0.unwrap_err();
+        assert!(e.contains("Claude format"), "{e}");
+    }
+
+    #[test]
+    fn the_claude_format_of_a_custom_endpoint_runs_the_loop_at_messages() {
+        let n = AtomicUsize::new(0);
+        let m = Mock::start(move |_, path, _| {
+            if !path.ends_with("/v1/messages") {
+                return Answer::json(404, json!({"error": {"message": "nope"}}));
+            }
+            if n.fetch_add(1, Ordering::SeqCst) == 0 {
+                Answer::json(200, json!({"type": "message", "role": "assistant", "content": [{"type": "text", "text": "Checking."}, {"type": "tool_use", "id": "tu_1", "name": "zohara_shell", "input": {"cmd": "echo zo-resp-ok"}}], "stop_reason": "tool_use", "usage": {"input_tokens": 3, "output_tokens": 4}}))
+            } else {
+                Answer::json(200, json!({"type": "message", "role": "assistant", "content": [{"type": "text", "text": "Done."}], "stop_reason": "end_turn"}))
+            }
+        });
+        let (r, history, events) = run_loop("custom-claude", &m.url);
+        assert!(r.is_ok(), "{r:?} {events:?}");
+        assert_eq!(history.len(), 4);
+        let seen = m.seen.lock().unwrap();
+        assert_eq!((seen[0].3.as_str(), seen[0].4.as_str()), ("Bearer k", "k"));
+        assert_eq!(seen[1].2["messages"].as_array().unwrap().last().unwrap()["content"][0]["tool_use_id"], "tu_1");
+    }
+
+    #[test]
+    fn json_sent_under_a_wrong_content_type_and_sse_sent_as_plain_text_are_both_read() {
+        // the pieces of a stream with no content type that says so
+        let sse = "data:{\"type\":\"response.output_text.delta\",\"delta\":\"hel\"}\n\ndata:{\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\ndata:[DONE]\n\n";
+        let m = Mock::start(move |_, _, _| Answer { status: 200, ctype: "text/plain", pieces: vec![sse.to_string()] });
+        let (r, h, _) = run_loop("custom-responses", &m.url);
+        assert!(r.is_ok());
+        assert!(matches!(&h[1], Turn::Assistant { text, .. } if text == "hello"), "{h:?}");
+        // a page that is not JSON at all
+        let m = Mock::start(|_, _, _| Answer { status: 200, ctype: "text/html", pieces: vec!["<html>login</html>".into()] });
+        let e = run_loop("custom-responses", &m.url).0.unwrap_err();
+        assert!(e.contains("not valid JSON") && e.contains("<html>"), "{e}");
     }
 }

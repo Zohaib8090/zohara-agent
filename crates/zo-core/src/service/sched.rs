@@ -292,6 +292,12 @@ pub fn test_stream(req: &Value, mut reader: BufReader<UnixStream>, out: Arc<Mute
         Event::Usage(u) => {
             line(&sink, &json!({"event": "usage", "input": u.input, "output": u.output}));
         }
+        Event::Steps(n) => {
+            line(&sink, &json!({"event": "steps", "n": n}));
+        }
+        Event::Stuck { n, tool } => {
+            line(&sink, &json!({"event": "stuck", "n": n, "tool": tool}));
+        }
     });
     match result {
         Some(r) => {

@@ -319,11 +319,18 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             Ok(json!({
                 "current": sel.provider,
                 "hidden_providers": hidden,
+                "formats": api_formats_json(),
                 "providers": providers::all().iter().filter(|p| p.protocol != providers::Protocol::ClaudeCode || !tenant::multi_tenant() || claude_code::usable_here()).map(|p| json!({
                     "id": p.id, "name": if tenant::multi_tenant() && p.protocol == providers::Protocol::ClaudeCode { "Claude Code (your subscription)" } else { p.name }, "local": p.local,
                     "has_key": p.local || p.protocol == crate::ai::providers::Protocol::ClaudeCode || crate::ai::profiles::get_key(&sel, p.id).is_some(),
                     // the person types the address (a custom endpoint, or a model server on a computer): the screen shows an Address field
-                    "needs_url": p.protocol != providers::Protocol::ClaudeCode && (p.id == "custom" || p.local),
+                    "needs_url": p.protocol != providers::Protocol::ClaudeCode && (p.is_custom() || p.local),
+                    // the wire format it speaks (`chat`, `responses`, `claude`): a custom endpoint's is part of its name; a hosted
+                    // compatible provider may be told another one (`api_format`, saved with `select`)
+                    "custom": p.is_custom(),
+                    "format": providers::format_name(match p.protocol { providers::Protocol::OpenAiResponses => "responses", providers::Protocol::Anthropic => "claude", _ => "chat" }),
+                    "takes_format": p.takes_format(),
+                    "api_format": if p.takes_format() { sel.api_formats.get(p.id).and_then(|f| providers::format_name(f)) } else { None },
                     "default_url": p.base_url,
                     "base_url": sel.base_url_for(p),
                     "hidden": hidden.iter().any(|h| h == p.id),
@@ -334,6 +341,7 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             let sel = Selection::load();
             let pid = req.get("provider").and_then(Value::as_str).filter(|p| !p.is_empty()).unwrap_or(&sel.provider).to_string();
             let p = providers::find(&pid).ok_or("choose a provider on the computer first")?;
+            let p = format_for(&sel, req, p)?;
             // an address in the request is tried without being saved (so the form can check it before the person saves)
             let base = req.get("base_url").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty()).map(str::to_string).unwrap_or_else(|| sel.base_url_for(p));
             // the key only goes to the provider's own address (a different one is tried without it)
@@ -353,6 +361,7 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             let sel = Selection::load();
             let pid = req.get("provider").and_then(Value::as_str).filter(|p| !p.is_empty()).unwrap_or(&sel.provider).to_string();
             let p = providers::find(&pid).ok_or("choose a provider first")?;
+            let p = format_for(&sel, req, p)?;
             let base = req.get("base_url").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty()).map(str::to_string).unwrap_or_else(|| sel.base_url_for(p));
             let model = req.get("model").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| if sel.provider == p.id { sel.model.clone() } else { String::new() });
             let key = crate::ai::profiles::get_key(&sel, p.id).filter(|_| p.key_fits(&base));
@@ -393,6 +402,16 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             if let Some(e) = req.get("effort").and_then(Value::as_str) {
                 sel.effort = Some(e.to_string()).filter(|e| !e.is_empty());
             }
+            if let Some(f) = req.get("api_format").and_then(Value::as_str) {
+                let prov = providers::find(&sel.provider).ok_or("choose a provider first")?;
+                if !prov.takes_format() {
+                    return Err(format!("{} has no API format to choose: pick the Custom endpoint that speaks the format you need.", prov.name));
+                }
+                match f.trim() {
+                    "" | "default" => sel.api_formats.remove(prov.id),
+                    f => sel.api_formats.insert(prov.id.to_string(), providers::format_name(f).ok_or("The API format is one of: chat, responses, claude.")?.to_string()),
+                };
+            }
             if let Some(u) = req.get("base_url").and_then(Value::as_str) {
                 let prov = providers::find(&sel.provider).ok_or("choose a provider first")?;
                 check_base_url(prov, u)?;
@@ -404,7 +423,8 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             crate::ai::profiles::update_active(&sel);
             sel.save();
             let base = providers::find(&sel.provider).map(|p| sel.base_url_for(p)).unwrap_or_default();
-            Ok(json!({"provider": sel.provider, "model": sel.model, "effort": sel.effort, "base_url": base}))
+            let api_format = providers::find(&sel.provider).filter(|p| p.takes_format()).and_then(|p| sel.api_formats.get(p.id).cloned());
+            Ok(json!({"provider": sel.provider, "model": sel.model, "effort": sel.effort, "base_url": base, "api_format": api_format}))
         }
         "set_key" => {
             let sel = Selection::load();
@@ -618,6 +638,26 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             Ok(json!({}))
         }
         other => Err(format!("unknown request: {other}")),
+    }
+}
+
+/// The wire formats a person can choose from, for the screens: id, name, the path it is sent to.
+fn api_formats_json() -> Value {
+    json!([
+        {"id": "chat", "name": "OpenAI Chat", "path": "/v1/chat/completions"},
+        {"id": "responses", "name": "OpenAI Responses", "path": "/v1/responses"},
+        {"id": "claude", "name": "Claude format", "path": "/v1/messages"},
+    ])
+}
+
+/// The provider as it is to be used now: its saved API format, or the one a request names to try (not saved).
+fn format_for(sel: &Selection, req: &Value, p: &'static providers::Provider) -> Result<&'static providers::Provider, String> {
+    match req.get("api_format").and_then(Value::as_str).map(str::trim) {
+        Some("") | Some("default") | None => Ok(sel.provider_with_format(p)),
+        Some(f) => {
+            let name = providers::format_name(f).ok_or("The API format is one of: chat, responses, claude.")?;
+            Ok(p.with_format(Some(name)))
+        }
     }
 }
 
@@ -919,6 +959,12 @@ fn send(req: &Value, mut reader: BufReader<UnixStream>, out: Arc<Mutex<UnixStrea
             }
             Event::Usage(u) => {
                 line(&o, &json!({"event": "usage", "input": u.input, "output": u.output}));
+            }
+            Event::Steps(n) => {
+                line(&o, &json!({"event": "steps", "n": n}));
+            }
+            Event::Stuck { n, tool } => {
+                line(&o, &json!({"event": "stuck", "n": n, "tool": tool}));
             }
         };
         if sel.provider == "claude-code" {
@@ -1354,6 +1400,32 @@ mod tenant_tests {
             None => std::env::remove_var("XDG_CONFIG_HOME"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_stream_carries_the_step_counter_and_one_repeat_notice_even_for_a_restricted_account() {
+        let _g = lock();
+        let t = fresh(true);
+        let same = ("zohara_web_search", json!({"query": ""}));
+        let (url, _seen) = fake_model(vec![tool_reply(&vec![same; 9]), chat_reply("Done.")]);
+        use_model(&t, &url);
+        let r = talk(with_tenant(json!({"op": "send", "text": "go round in circles"}), &t), true);
+        let steps: Vec<u64> = r.iter().filter(|l| l["event"] == "steps").map(|l| l["n"].as_u64().unwrap()).collect();
+        assert_eq!(steps, (1..=9).collect::<Vec<u64>>(), "{r:?}");
+        let stuck: Vec<&Value> = r.iter().filter(|l| l["event"] == "stuck").collect();
+        assert_eq!(stuck.len(), 1, "{r:?}");
+        assert_eq!((stuck[0]["n"].as_u64(), stuck[0]["tool"].as_str()), (Some(8), Some("zohara_web_search")));
+        // the notice comes right after the eighth step, and nothing was stopped
+        let kinds: Vec<&str> = r.iter().filter_map(|l| l["event"].as_str()).collect();
+        let i = kinds.iter().position(|k| *k == "stuck").unwrap();
+        assert_eq!(kinds[i - 1], "steps");
+        assert!(!kinds.contains(&"stopped") && !kinds.contains(&"error"), "{kinds:?}");
+        assert_eq!(kinds.last(), Some(&"done"));
+        // the saved chat has no line for either event
+        crate::tenant::scope(&t, || {
+            let c = chats::load();
+            assert!(c[0].entries.iter().all(|e| !e.text.contains("Repeating")), "nothing about it is saved in the chat");
+        });
     }
 
     #[test]
@@ -1979,6 +2051,108 @@ mod tenant_tests {
         // the same refusal for a profile's address
         let id = ask(json!({"op": "profile_create", "name": "P"}))["id"].as_str().unwrap().to_string();
         assert!(ask(json!({"op": "profile_update", "id": id, "base_url": "http://192.168.1.2/v1"}))["error"].as_str().unwrap().contains("public https"));
+    }
+
+    #[test]
+    fn the_provider_list_has_the_three_custom_endpoints_and_the_api_format_extras() {
+        let _g = lock();
+        let admin = fresh(false);
+        let ask = |v: Value| talk(with_tenant(v, &admin), true).remove(0);
+        let r = ask(json!({"op": "providers"}));
+        let names: Vec<(String, String)> = ["custom", "custom-responses", "custom-claude"].iter().map(|id| (id.to_string(), find_in(&r, id)["name"].as_str().unwrap().to_string())).collect();
+        assert_eq!(names, [
+            ("custom".to_string(), "Custom endpoint: OpenAI Chat (/v1/chat/completions)".to_string()),
+            ("custom-responses".to_string(), "Custom endpoint: OpenAI Responses (/v1/responses)".to_string()),
+            ("custom-claude".to_string(), "Custom endpoint: Claude format (/v1/messages)".to_string()),
+        ]);
+        for (id, fmt) in [("custom", "chat"), ("custom-responses", "responses"), ("custom-claude", "claude")] {
+            let p = find_in(&r, id);
+            assert_eq!((p["needs_url"].clone(), p["custom"].clone(), p["format"].clone(), p["takes_format"].clone(), p["has_key"].clone()), (json!(true), json!(true), json!(fmt), json!(false), json!(false)), "{id}");
+        }
+        assert_eq!((find_in(&r, "openai")["takes_format"].clone(), find_in(&r, "openai")["custom"].clone(), find_in(&r, "openai")["format"].clone()), (json!(true), json!(false), json!("chat")));
+        assert_eq!(find_in(&r, "anthropic")["format"], "claude");
+        assert_eq!(r["formats"].as_array().unwrap().iter().map(|f| f["id"].as_str().unwrap()).collect::<Vec<_>>(), ["chat", "responses", "claude"]);
+        // a key typed for one custom endpoint is that endpoint's own
+        assert!(ask(json!({"op": "set_key", "provider": "custom-responses", "key": "sk-resp-1"}))["error"].is_null());
+        let r = ask(json!({"op": "providers"}));
+        assert_eq!((find_in(&r, "custom-responses")["has_key"].clone(), find_in(&r, "custom")["has_key"].clone()), (json!(true), json!(false)));
+        // selecting each keeps its own address
+        for (id, url) in [("custom", "http://127.0.0.1:1001/v1"), ("custom-responses", "http://127.0.0.1:1002/v1"), ("custom-claude", "http://127.0.0.1:1003/v1")] {
+            let r = ask(json!({"op": "select", "provider": id, "model": "m", "base_url": url}));
+            assert_eq!((r["provider"].clone(), r["base_url"].clone()), (json!(id), json!(url)), "{r}");
+        }
+        let r = ask(json!({"op": "providers"}));
+        assert_eq!((find_in(&r, "custom")["base_url"].clone(), find_in(&r, "custom-claude")["base_url"].clone()), (json!("http://127.0.0.1:1001/v1"), json!("http://127.0.0.1:1003/v1")));
+    }
+
+    #[test]
+    fn a_hosted_provider_takes_an_api_format_that_is_saved_and_shown_and_a_custom_one_does_not() {
+        let _g = lock();
+        let admin = fresh(false);
+        let ask = |v: Value| talk(with_tenant(v, &admin), true).remove(0);
+        let r = ask(json!({"op": "select", "provider": "openai", "model": "gpt-5", "api_format": "responses"}));
+        assert_eq!(r["api_format"], "responses", "{r}");
+        assert_eq!(find_in(&ask(json!({"op": "providers"})), "openai")["api_format"], "responses");
+        crate::tenant::scope(&admin, || {
+            let sel = Selection::load();
+            assert_eq!(sel.provider_with_format(providers::find("openai").unwrap()).protocol, providers::Protocol::OpenAiResponses);
+            assert_eq!(sel.provider_with_format(providers::find("openrouter").unwrap()).protocol, providers::Protocol::OpenAi);
+        });
+        assert!(ask(json!({"op": "select", "api_format": "grpc"}))["error"].as_str().unwrap().contains("chat, responses, claude"));
+        assert_eq!(ask(json!({"op": "select", "api_format": ""}))["api_format"], Value::Null);
+        assert_eq!(find_in(&ask(json!({"op": "providers"})), "openai")["api_format"], Value::Null);
+        // the API format of a custom endpoint is the endpoint itself
+        let r = ask(json!({"op": "select", "provider": "custom", "api_format": "responses"}));
+        assert!(r["error"].as_str().unwrap().contains("Custom endpoint"), "{r}");
+        // the key still goes only to the provider's own address, whatever the format
+        let r = ask(json!({"op": "select", "provider": "openai", "api_format": "responses", "base_url": "https://evil.example/v1"}));
+        assert!(r["error"].as_str().unwrap().contains("own address"), "{r}");
+    }
+
+    #[test]
+    fn the_connection_test_tells_which_custom_endpoint_a_server_needs() {
+        let _g = lock();
+        let admin = fresh(false);
+        let ask = |v: Value| talk(with_tenant(v, &admin), true).remove(0);
+        use crate::ai::mock::{Answer, Mock};
+        let m = Mock::start(|method, path, _| match (method, path) {
+            ("POST", "/v1/responses") => Answer::json(200, json!({"object": "response", "status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}]})),
+            ("GET", "/v1/models") => Answer::json(200, json!({"data": [{"id": "r1"}, {"id": "r2"}]})),
+            _ => Answer::json(404, json!({"error": {"message": "Not Found"}})),
+        });
+        let r = ask(json!({"op": "model_test", "provider": "custom", "base_url": m.url, "model": "r1"}));
+        assert_eq!(r["works"], false, "{r}");
+        assert!(r["message"].as_str().unwrap().contains("This server speaks the OpenAI Responses format"), "{r}");
+        let r = ask(json!({"op": "model_test", "provider": "custom-responses", "base_url": m.url, "model": "r1"}));
+        assert_eq!(r["works"], true, "{r}");
+        let r = ask(json!({"op": "models", "provider": "custom-responses", "base_url": m.url}));
+        assert_eq!(r["models"], json!(["r1", "r2"]), "{r}");
+        // a hosted provider tried with an API format, not saved
+        let r = ask(json!({"op": "model_test", "provider": "openai", "api_format": "responses", "base_url": "http://127.0.0.1:1/v1", "model": "m"}));
+        assert!(r["error"].as_str().unwrap_or("").contains("own address") || r["works"] == false, "{r}");
+        assert_eq!(find_in(&ask(json!({"op": "providers"})), "openai")["api_format"], Value::Null, "trying a format does not save it");
+    }
+
+    #[test]
+    fn a_restricted_account_gets_the_same_address_rules_for_all_three_custom_endpoints() {
+        let _g = lock();
+        let t = fresh(true);
+        let ask = |v: Value| talk(with_tenant(v, &t), true).remove(0);
+        for id in ["custom", "custom-responses", "custom-claude"] {
+            for bad in ["http://127.0.0.1:8000/v1", "https://10.0.0.5/v1", "http://api.example.com/v1", "https://localhost/v1"] {
+                let r = ask(json!({"op": "select", "provider": id, "base_url": bad}));
+                assert!(r["error"].as_str().unwrap().contains("public https"), "{id} {bad}: {r}");
+                let r = ask(json!({"op": "models", "provider": id, "base_url": bad}));
+                assert!(r["error"].as_str().unwrap().contains("public https"), "{id} {bad}: {r}");
+                let r = ask(json!({"op": "model_test", "provider": id, "base_url": bad, "model": "m"}));
+                assert_eq!(r["works"], false, "{id} {bad}: {r}");
+                assert!(r["message"].as_str().unwrap().contains("public https"), "{id} {bad}: {r}");
+            }
+            assert_eq!(ask(json!({"op": "select", "provider": id, "base_url": "https://8.8.8.8/v1"}))["base_url"], "https://8.8.8.8/v1", "{id}");
+        }
+        // the API format hint of a hosted provider does not open a private address either
+        let r = ask(json!({"op": "select", "provider": "openai", "api_format": "responses", "base_url": "http://127.0.0.1:8000/v1"}));
+        assert!(r["error"].is_string(), "{r}");
     }
 }
 

@@ -152,3 +152,11 @@ The service answers at **https://zohara-agent.duckdns.org** (a free DuckDNS name
 
 The Play listing links to `https://zohara-agent.duckdns.org/privacy` (privacy policy) and `https://zohara-agent.duckdns.org/delete-account` (account deletion page). Both are served without sign-in
 and their contact line comes from `ZO_CONTACT_EMAIL`, so that variable must be a real, read inbox before Play review. See `docs/PLAY-STORE.md`.
+
+## Publishing to alpha (what makes a new build reach the laptop)
+
+No token is needed. `Zohaib8090/zohara-packages` has `poll-agent.yml`: every 20 minutes it looks for the newest green "Build & Publish Zohara Agent" run on main of this repository and, if it was not sent yet, starts its own `publish.yml` for the alpha channel with its own `GITHUB_TOKEN` (the source runs are public). So a build reaches alpha within about 20 minutes of going green; "Run workflow" on poll-agent.yml does it at once. Beta and stable are never touched by it.
+
+`publish-alpha.yml` in this repository is the optional fast path: if a repository secret `PACKAGES_DISPATCH_TOKEN` exists (fine-grained token, only `Zohaib8090/zohara-packages`, Contents: Read and write) the publish starts right after the build; without it the workflow just says so. Found 2026-11-14: this repository never had that secret (zohara, zohara-settings, zohara-link and zohara-apps do), and zohara-packages only accepted the old repository name `ZO-AI`, so new builds had not reached alpha since 2026-11-05. Both are fixed in zohara-packages (allowed source `Zohaib8090/zohara-agent`, polling).
+
+On the laptop an update arrives through Settings > Zohara Update (or `sudo pacman -Sy` and then `sudo pacman -Syu`); the package is now named `zohara-agent` and replaces `zohara-ai`.
