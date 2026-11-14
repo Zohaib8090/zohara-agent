@@ -259,8 +259,46 @@ pub struct Note<'a> {
     pub title: &'a str,
 }
 
+/// A finished scheduled task (docs/SCHEDULED.md). The text of the result leaves the server only for a device whose person allowed
+/// titles in notifications (`Sub::show_title`); otherwise the notification only says that a task finished.
+pub struct TaskNote<'a> {
+    pub chat: &'a str,
+    pub title: &'a str,
+    pub body: &'a str,
+    pub ok: bool,
+    pub reminder: bool,
+}
+
+/// What a notification says: an answer is ready, or a scheduled task ended.
+enum Msg<'a> {
+    Answer(&'a Note<'a>),
+    Task(&'a TaskNote<'a>),
+}
+
+impl Msg<'_> {
+    fn chat(&self) -> String {
+        clean_chat_id(match self {
+            Msg::Answer(n) => n.chat,
+            Msg::Task(n) => n.chat,
+        })
+    }
+}
+
 fn clean_chat_id(id: &str) -> String {
     if id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') { id.to_string() } else { String::new() }
+}
+
+const BODY_CHARS: usize = 140;
+
+fn clean_body(t: &str) -> String {
+    let one: String = t.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let one = one.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.chars().count() > BODY_CHARS {
+        let cut: String = one.chars().take(BODY_CHARS - 1).collect();
+        format!("{}…", cut.trim_end())
+    } else {
+        one
+    }
 }
 
 fn clean_title(t: &str) -> String {
@@ -565,18 +603,27 @@ impl Hub {
         true
     }
 
-    fn payload(sub: &Sub, n: &Note) -> Vec<u8> {
-        let mut p = json!({"v": 1, "type": "answer", "chat": clean_chat_id(n.chat)});
+    fn payload(sub: &Sub, m: &Msg) -> Vec<u8> {
+        let mut p = match m {
+            Msg::Answer(_) => json!({"v": 1, "type": "answer", "chat": m.chat()}),
+            Msg::Task(t) => json!({"v": 1, "type": "task", "chat": m.chat(), "ok": t.ok, "reminder": t.reminder}),
+        };
         if sub.show_title {
-            let t = clean_title(n.title);
-            if !t.is_empty() {
-                p["title"] = json!(t);
+            let (title, body) = match m {
+                Msg::Answer(n) => (clean_title(n.title), String::new()),
+                Msg::Task(t) => (clean_title(t.title), clean_body(t.body)),
+            };
+            if !title.is_empty() {
+                p["title"] = json!(title);
+            }
+            if !body.is_empty() {
+                p["body"] = json!(body);
             }
         }
         p.to_string().into_bytes()
     }
 
-    fn send_web(&self, sub: &Sub, n: &Note) -> Outcome {
+    fn send_web(&self, sub: &Sub, n: &Msg) -> Outcome {
         let origin = match self.allow.check(&sub.endpoint) {
             Ok(o) => o,
             Err(e) => return Outcome::Failed(e),
@@ -608,25 +655,46 @@ impl Hub {
         }
     }
 
-    fn send_fcm(&self, sub: &Sub, n: &Note) -> Outcome {
+    fn send_fcm(&self, sub: &Sub, n: &Msg) -> Outcome {
         let (project, bearer) = match self.fcm_access() {
             Some(Ok(x)) => x,
             Some(Err(e)) => return Outcome::Failed(e),
             None => return Outcome::Failed("FCM is not set up.".into()),
         };
-        let chat = clean_chat_id(n.chat);
-        let mut data = json!({"type": "answer", "chat": chat});
-        let mut body_text = "Your answer is ready".to_string();
+        let chat = n.chat();
+        let (mut data, mut body_text, mut head) = match n {
+            Msg::Answer(_) => (json!({"type": "answer", "chat": chat}), "Your answer is ready".to_string(), "Zohara Agent".to_string()),
+            Msg::Task(t) => (
+                json!({"type": "task", "chat": chat, "ok": t.ok.to_string(), "reminder": t.reminder.to_string()}),
+                if t.reminder { "A reminder is due".to_string() } else if t.ok { "A scheduled task finished".to_string() } else { "A scheduled task failed".to_string() },
+                "Zohara Agent".to_string(),
+            ),
+        };
         if sub.show_title {
-            let t = clean_title(n.title);
-            if !t.is_empty() {
-                data["title"] = json!(t);
-                body_text = t;
+            match n {
+                Msg::Answer(a) => {
+                    let t = clean_title(a.title);
+                    if !t.is_empty() {
+                        data["title"] = json!(t);
+                        body_text = t;
+                    }
+                }
+                Msg::Task(t) => {
+                    let (title, body) = (clean_title(t.title), clean_body(t.body));
+                    if !title.is_empty() {
+                        data["title"] = json!(title);
+                        head = title;
+                    }
+                    if !body.is_empty() {
+                        data["body"] = json!(body);
+                        body_text = body;
+                    }
+                }
             }
         }
         let msg = json!({"message": {
             "token": sub.token,
-            "notification": {"title": "Zohara Agent", "body": body_text},
+            "notification": {"title": head, "body": body_text},
             "data": data,
             "android": {"priority": "HIGH", "notification": {"tag": format!("zo-chat-{chat}")}},
         }});
@@ -643,6 +711,24 @@ impl Hub {
     /// Sends the "answer ready" notification to every device of the person. Returns how many were handed over. Subscriptions the
     /// push service says are over are removed. Runs on the caller's thread: use `notify_answer` to not wait.
     pub fn deliver_answer(&self, tenant: &str, n: &Note) -> usize {
+        self.deliver(tenant, &Msg::Answer(n))
+    }
+
+    /// Tells the person's devices that a scheduled task ended (or that a reminder is due). Returns how many were handed over.
+    pub fn deliver_task(&self, tenant: &str, n: &TaskNote) -> usize {
+        self.deliver(tenant, &Msg::Task(n))
+    }
+
+    /// Like `deliver_task`, on a thread of its own.
+    pub fn notify_task(self: &Arc<Self>, tenant: &str, n: TaskNote<'_>) {
+        let (hub, tenant) = (self.clone(), tenant.to_string());
+        let (chat, title, body, ok, reminder) = (n.chat.to_string(), n.title.to_string(), n.body.to_string(), n.ok, n.reminder);
+        std::thread::spawn(move || {
+            hub.deliver_task(&tenant, &TaskNote { chat: &chat, title: &title, body: &body, ok, reminder });
+        });
+    }
+
+    fn deliver(&self, tenant: &str, n: &Msg) -> usize {
         let list = match self.load(tenant) {
             Ok(l) if !l.is_empty() => l,
             _ => return 0,

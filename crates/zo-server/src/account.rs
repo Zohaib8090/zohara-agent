@@ -152,6 +152,7 @@ pub fn handle(app: &App, name: &str, v: &Value, who: &Who, lease: &Lease) -> (u1
                 || {
                     app.accepted.lock().unwrap().remove(id);
                     app.push.forget(id);
+                    crate::cloudrun::forget(app, id); // their scheduled tasks stop (and the index entry goes)
                     if let Some(db) = app.tenants.db() {
                         // first the marker that keeps a sign-in token that is still valid from bringing the account back
                         let marker = |removed: bool| json!({"at": now_secs(), "login_removed": removed}).to_string();

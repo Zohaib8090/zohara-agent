@@ -103,6 +103,13 @@ pub fn place_text(task: &Task) -> String {
     }
 }
 
+/// When the next task of this person that this host runs is due (an asked-for run counts as now), for the server's index of who has
+/// something to run. None when nothing of theirs is switched on.
+pub fn next_due_here() -> Option<u64> {
+    let now = schedules::now_millis();
+    schedules::load().iter().filter(|t| t.enabled && host_runs(t)).map(|t| if t.run_requested { now } else { t.next_run }).min()
+}
+
 // ── the cloud policy and per-person limits ──
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -805,5 +812,39 @@ mod tests {
             std::fs::write(usage_path(), json!({"day": today() - 1, "runs": 99}).to_string()).unwrap();
             assert_eq!(runs_today(), 0, "yesterday's count is gone");
         });
+    }
+
+    #[test]
+    fn a_restricted_persons_task_on_the_server_gets_the_web_tools_only() {
+        let _g = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use crate::tenant::testkit::*;
+        let t = fresh(true);
+        let target = std::env::temp_dir().join(format!("zo-restricted-write-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&target);
+        let (url, seen) = fake_model(vec![tool_reply(&[("zohara_fs_write", json!({"path": target.to_string_lossy(), "content": "x"}))]), chat_reply("I could not write.")]);
+        use_model(&t, &url);
+        crate::tenant::test_multi(true);
+        let results = tenant::scope(&t, || {
+            let task = schedules::add_new(schedules::New { prompt: "write a file".into(), next_run: 1_000, repeat: "daily".into(), run_on: "cloud".into(), ..Default::default() }).unwrap();
+            assert!(host_runs(&task));
+            let cancel = Arc::new(AtomicBool::new(false));
+            let mut tool_results = Vec::new();
+            let o = RunOpts { test: false, how: "scheduled", missed: None, approver: &Deny, cancel: &cancel, source: "test" };
+            let out = run_and_record(&task, &o, &mut |e| {
+                if let Event::ToolDone { ok, output, .. } = e {
+                    tool_results.push((ok, output));
+                }
+            })
+            .unwrap();
+            assert_eq!(out.status, "ok", "{}", out.summary);
+            tool_results
+        });
+        crate::tenant::test_multi(false);
+        let bodies = seen.join().unwrap();
+        assert!(!target.exists(), "a person who is not an owner has no file tools on the server");
+        assert!(results.iter().any(|(ok, _)| !ok), "{results:?}");
+        // the model was only offered the web and memory tools
+        let offered: Vec<String> = bodies[0]["tools"].as_array().unwrap().iter().filter_map(|t| t["function"]["name"].as_str().map(String::from)).collect();
+        assert!(offered.iter().all(|n| n.starts_with("zohara_web_") || n.starts_with("zohara_memory_") || n == "zohara_ask_user"), "{offered:?}");
     }
 }

@@ -263,10 +263,13 @@ fn the_restricted_person_gets_the_five_tools_and_the_admin_does_not_get_refused(
     // through the service: refused for the restricted person, allowed for the admin
     let w = call(&r, "tok-r", "/api/account/whoami", json!({}));
     assert_eq!((w.body["admin"].clone(), w.body["restricted"].clone()), (json!(false), json!(true)));
-    for op in ["machines", "mcp_list", "scheduled", "projects"] {
+    for op in ["machines", "mcp_list", "projects"] {
         let a = call(&r, "tok-r", "/api/op", json!({"op": op}));
         assert_eq!(a.body["ok"], false, "{op}: {:?}", a.body);
     }
+    // scheduled tasks are theirs too, on the server, with limits (cloudrun.rs and docs/SCHEDULED.md)
+    let a = call(&r, "tok-r", "/api/op", json!({"op": "scheduled"}));
+    assert_eq!((a.body["ok"].clone(), a.body["host"].clone()), (json!(true), json!("cloud")), "{:?}", a.body);
     let mode = call(&r, "tok-r", "/api/op", json!({"op": "mode", "set": "bypass"}));
     assert_eq!(mode.body["ok"], false, "{:?}", mode.body);
     let admin = call(&r, "tok-o", "/api/op", json!({"op": "machines"}));
@@ -3085,3 +3088,90 @@ fn the_real_desktop_code_opens_a_terminal_only_after_its_owner_says_yes_on_the_c
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!((r.app.link.counts().1, r.app.link.counts().2), (0, 0), "no job and no stream is left behind");
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------
+// scheduled tasks on the server (cloudrun.rs)
+
+/// Makes a person's task due now (the way time passing would), inside their folder.
+fn make_due(uid: &str, id: &str, restricted: bool) -> zo_core::tenant::Tenant {
+    let t = zo_core::tenant::Tenant::open_in(&testenv::env(), &tenant_of(uid), restricted).unwrap();
+    zo_core::tenant::scope(&t, || {
+        zo_core::store::schedules::update(id, zo_core::store::schedules::Edit { next_run: Some(zo_core::store::schedules::now_millis() - 1000), ..Default::default() }).unwrap();
+    });
+    t
+}
+
+#[test]
+fn a_reminder_of_a_restricted_person_runs_on_the_server_alone_and_is_pushed_to_their_own_devices_only() {
+    let (u, other) = (uniq("cloud-r"), uniq("cloud-x"));
+    let fake = Arc::new(push::testkit::Fake::default());
+    let pdb: Arc<dyn Db> = Arc::new(MemDb::default());
+    let hub = Arc::new(push::Hub::new(Some(pdb), testenv::SECRET, "mailto:o@zo.test".into()).with_transport(fake.clone()).with_allow(push::Allow::for_test("https://push.test")));
+    let r = rig_push(&[("tok-r", &u, "r@x.test"), ("tok-x", &other, "x@x.test")], "", 200, 600, hub);
+    let keys = push::testkit::browser();
+    let mut sub = push::testkit::web_sub("https://push.test/ep/r", &keys);
+    sub["show_title"] = json!(true);
+    assert_eq!(call(&r, "tok-r", "/api/account/push_subscribe", sub).status, 200);
+    cloudrun::start_notifier(&r.app);
+    // a reminder, made on the server: it is theirs, on the cloud, and the runner knows when it is due
+    let a = call(&r, "tok-r", "/api/op", json!({"op": "schedule_add", "task": "call mom", "title": "Call", "when": "in 2 hours", "kind": "reminder", "tz": "UTC"}));
+    assert_eq!((a.body["ok"].clone(), a.body["task"]["run_on"].clone()), (json!(true), json!("cloud")), "{:?}", a.body);
+    let id = a.body["task"]["id"].as_str().unwrap().to_string();
+    let me = tenant_of(&u);
+    assert!(cloudrun::due_at(&me).is_some_and(|t| t > zo_core::store::schedules::now_millis()), "in the index, not due yet");
+    assert!(cloudrun::due_at(&tenant_of(&other)).is_none(), "somebody else has nothing");
+    assert_eq!(call(&r, "tok-x", "/api/op", json!({"op": "scheduled"})).body["tasks"].as_array().unwrap().len(), 0);
+    // time passes: the runner runs it, nobody asked, and says so on the person's device
+    let t = make_due(&u, &id, true);
+    cloudrun::refresh(&r.app, &t);
+    assert!(cloudrun::due_at(&me).is_some_and(|d| d <= zo_core::store::schedules::now_millis()));
+    assert!(cloudrun::tick(&r.app) >= 1);
+    wait_until(20, "the push of the reminder", || !fake.calls.lock().unwrap().is_empty());
+    let calls = fake.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let note = push::testkit::decrypt_for(&keys, &calls[0].2);
+    assert_eq!((note["type"].clone(), note["reminder"].clone(), note["title"].clone(), note["body"].clone()), (json!("task"), json!(true), json!("Call"), json!("call mom")), "{note}");
+    drop(calls);
+    wait_until(10, "the history", || call(&r, "tok-r", "/api/op", json!({"op": "schedule_history", "id": id})).body["history"].as_array().is_some_and(|h| h.len() == 1));
+    let h = call(&r, "tok-r", "/api/op", json!({"op": "schedule_history", "id": id}));
+    assert_eq!((h.body["history"][0]["status"].clone(), h.body["history"][0]["how"].clone()), (json!("ok"), json!("scheduled")), "{:?}", h.body);
+    // a one-off switches itself off and leaves the index
+    wait_until(10, "the index to be emptied", || cloudrun::due_at(&me).is_none());
+    // somebody else cannot see, run, switch or remove it
+    for body in [json!({"op": "schedule_run_now", "id": id}), json!({"op": "schedule_enable", "id": id, "on": true}), json!({"op": "schedule_cancel", "id": id}), json!({"op": "schedule_history", "id": id})] {
+        assert_eq!(call(&r, "tok-x", "/api/op", body.clone()).body["ok"], false, "{body}");
+    }
+    // the person's limits hold: no browser task, no machine, nothing more often than hourly
+    for bad in [json!({"kind": "browser"}), json!({"run_on": "machine:vm"}), json!({"repeat": "every 10 minutes"})] {
+        let mut body = json!({"op": "schedule_add", "task": "x", "when": "tomorrow"});
+        for (k, v) in bad.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        assert_eq!(call(&r, "tok-r", "/api/op", body.clone()).body["ok"], false, "{body}");
+    }
+    // deleting the account takes their tasks out of the index
+    let again = call(&r, "tok-r", "/api/op", json!({"op": "schedule_add", "task": "later", "when": "in 3 hours", "kind": "reminder"}));
+    assert_eq!(again.body["ok"], true);
+    assert!(cloudrun::due_at(&me).is_some());
+    cloudrun::forget(&r.app, &me);
+    assert!(cloudrun::due_at(&me).is_none());
+}
+
+#[test]
+fn the_operator_can_turn_cloud_tasks_off_or_keep_them_to_the_owner() {
+    let (u, o) = (uniq("cloud-p"), uniq("cloud-o"));
+    let r = rig(&[("tok-r", &u, "r@x.test"), ("tok-o", &o, "owner@x.test")], "owner@x.test", 200, 600);
+    let add = json!({"op": "schedule_add", "task": "x", "when": "in 2 hours", "kind": "reminder"});
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("ZO_CLOUD_TASKS", "admins");
+    let (rr, oo) = (call(&r, "tok-r", "/api/op", add.clone()), call(&r, "tok-o", "/api/op", add.clone()));
+    std::env::set_var("ZO_CLOUD_TASKS", "off");
+    let off = call(&r, "tok-o", "/api/op", add.clone());
+    std::env::remove_var("ZO_CLOUD_TASKS");
+    assert_eq!(rr.body["ok"], false, "a person who is not an owner is refused under admins: {:?}", rr.body);
+    assert_eq!(oo.body["ok"], true, "{:?}", oo.body);
+    assert_eq!(off.body["ok"], false, "{:?}", off.body);
+}
+
+/// Tests that change an environment variable of the whole process take turns.
+static ENV_LOCK: Mutex<()> = Mutex::new(());

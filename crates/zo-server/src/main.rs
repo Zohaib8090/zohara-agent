@@ -30,6 +30,7 @@
 mod account;
 mod auth;
 mod claude_api;
+mod cloudrun;
 mod db;
 mod devicelogin;
 mod devices;
@@ -829,7 +830,13 @@ fn route(app: Arc<App>, mut req: Request) {
             } else {
                 None
             };
-            match op(&for_service(v, &tenant)) {
+            // a change to the person's scheduled tasks: the cloud runner looks again at when they are next due
+            let scheduled = v.get("op").and_then(Value::as_str).is_some_and(|o| o == "scheduled" || o.starts_with("schedule_"));
+            let r = op(&for_service(v, &tenant));
+            if scheduled {
+                cloudrun::refresh(&app, &tenant);
+            }
+            match r {
                 Ok(r) => reply(&app, req, 200, r),
                 Err(e) => reply(&app, req, 502, json!({"ok": false, "error": e})),
             }
@@ -1071,6 +1078,8 @@ fn main() {
             a.term.sweep();
         });
     }
+    // scheduled tasks that run on the server (cloudrun.rs)
+    cloudrun::start(&app);
     serve(app, server);
 }
 
