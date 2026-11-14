@@ -65,6 +65,8 @@ class ModelSheetActions(
   val onSaveKey: (String) -> Unit = {},
   val onTogglePin: (String) -> Unit = {},
   val onEffort: (String) -> Unit = {},
+  val onApiFormat: (String) -> Unit = {},
+  val onSwitchFormat: (ModelLogic.ApiFormat) -> Unit = {},
   val onAddEndpoint: () -> Unit = {},
 )
 
@@ -93,7 +95,7 @@ fun ModelSheet(onDismiss: () -> Unit, onUsed: () -> Unit = {}) {
     ModelSheetActions(
       onProvider = ctl::selectProvider, onAddress = ctl::setAddress, onAddressDone = ctl::addressDone, onFilter = ctl::setFilter,
       onChoose = ctl::choose, onFetch = { ctl.fetchModels(force = true) }, onTest = ctl::testConnection, onSaveKey = { k -> ctl.saveKey(k) },
-      onTogglePin = ctl::togglePin, onEffort = ctl::setEffort, onAddEndpoint = { addEndpoint = true },
+      onTogglePin = ctl::togglePin, onEffort = ctl::setEffort, onApiFormat = ctl::setApiFormat, onSwitchFormat = ctl::switchToFormat, onAddEndpoint = { addEndpoint = true },
     )
   }
   ZoBottomSheet(
@@ -124,6 +126,7 @@ fun ModelSheetBody(s: ModelSheetState, restricted: Boolean, a: ModelSheetActions
 
     val p = s.provider
     if (p != null) {
+      if (p.takesFormat) ApiFormatSection(s, p, a.onApiFormat)
       AddressSection(s, p, restricted, a)
       if (!ModelLogic.isLocal(p)) KeySection(s, p, restricted, a)
       ModelListSection(s, a)
@@ -166,7 +169,7 @@ private fun ProviderPicker(s: ModelSheetState, onSelect: (String) -> Unit) {
 private fun AddressSection(s: ModelSheetState, p: ProviderInfo, restricted: Boolean, a: ModelSheetActions) {
   val c = ZoTheme.colors
   var advanced by remember(p.id) { mutableStateOf(false) }
-  val needs = p.needsUrl
+  val needs = ModelLogic.needsAddress(p)
   Column(Modifier.padding(top = 14.dp)) {
     if (!needs) {
       Row(
@@ -191,6 +194,10 @@ private fun AddressSection(s: ModelSheetState, p: ProviderInfo, restricted: Bool
           s.testText, style = ZoTheme.type.fieldHint,
           color = when (s.testOk) { true -> c.ok; false -> c.danger; null -> c.dimmer }, modifier = Modifier.weight(1f),
         )
+      }
+      // the server said which format it speaks: one tap picks the Custom endpoint for it
+      s.hintedFormat?.takeIf { ModelLogic.isCustom(p) }?.let { f ->
+        Row(Modifier.padding(top = 8.dp)) { PillButton("Use Custom endpoint: ${f.name}", { a.onSwitchFormat(f) }, accent = true) }
       }
     }
   }
@@ -341,6 +348,44 @@ private fun EffortPicker(s: ModelSheetState, onEffort: (String) -> Unit) {
   }
 }
 
+/** The "API format" of a hosted OpenAI-compatible provider: its normal format, or another one it is told to speak. */
+@Composable
+private fun ApiFormatSection(s: ModelSheetState, p: ProviderInfo, onFormat: (String) -> Unit) {
+  val normal = ModelLogic.formatOf(p)
+  val options = listOf("" to "Default: ${normal.label}") + ModelLogic.FORMATS.map { it.id to it.label }
+  Column(Modifier.padding(top = 14.dp)) {
+    FormatDropdown("API format", options, s.apiFormat, onFormat)
+    Text(ModelLogic.formatHint(p), style = ZoTheme.type.fieldHint, color = ZoTheme.colors.dimmer, modifier = Modifier.padding(top = 5.dp))
+  }
+}
+
+/** A drop-down of (id, label) pairs, shown like the provider and effort fields. */
+@Composable
+fun FormatDropdown(label: String, options: List<Pair<String, String>>, selected: String, onSelect: (String) -> Unit) {
+  val c = ZoTheme.colors
+  var open by remember { mutableStateOf(false) }
+  Text(label, style = ZoTheme.type.fieldLabel, color = c.text, modifier = Modifier.padding(bottom = 6.dp))
+  Box {
+    Row(
+      Modifier.fillMaxWidth().clip(ZoTheme.shapes.field).background(c.input).border(1.dp, c.border, ZoTheme.shapes.field)
+        .clickable(role = Role.DropdownList) { open = true }.padding(horizontal = 12.dp, vertical = 12.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Text(options.firstOrNull { it.first == selected }?.second ?: selected, style = ZoTheme.type.body, color = c.text, modifier = Modifier.weight(1f))
+      ZoIcon(ZoIcons.Down, tint = c.dim, size = 18.dp)
+    }
+    DropdownMenu(open, { open = false }, modifier = Modifier.background(c.popover)) {
+      for ((id, text) in options) {
+        DropdownMenuItem(
+          text = { Text(text, style = ZoTheme.type.body, color = c.text) },
+          trailingIcon = if (id == selected) ({ ZoIcon(ZoIcons.Check, tint = c.accent, size = 16.dp) }) else null,
+          onClick = { open = false; onSelect(id) },
+        )
+      }
+    }
+  }
+}
+
 // ================================================================================================================ add a custom endpoint (MODEL-25)
 
 @Composable
@@ -354,6 +399,7 @@ fun AddEndpointSheet(restricted: Boolean, onDismiss: () -> Unit, onAdded: () -> 
     )
   }
   val st by ctl.state.collectAsState()
+  var format by remember { mutableStateOf(ModelLogic.FORMATS[0]) }
   var name by remember { mutableStateOf("") }
   var address by remember { mutableStateOf("") }
   var key by remember { mutableStateOf("") }
@@ -362,12 +408,13 @@ fun AddEndpointSheet(restricted: Boolean, onDismiss: () -> Unit, onAdded: () -> 
     title = "Add a custom endpoint", onDismiss = onDismiss,
     footer = {
       SecondaryButton("Cancel", onDismiss)
-      PrimaryButton("Add and use", { ctl.add(name, address, key, model, onAdded) }, loading = st.busy)
+      PrimaryButton("Add and use", { ctl.add(format, name, address, key, model, onAdded) }, loading = st.busy)
     },
   ) {
     EndpointForm(
       name, { name = it }, address, { address = it }, key, { key = it }, model, { model = it },
-      st.error, st.testText, st.testOk, st.testing, onTest = { ctl.test(address, key, model) },
+      st.error, st.testText, st.testOk, st.testing, onTest = { ctl.test(format, address, key, model) },
+      format = format, onFormat = { format = it },
     )
   }
 }
@@ -376,10 +423,13 @@ fun AddEndpointSheet(restricted: Boolean, onDismiss: () -> Unit, onAdded: () -> 
 fun EndpointForm(
   name: String, onName: (String) -> Unit, address: String, onAddress: (String) -> Unit, key: String, onKey: (String) -> Unit,
   model: String, onModel: (String) -> Unit, error: String, testText: String, testOk: Boolean?, testing: Boolean, onTest: () -> Unit,
+  format: ModelLogic.ApiFormat = ModelLogic.FORMATS[0], onFormat: (ModelLogic.ApiFormat) -> Unit = {},
 ) {
   val c = ZoTheme.colors
   Column(Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-    Text("Any server that speaks the OpenAI chat API: vLLM, LM Studio, a company gateway, a proxy.", style = ZoTheme.type.fieldHint, color = c.dimmer)
+    Text("Any server that speaks one of the three formats: vLLM, LM Studio, an agent router, a company gateway, a proxy.", style = ZoTheme.type.fieldHint, color = c.dimmer)
+    FormatDropdown("API format", ModelLogic.FORMATS.map { it.id to it.label }, format.id) { id -> ModelLogic.formatById(id)?.let(onFormat) }
+    Text("The app adds ${format.path.removePrefix("/v1")} to the address. Not sure? Test connection says which one the server speaks.", style = ZoTheme.type.fieldHint, color = c.dimmer)
     ZoTextField(name, onName, label = "Name", placeholder = "Work server, Home GPU…", modifier = Modifier.fillMaxWidth())
     ZoTextField(address, onAddress, label = "Address", placeholder = "https://my-host.example/v1", keyboardType = androidx.compose.ui.text.input.KeyboardType.Uri, modifier = Modifier.fillMaxWidth())
     ZoTextField(key, onKey, label = "Key", password = true, placeholder = "Only if the server needs one", modifier = Modifier.fillMaxWidth())
@@ -389,6 +439,7 @@ fun EndpointForm(
       Spacer(Modifier.width(10.dp))
       Text(testText, style = ZoTheme.type.fieldHint, color = when (testOk) { true -> c.ok; false -> c.danger; null -> c.dimmer }, modifier = Modifier.weight(1f))
     }
+    if (testOk == false) ModelLogic.hintFormat(testText, format)?.let { f -> Row { PillButton("Use Custom endpoint: ${f.name}", { onFormat(f) }, accent = true) } }
     if (error.isNotBlank()) ErrorLine(error)
   }
 }

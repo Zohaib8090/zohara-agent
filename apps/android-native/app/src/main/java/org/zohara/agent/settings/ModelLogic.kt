@@ -11,6 +11,43 @@ object ModelLogic {
   private val LOCAL_IDS = setOf("ollama", "lmstudio", "llamacpp", "vllm", "sglang", "claude-code")
   private val MAJOR_IDS = setOf("anthropic", "openai", "gemini")
 
+  /** The three "Custom endpoint" providers, one per wire format. An older server does not send `custom`, so the ids are known too. */
+  private val CUSTOM_IDS = setOf("custom", "custom-responses", "custom-claude")
+
+  fun isCustom(p: ProviderInfo): Boolean = p.custom || p.id in CUSTOM_IDS
+
+  /** A custom endpoint is nothing without its address, whatever an older server says in `needs_url`. */
+  fun needsAddress(p: ProviderInfo): Boolean = p.needsUrl || isCustom(p)
+
+  /** One wire format: the id the server takes (`api_format`), its name and the path it is sent to. */
+  data class ApiFormat(val id: String, val name: String, val path: String, val providerId: String) {
+    val label: String get() = "$name ($path)"
+  }
+
+  val FORMATS = listOf(
+    ApiFormat("chat", "OpenAI Chat", "/v1/chat/completions", "custom"),
+    ApiFormat("responses", "OpenAI Responses", "/v1/responses", "custom-responses"),
+    ApiFormat("claude", "Claude format", "/v1/messages", "custom-claude"),
+  )
+
+  fun formatById(id: String?): ApiFormat? = FORMATS.firstOrNull { it.id == id }
+
+  /** The wire format of a provider: what the server says, else known from the id (Anthropic speaks Claude, the rest Chat). */
+  fun formatOf(p: ProviderInfo): ApiFormat = formatById(p.format) ?: FORMATS.firstOrNull { it.providerId == p.id }
+    ?: if (p.id == "anthropic") FORMATS[2] else FORMATS[0]
+
+  /** The format choice shown for a hosted provider (null when it takes none): its saved one, else its normal one. */
+  fun chosenFormat(p: ProviderInfo): ApiFormat? = if (p.takesFormat) formatById(p.apiFormat) ?: formatOf(p) else null
+
+  /**
+   * The format a server answer points to: "This server speaks the OpenAI Responses format: pick "Custom endpoint: OpenAI Responses"". Null when
+   * the message names none or names the one in use ([current]).
+   */
+  fun hintFormat(message: String, current: ApiFormat?): ApiFormat? {
+    val m = Regex("Custom endpoint: (OpenAI Chat|OpenAI Responses|Claude format)").find(message) ?: return null
+    return FORMATS.firstOrNull { it.name == m.groupValues[1] }?.takeIf { it != current }
+  }
+
   fun isLocal(p: ProviderInfo): Boolean = p.local || p.id in LOCAL_IDS
 
   /**
@@ -36,9 +73,9 @@ object ModelLogic {
   /** MODEL-09: Popular Providers, Cloud & Open-Weight, Local Models (This Computer), Custom Endpoint. Empty groups are left out. */
   fun groups(list: List<ProviderInfo>): List<Group> = listOf(
     Group("Popular Providers", list.filter { it.id in MAJOR_IDS }),
-    Group("Cloud & Open-Weight", list.filter { it.id !in MAJOR_IDS && it.id != "custom" && !isLocal(it) }),
-    Group("Local Models (This Computer)", list.filter { it.id !in MAJOR_IDS && it.id != "custom" && isLocal(it) }),
-    Group("Custom Endpoint", list.filter { it.id == "custom" }),
+    Group("Cloud & Open-Weight", list.filter { it.id !in MAJOR_IDS && !isCustom(it) && !isLocal(it) }),
+    Group("Local Models (This Computer)", list.filter { it.id !in MAJOR_IDS && !isCustom(it) && isLocal(it) }),
+    Group("Custom Endpoint", list.filter { isCustom(it) }),
   ).filter { it.items.isNotEmpty() }
 
   /** The name of a provider in the picker: a tick after the ones that have a key (or need none). */
@@ -53,11 +90,15 @@ object ModelLogic {
   /** MODEL-12: the hint under the address field. */
   fun addressHint(p: ProviderInfo?, restricted: Boolean): String = when {
     p == null -> ""
-    p.id == "custom" -> "The address of any OpenAI-compatible server, for example http://192.168.1.20:8000/v1 or https://my-host.example/v1." +
-      if (restricted) " Only public https addresses work here." else ""
-    isLocal(p) || p.needsUrl -> "Where the server runs. The default is right unless you changed its port."
+    isCustom(p) -> "The address of a server that speaks ${formatOf(p).name}, for example http://192.168.1.20:8000/v1 or https://my-host.example/v1. " +
+      "The app adds ${formatOf(p).path.removePrefix("/v1")}." + if (restricted) " Only public https addresses work here." else ""
+    isLocal(p) || needsAddress(p) -> "Where the server runs. The default is right unless you changed its port."
     else -> "Only change this for a proxy or a regional endpoint." + if (p.defaultUrl.isNotBlank()) " Normal address: ${p.defaultUrl}" else ""
   }
+
+  /** The sentence under the API format choice of a hosted provider. */
+  fun formatHint(p: ProviderInfo): String =
+    "The wire format this provider is asked in. Leave it on ${formatOf(p).name} unless the provider says otherwise."
 
   /** MODEL-12/MODEL-25: "" when the address is fine, else the sentence to show. Restricted accounts: a public https address only. */
   fun validateAddress(address: String, needs: Boolean, restricted: Boolean): String {
@@ -150,6 +191,8 @@ object ModelLogic {
     val base = when {
       p.id == "claude-code" -> "Uses your Claude Code sign-in"
       isLocal(p) -> "Runs on this computer, no key"
+      isCustom(p) && p.hasKey -> "Key saved · ${formatOf(p).label}"
+      isCustom(p) -> "No key yet · ${formatOf(p).label}"
       p.hasKey -> "Key saved"
       else -> "No key yet"
     }
