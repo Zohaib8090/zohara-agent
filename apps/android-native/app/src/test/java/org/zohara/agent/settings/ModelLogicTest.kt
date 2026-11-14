@@ -2,6 +2,7 @@ package org.zohara.agent.settings
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.zohara.agent.core.net.ModelsResp
@@ -14,7 +15,7 @@ class ModelLogicTest {
   // ---- MODEL-10
   @Test fun restrictedAccountsGetNoLocalProvidersAndNoClaudeCode() {
     val ids = ModelLogic.shownProviders(all, emptyList(), null, restricted = true).map { it.id }
-    assertEquals(listOf("anthropic", "openai", "gemini", "groq", "openrouter", "custom"), ids)
+    assertEquals(listOf("anthropic", "openai", "gemini", "groq", "openrouter", "custom", "custom-responses", "custom-claude"), ids)
   }
 
   @Test fun hiddenProvidersAreLeftOutExceptTheOneInUse() {
@@ -55,7 +56,7 @@ class ModelLogicTest {
   }
 
   @Test fun addressHintsPerKindOfProvider() {
-    assertTrue(ModelLogic.addressHint(all.first { it.id == "custom" }, false).startsWith("The address of any OpenAI-compatible server, for example http://192.168.1.20:8000/v1"))
+    assertTrue(ModelLogic.addressHint(all.first { it.id == "custom" }, false).startsWith("The address of a server that speaks OpenAI Chat, for example http://192.168.1.20:8000/v1"))
     assertTrue(ModelLogic.addressHint(all.first { it.id == "custom" }, true).endsWith("Only public https addresses work here."))
     assertEquals("Where the server runs. The default is right unless you changed its port.", ModelLogic.addressHint(all.first { it.id == "ollama" }, false))
     assertTrue(ModelLogic.addressHint(all.first { it.id == "openai" }, false).startsWith("Only change this for a proxy or a regional endpoint."))
@@ -157,5 +158,73 @@ class ModelLogicTest {
     assertTrue(ModelLogic.needsInUseNow(g, "p1", "something-else"))
     assertTrue(ModelLogic.needsInUseNow(g, "p2", "claude-sonnet-5")) // same name, other profile
     assertFalse(ModelLogic.needsInUseNow(g, "p1", ""))
+  }
+
+  // ---- the three custom endpoints (chat, responses, claude)
+  @Test fun theThreeCustomEndpointsAreTreatedAlikeAndNeedAnAddress() {
+    val customs = all.filter { ModelLogic.isCustom(it) }
+    assertEquals(listOf("custom", "custom-responses", "custom-claude"), customs.map { it.id })
+    assertTrue(customs.all { ModelLogic.needsAddress(it) && !ModelLogic.isLocal(it) })
+    assertFalse(ModelLogic.isCustom(all.first { it.id == "openai" }))
+  }
+
+  @Test fun anOlderServerThatSendsNoCustomFlagStillGetsTheKnownIds() {
+    val old = listOf(provider("custom", "Custom endpoint"), provider("custom-responses", "Custom endpoint: OpenAI Responses"), provider("groq"))
+    assertTrue(old.take(2).all { ModelLogic.isCustom(it) && ModelLogic.needsAddress(it) })
+    assertEquals(listOf("Custom Endpoint", "Cloud & Open-Weight"), ModelLogic.groups(old).map { it.label }.reversed())
+    assertEquals(listOf("custom", "custom-responses"), ModelLogic.groups(old).first { it.label == "Custom Endpoint" }.items.map { it.id })
+    assertEquals("responses", ModelLogic.formatOf(old[1]).id)
+  }
+
+  @Test fun theGroupsPutAllThreeCustomEndpointsUnderCustomEndpointAndNowhereElse() {
+    val g = ModelLogic.groups(all)
+    assertEquals(listOf("Popular Providers", "Cloud & Open-Weight", "Local Models (This Computer)", "Custom Endpoint"), g.map { it.label })
+    assertEquals(listOf("custom", "custom-responses", "custom-claude"), g.last().items.map { it.id })
+    assertTrue(g.dropLast(1).none { grp -> grp.items.any { it.id.startsWith("custom") } })
+  }
+
+  @Test fun theAddressHintNamesTheFormatAndThePathTheAppAdds() {
+    val r = ModelLogic.addressHint(all.first { it.id == "custom-responses" }, false)
+    assertTrue(r, r.startsWith("The address of a server that speaks OpenAI Responses, for example") && r.contains("The app adds /responses."))
+    assertTrue(ModelLogic.addressHint(all.first { it.id == "custom-claude" }, true).let { it.contains("/messages.") && it.endsWith("Only public https addresses work here.") })
+  }
+
+  @Test fun theFormatOfAProviderComesFromTheServerThenFromTheId() {
+    assertEquals("claude", ModelLogic.formatOf(provider("anthropic")).id)
+    assertEquals("chat", ModelLogic.formatOf(provider("groq")).id)
+    assertEquals("claude", ModelLogic.formatOf(provider("whatever", format = "claude")).id)
+    assertEquals(listOf("/v1/chat/completions", "/v1/responses", "/v1/messages"), ModelLogic.FORMATS.map { it.path })
+    assertEquals(listOf("custom", "custom-responses", "custom-claude"), ModelLogic.FORMATS.map { it.providerId })
+  }
+
+  @Test fun onlyAHostedProviderThatTakesAFormatShowsTheApiFormatChoice() {
+    assertEquals("chat", ModelLogic.chosenFormat(all.first { it.id == "openai" })?.id)
+    assertEquals("responses", ModelLogic.chosenFormat(provider("openai", takesFormat = true, apiFormat = "responses"))?.id)
+    assertNull(ModelLogic.chosenFormat(all.first { it.id == "custom" }))
+    assertNull(ModelLogic.chosenFormat(all.first { it.id == "anthropic" }))
+  }
+
+  @Test fun aServerHintPointsToTheCustomEndpointOfTheFormatItSpeaks() {
+    val hint = "This server speaks the OpenAI Responses format: pick \"Custom endpoint: OpenAI Responses\" (or set the API format to OpenAI Responses)."
+    assertEquals("responses", ModelLogic.hintFormat(hint, ModelLogic.FORMATS[0])?.id)
+    assertNull("already on it", ModelLogic.hintFormat(hint, ModelLogic.FORMATS[1]))
+    val soft = "The server does not take /chat/completions (The provider answered 404: Not Found). It may speak another API format: try \"Custom endpoint: Claude format\"."
+    assertEquals("claude", ModelLogic.hintFormat(soft, ModelLogic.FORMATS[0])?.id)
+    assertNull(ModelLogic.hintFormat("The provider did not accept the key (401).", ModelLogic.FORMATS[0]))
+  }
+
+  @Test fun theProviderSubLineShowsTheFormatOfACustomEndpoint() {
+    val r = all.first { it.id == "custom-responses" }
+    assertEquals("No key yet · OpenAI Responses (/v1/responses)", ModelLogic.providerSub(r, 0, false))
+    assertEquals("Key saved · Claude format (/v1/messages) · 2 pinned · in use, always shown", ModelLogic.providerSub(all.first { it.id == "custom-claude" }.copy(hasKey = true), 2, true))
+  }
+
+  @Test fun aRestrictedAccountMustGivePublicHttpsForEveryCustomEndpoint() {
+    for (p in all.filter { ModelLogic.isCustom(it) }) {
+      assertEquals("Enter the address of the endpoint, for example https://api.example.com/v1", ModelLogic.validateAddress("", ModelLogic.needsAddress(p), true))
+      assertEquals("Only https addresses work here.", ModelLogic.validateAddress("http://router.example.com/v1", ModelLogic.needsAddress(p), true))
+      assertTrue(ModelLogic.validateAddress("https://192.168.1.20/v1", ModelLogic.needsAddress(p), true).startsWith("Use a public address"))
+      assertEquals("", ModelLogic.validateAddress("https://router.example.com/v1", ModelLogic.needsAddress(p), true))
+    }
   }
 }

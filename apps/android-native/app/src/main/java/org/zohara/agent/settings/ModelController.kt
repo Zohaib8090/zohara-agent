@@ -75,8 +75,12 @@ data class ModelSheetState(
   val savingKey: Boolean = false,
   val using: Boolean = false,
   val claudeLine: String? = null,
+  /** the API format chosen for a hosted provider that takes one: "" is its normal format */
+  val apiFormat: String = "",
 ) {
   val provider: ProviderInfo? get() = providers.firstOrNull { it.id == providerId }
+  /** The format hint of the last test, when it names another Custom endpoint to pick ([ModelLogic.hintFormat]). */
+  val hintedFormat: ModelLogic.ApiFormat? get() = if (testOk == false) provider?.let { ModelLogic.hintFormat(testText, ModelLogic.formatOf(it)) } else null
   val canUse: Boolean get() = chosen.isNotBlank() && providerId.isNotBlank() && !using
 }
 
@@ -153,19 +157,41 @@ class ModelSheetController(
         providerId = id, address = ModelLogic.savedAddress(p, prov.current), addressError = "", models = emptyList(),
         chosen = if (id == prov.current) status.model else "", filter = "", fetchError = "", fetching = false,
         efforts = emptyList(), effort = "", testText = "", testOk = null,
+        apiFormat = if (p.takesFormat) p.apiFormat.orEmpty() else "",
       )
     }
     // a custom endpoint needs the address first; every other provider lists its models at once
-    if (p.needsUrl && _state.value.address.isBlank()) return
+    if (ModelLogic.needsAddress(p) && _state.value.address.isBlank()) return
     fetchModels()
   }
+
+  /** The API format of a hosted provider (`""` = its normal one): the list, the test and "Use this model" ask in that format. */
+  fun setApiFormat(id: String) {
+    dirty = true
+    seq++
+    _state.update { it.copy(apiFormat = id, testText = "", testOk = null, models = emptyList(), fetchError = "") }
+    fetchModels()
+  }
+
+  /** "Switch to it" under a test hint: the same address and key, the Custom endpoint of the format the server speaks. */
+  fun switchToFormat(f: ModelLogic.ApiFormat) {
+    val s = _state.value; val from = s.provider ?: return
+    val target = s.providers.firstOrNull { it.id == f.providerId } ?: return
+    val address = s.address
+    selectProvider(target.id)
+    _state.update { it.copy(address = address) }
+    if (ModelLogic.isCustom(from) && !target.hasKey) toast("Paste the key for ${target.name} (a key is kept per provider).")
+    fetchModels()
+  }
+
+  private fun formatArg(p: ProviderInfo, id: String): String? = if (p.takesFormat && id.isNotEmpty()) id else null
 
   fun setAddress(text: String) { dirty = true; _state.update { it.copy(address = text, addressError = "", testText = "", testOk = null) } }
 
   /** called when the address field loses focus or the person presses done */
   fun addressDone() {
     val s = _state.value; val p = s.provider ?: return
-    val bad = ModelLogic.validateAddress(s.address, p.needsUrl, restricted)
+    val bad = ModelLogic.validateAddress(s.address, ModelLogic.needsAddress(p), restricted)
     _state.update { it.copy(addressError = bad) }
     if (bad.isEmpty()) fetchModels()
   }
@@ -180,7 +206,7 @@ class ModelSheetController(
     val s = _state.value
     val p = s.provider
     if (p == null) { _state.update { it.copy(models = emptyList()) }; return }
-    val bad = ModelLogic.validateAddress(s.address, p.needsUrl, restricted)
+    val bad = ModelLogic.validateAddress(s.address, ModelLogic.needsAddress(p), restricted)
     if (bad.isNotEmpty()) { _state.update { it.copy(models = emptyList(), fetchError = bad, fetching = false) }; return }
     val my = ++seq
     fetchJob?.cancel()
@@ -188,7 +214,7 @@ class ModelSheetController(
     val addr = s.address.trim()
     fetchJob = scope.launch {
       try {
-        val r = cache.getOrLoad(ModelLogic.cacheKey(p.id, addr), force) { api.models(p.id, addr.ifBlank { null }) }
+        val r = cache.getOrLoad(ModelLogic.cacheKey(p.id, addr) + "|" + (formatArg(p, s.apiFormat) ?: ""), force) { api.models(p.id, addr.ifBlank { null }, formatArg(p, s.apiFormat)) }
         if (my != seq) return@launch
         _state.update {
           val models = r.models
@@ -201,7 +227,7 @@ class ModelSheetController(
           }
           it.copy(
             fetching = false, models = models, fetchError = ModelLogic.listMessage(r), chosen = chosen,
-            address = if (r.baseUrl.isNotBlank() && !dirty && it.address.isBlank() && p.needsUrl) r.baseUrl else it.address,
+            address = if (r.baseUrl.isNotBlank() && !dirty && it.address.isBlank() && ModelLogic.needsAddress(p)) r.baseUrl else it.address,
             efforts = r.efforts, effort = r.effort.orEmpty(),
           )
         }
@@ -243,12 +269,12 @@ class ModelSheetController(
 
   fun testConnection() {
     val s = _state.value; val p = s.provider ?: return
-    val bad = ModelLogic.validateAddress(s.address, p.needsUrl, restricted)
+    val bad = ModelLogic.validateAddress(s.address, ModelLogic.needsAddress(p), restricted)
     if (bad.isNotEmpty()) { _state.update { it.copy(testOk = false, testText = bad) }; return }
     _state.update { it.copy(testing = true, testOk = null, testText = "Testing…") }
     scope.launch {
       try {
-        val r = api.modelTest(p.id, s.chosen.ifBlank { null }, s.address.trim().ifBlank { null })
+        val r = api.modelTest(p.id, s.chosen.ifBlank { null }, s.address.trim().ifBlank { null }, formatArg(p, s.apiFormat))
         _state.update { it.copy(testing = false, testOk = r.works, testText = r.message.ifBlank { if (r.works) "Connected." else "The test failed." }) }
       } catch (e: CancellationException) {
         throw e
@@ -292,12 +318,13 @@ class ModelSheetController(
   fun use(onUsed: () -> Unit) {
     val s = _state.value; val p = s.provider ?: return
     if (s.chosen.isBlank()) return
-    val bad = ModelLogic.validateAddress(s.address, p.needsUrl, restricted)
+    val bad = ModelLogic.validateAddress(s.address, ModelLogic.needsAddress(p), restricted)
     if (bad.isNotEmpty()) { _state.update { it.copy(addressError = bad) }; toast(bad); return }
     _state.update { it.copy(using = true) }
     scope.launch {
       try {
-        api.select(provider = p.id, model = s.chosen, effort = if (s.efforts.isNotEmpty()) s.effort else null, baseUrl = s.address.trim())
+        api.select(provider = p.id, model = s.chosen, effort = if (s.efforts.isNotEmpty()) s.effort else null, baseUrl = s.address.trim(),
+          apiFormat = if (p.takesFormat) s.apiFormat else null)
         invalidate()
         _state.update { it.copy(using = false) }
         toast("Using " + s.chosen)
@@ -312,7 +339,7 @@ class ModelSheetController(
   }
 }
 
-/** The sheet "Add a custom endpoint" (MODEL-25): Name, Address, Key, Model, Test connection, Add and use. */
+/** The sheet "Add a custom endpoint" (MODEL-25): Format (Chat, Responses or Claude), Name, Address, Key, Model, Test connection, Add and use. */
 class AddEndpointController(
   private val api: ZoApi,
   private val scope: CoroutineScope,
@@ -326,19 +353,19 @@ class AddEndpointController(
   val state: StateFlow<State> = _state
 
   /** Makes the endpoint the selected one, with its key: the server can only test what it has saved. */
-  private suspend fun apply(address: String, key: String, model: String) {
-    api.select(provider = "custom", model = model.ifBlank { null }, baseUrl = address.trim())
-    if (key.isNotBlank()) api.setKey("custom", key.trim())
+  private suspend fun apply(format: ModelLogic.ApiFormat, address: String, key: String, model: String) {
+    api.select(provider = format.providerId, model = model.ifBlank { null }, baseUrl = address.trim())
+    if (key.isNotBlank()) api.setKey(format.providerId, key.trim())
   }
 
-  fun test(address: String, key: String, model: String) {
+  fun test(format: ModelLogic.ApiFormat, address: String, key: String, model: String) {
     val bad = ModelLogic.validateNewEndpoint(address, restricted)
     if (bad.isNotEmpty()) { _state.update { it.copy(error = bad) }; return }
     _state.update { it.copy(error = "", testing = true, testOk = null, testText = "Testing…") }
     scope.launch {
       try {
-        apply(address, key, model)
-        val r = api.modelTest("custom", model.ifBlank { null }, address.trim())
+        apply(format, address, key, model)
+        val r = api.modelTest(format.providerId, model.ifBlank { null }, address.trim())
         _state.update { it.copy(testing = false, testOk = r.works, testText = r.message) }
       } catch (e: CancellationException) {
         throw e
@@ -348,14 +375,14 @@ class AddEndpointController(
     }
   }
 
-  fun add(name: String, address: String, key: String, model: String, onDone: () -> Unit) {
+  fun add(format: ModelLogic.ApiFormat, name: String, address: String, key: String, model: String, onDone: () -> Unit) {
     val bad = ModelLogic.validateNewEndpoint(address, restricted)
     if (bad.isNotEmpty()) { _state.update { it.copy(error = bad) }; return }
     if (name.isBlank()) { _state.update { it.copy(error = "Give it a name first.") }; return }
     _state.update { it.copy(error = "", busy = true) }
     scope.launch {
       try {
-        apply(address, key, model)
+        apply(format, address, key, model)
         api.profileCreate(name.trim())
         invalidate()
         _state.update { it.copy(busy = false) }

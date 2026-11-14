@@ -98,6 +98,36 @@ class SettingsScreenshotTest {
   @Test fun modelSheetCustomDark() = shot("model_sheet_custom", true, sheet = true) { SheetCustom() }
   @Test fun modelSheetCustomLight() = shot("model_sheet_custom", false, sheet = true) { SheetCustom() }
 
+  // a router that answers in the Responses format: the test says so and offers the right Custom endpoint
+  private val hintState = customState.copy(
+    address = "https://router.example.com/v1", testOk = false, fetchError = "",
+    testText = "This server speaks the OpenAI Responses format: pick \"Custom endpoint: OpenAI Responses\" (or set the API format to OpenAI Responses).",
+  )
+  @Composable private fun SheetHint() = Column(Modifier.background(ZoTheme.colors.sheet)) {
+    SheetContent("Model and API key", {}, footer = { SecondaryButton("Close", {}); PrimaryButton("Use this model", {}, enabled = false) }) { ModelSheetBody(hintState, false, ModelSheetActions()) }
+  }
+  @Test fun modelSheetFormatHintDark() = shot("model_sheet_format_hint", true, sheet = true) { SheetHint() }
+  @Test fun modelSheetFormatHintLight() = shot("model_sheet_format_hint", false, sheet = true) { SheetHint() }
+
+  // a hosted provider with the API format choice set to Responses
+  private val formatState = sheetState.copy(apiFormat = "responses")
+  @Composable private fun SheetFormat() = Column(Modifier.background(ZoTheme.colors.sheet)) {
+    SheetContent("Model and API key", {}, footer = { SecondaryButton("Close", {}); PrimaryButton("Use this model", {}) }) { ModelSheetBody(formatState, false, ModelSheetActions()) }
+  }
+  @Test fun modelSheetApiFormatDark() = shot("model_sheet_api_format", true, sheet = true) { SheetFormat() }
+  @Test fun modelSheetApiFormatLight() = shot("model_sheet_api_format", false, sheet = true) { SheetFormat() }
+
+  @Composable private fun EndpointResponses() = Column(Modifier.background(ZoTheme.colors.sheet)) {
+    SheetContent("Add a custom endpoint", {}, footer = { SecondaryButton("Cancel", {}); PrimaryButton("Add and use", {}) }) {
+      EndpointForm(
+        "Agent router", {}, "https://router.example.com/v1", {}, "", {}, "gpt-5", {}, "",
+        "This server speaks the OpenAI Responses format: pick \"Custom endpoint: OpenAI Responses\".", false, false, {}, format = ModelLogic.FORMATS[0], onFormat = {},
+      )
+    }
+  }
+  @Test fun endpointFormatHintDark() = shot("endpoint_format_hint", true, sheet = true) { EndpointResponses() }
+  @Test fun endpointFormatHintLight() = shot("endpoint_format_hint", false, sheet = true) { EndpointResponses() }
+
   @Composable private fun Endpoint() = Column(Modifier.background(ZoTheme.colors.sheet)) {
     SheetContent("Add a custom endpoint", {}, footer = { SecondaryButton("Cancel", {}); PrimaryButton("Add and use", {}) }) {
       EndpointForm("Home GPU", {}, "http://192.168.1.20:8000/v1", {}, "", {}, "llama3", {}, "", "Connected. 2 models available.", true, false, {})

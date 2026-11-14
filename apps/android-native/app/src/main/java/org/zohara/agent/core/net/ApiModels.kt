@@ -44,6 +44,14 @@ val ZoJson: Json = Json {
 @Serializable data class ProviderInfo(
   val id: String, val name: String = "", val local: Boolean = false, val hasKey: Boolean = false, val needsUrl: Boolean = false,
   val defaultUrl: String = "", val baseUrl: String = "", val hidden: Boolean = false,
+  /** true for the three "Custom endpoint" providers (chat, responses, claude); older servers do not send it, see [org.zohara.agent.settings.ModelLogic.isCustom] */
+  val custom: Boolean = false,
+  /** the wire format the provider speaks: chat, responses or claude ("" from an older server) */
+  val format: String = "",
+  /** a hosted OpenAI-compatible provider that may be told another API format (select {api_format}) */
+  val takesFormat: Boolean = false,
+  /** the saved API format of such a provider, null for its normal one */
+  val apiFormat: String? = null,
 )
 @Serializable data class ProvidersResp(val current: String = "", val hiddenProviders: List<String> = emptyList(), val providers: List<ProviderInfo> = emptyList())
 @Serializable data class ModelsResp(
@@ -51,7 +59,7 @@ val ZoJson: Json = Json {
   val effort: String? = null, val baseUrl: String = "", val error: String? = null,
 )
 @Serializable data class ModelTestResp(val works: Boolean = false, val message: String = "")
-@Serializable data class SelectResp(val provider: String = "", val model: String = "", val effort: String? = null, val baseUrl: String = "")
+@Serializable data class SelectResp(val provider: String = "", val model: String = "", val effort: String? = null, val baseUrl: String = "", val apiFormat: String? = null)
 @Serializable data class Profile(
   val id: String, val name: String = "", val provider: String = "", val model: String = "", val effort: String? = null,
   val pinned: List<String> = emptyList(), val baseUrl: String = "", val vision: Boolean? = null, val updated: Long = 0,
