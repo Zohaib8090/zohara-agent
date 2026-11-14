@@ -25,6 +25,8 @@ interface PagesApi {
   suspend fun search(query: String): List<SearchHit>
   suspend fun projects(): String
   suspend fun projectCreate(name: String, goal: String): String
+  /** Deletes the project and its memory notes (the person was asked first); returns how many notes went. */
+  suspend fun projectDelete(id: String): Int = 0
   suspend fun artifacts(): List<ArtifactItem>
   suspend fun scheduled(): List<ScheduledTask>
   suspend fun scheduleAdd(task: String, whenText: String, repeat: String?): String
@@ -53,6 +55,7 @@ class ZoPagesApi(private val api: ZoApi) : PagesApi {
   override suspend fun search(query: String) = api.search(query)
   override suspend fun projects() = api.projects()
   override suspend fun projectCreate(name: String, goal: String) = api.projectCreate(name, goal)
+  override suspend fun projectDelete(id: String) = api.projectDelete(id)
   override suspend fun artifacts() = api.artifacts()
   override suspend fun scheduled() = api.scheduled()
   override suspend fun scheduleAdd(task: String, whenText: String, repeat: String?) = api.scheduleAdd(task, whenText, repeat)

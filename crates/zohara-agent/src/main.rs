@@ -12,6 +12,7 @@ use zo_core::store::artifacts;
 mod composer;
 mod dock;
 mod markdown;
+mod memfeed;
 mod modelpick;
 use zo_core::store::projects as model;
 mod questioncard;
@@ -762,6 +763,28 @@ fn open_project(ui: &Rc<Ui>, id: &str) {
     ui.top_title.set_text(&format!("Projects  /  {}", project.name));
 }
 
+/// Deletes the open project after a confirm. Its memory notes (what the memory agent learned in it) go with it; the chats stay.
+fn delete_project(ui: &Rc<Ui>) {
+    let Some(id) = ui.current.borrow().clone() else { return };
+    let name = ui.store.borrow().get(&id).map(|p| p.name.clone()).unwrap_or_default();
+    let notes = zo_core::store::memory::load().items.iter().filter(|i| i.scope == id).count();
+    let body = format!(
+        "\"{name}\" is removed from this computer, with its instructions and its {notes} memory note{}. Chats you had in it stay. This cannot be undone.",
+        if notes == 1 { "" } else { "s" }
+    );
+    let ui2 = ui.clone();
+    confirm_delete(ui, "Delete this project?", &body, move || {
+        let removed = ui2.store.borrow_mut().remove(&id);
+        if removed.is_some() {
+            save_store(&ui2);
+        }
+        *ui2.current.borrow_mut() = None;
+        refresh_projects(&ui2);
+        ui2.stack.set_visible_child_name("projects");
+        set_nav(&ui2, "projects");
+    });
+}
+
 fn update_rail(ui: &Rc<Ui>) {
     let current = ui.current.borrow().clone();
     let Some(id) = current else { return };
@@ -1180,6 +1203,36 @@ fn open_memory(ui: &Rc<Ui>) {
                 col.append(&lbl(&entry.when, "sheet-item-sub"));
             }
             row.append(&col);
+            body.append(&row);
+        }
+    }
+
+    // what the memory agent learned in this project's chats: only chats of this project are told it
+    let learned: Vec<_> = zo_core::store::memory::load().items.into_iter().filter(|i| i.scope == id).collect();
+    if !learned.is_empty() {
+        let h = lbl("Learned in this project's chats", "pc-meta");
+        h.set_xalign(0.0);
+        h.set_margin_top(8);
+        body.append(&h);
+        for it in learned {
+            let row = hbox(10);
+            row.add_css_class("sheet-item");
+            let col = vbox(2);
+            col.set_hexpand(true);
+            let t = lbl(&it.text, "sheet-item-name");
+            t.set_wrap(true);
+            t.set_xalign(0.0);
+            col.append(&t);
+            row.append(&col);
+            let forget = icon_button("edit-delete-symbolic", "Forget this note", "icon-btn");
+            {
+                let (r, nid) = (row.clone(), it.id.clone());
+                forget.connect_clicked(move |_| {
+                    zo_core::store::memory::forget(&nid);
+                    r.set_visible(false);
+                });
+            }
+            row.append(&forget);
             body.append(&row);
         }
     }
@@ -1760,6 +1813,8 @@ fn build_ui(app: &adw::Application) {
     let send_btn = icon_button("go-up-symbolic", "Send", "tool-btn send");
     tools.append(&send_btn);
     composer.append(&tools);
+    // "Memory updated · View", above the message box (it shows only when the memory agent changed something)
+    composer_wrap.append(&memfeed::chip());
     composer_wrap.append(&composer);
 
     // under the card: which model, which permission mode
@@ -1931,6 +1986,7 @@ fn build_ui(app: &adw::Application) {
     let pv_send = icon_button("go-up-symbolic", "Send", "tool-btn send");
     pv_tools.append(&pv_send);
     pv_composer.append(&pv_tools);
+    pv_wrap.append(&memfeed::chip());
     pv_wrap.append(&pv_composer);
 
     let pv_meta = hbox(2);
@@ -1975,11 +2031,14 @@ fn build_ui(app: &adw::Application) {
     let (r_mem, a_mem) = rail_button("preferences-other-symbolic", "Memory");
     a_mem.set_text("View");
     let (r_sch, a_sch) = rail_button("alarm-symbolic", "Scheduled");
+    let (r_del, a_del) = rail_button("edit-delete-symbolic", "Delete project");
+    a_del.set_text("");
 
     rail.append(&r_instr);
     rail.append(&r_ctx);
     rail.append(&r_mem);
     rail.append(&r_sch);
+    rail.append(&r_del);
 
     let rail_spacer = gtk::Box::new(Orientation::Vertical, 0);
     rail_spacer.set_vexpand(true);
@@ -2166,6 +2225,7 @@ fn build_ui(app: &adw::Application) {
         rail_memory: a_mem,
         rail_scheduled: a_sch,
     });
+    memfeed::start(&ui);
 
     // ---------- the microphone: Zohara's own voice to text engine ----------
     {
@@ -2521,6 +2581,10 @@ fn build_ui(app: &adw::Application) {
     }
     {
         let ui2 = ui.clone();
+        r_del.connect_clicked(move |_| delete_project(&ui2));
+    }
+    {
+        let ui2 = ui.clone();
         r_sch.connect_clicked(move |_| {
             let project = ui2.current.borrow().clone();
             open_new_task(&ui2, project);
@@ -2546,6 +2610,8 @@ fn build_ui(app: &adw::Application) {
             ui2.pv_prompt.set_text("");
             ctl.new_conversation();
             ctl.set_context(project_context(&ui2));
+            // what the memory agent learns here belongs to this project, and the chat is told this project's notes
+            ctl.set_project(ui2.current.borrow().as_deref().unwrap_or(""));
             ui2.stack.set_visible_child_name("chat");
             main_prompt.set_text(&text);
             ctl.submit(&main_prompt);

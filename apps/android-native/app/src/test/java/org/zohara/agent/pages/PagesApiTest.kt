@@ -87,4 +87,66 @@ class PagesApiTest {
     val done = kotlinx.coroutines.withTimeout(5000) { h.state.first { !it.loading } }
     assertEquals("Scheduled tasks are not available to this account.", done.error)
   }
+
+  // ---- the memory feed and project memory (docs/MEMORY.md) ----
+
+  private val zo get() = ZoApi(ZoHttp.newClient({ _ -> "tok" }), { server.url("/").toString().trimEnd('/') }, retryDelayMs = { 0L })
+
+  @Test fun memoryChangesLiveShapeAndTheSinceAsk() = runBlocking {
+    server.enqueue(ok("""{"ok":true,"changes":[{"id":"g1794509131852001","time":1794509131852,"batch":"b1794509131852","source":"engine","chat":"c1","title":"Phone","scope":"p1","scope_name":"Atlas","action":"updated","note":"m1","kind":"fact","before":"Uses an A22","after":"Uses an A26","undone":false}],"latest":1794509131852,"running":false,"show_updates":true,"summary":"updated 1 note"}"""))
+    val r = zo.memoryChanges(since = 1794509000000, limit = 60)
+    val c = r.changes.single()
+    assertEquals(listOf("updated", "Uses an A22", "Uses an A26", "Atlas", "p1"), listOf(c.action, c.before, c.after, c.scopeName, c.scope))
+    assertEquals(1794509131852, r.latest); assertEquals("updated 1 note", r.summary); assertTrue(r.showUpdates)
+    val b = body()
+    assertEquals("memory_changes", b["op"]!!.jsonPrimitive.content); assertEquals("1794509000000", b["since"]!!.jsonPrimitive.content); assertEquals("60", b["limit"]!!.jsonPrimitive.content)
+  }
+
+  @Test fun memoryUndoSettingsAndAddWithAScope() = runBlocking {
+    server.enqueue(ok("""{"ok":true,"message":"The note has its earlier text again."}"""))
+    assertEquals("The note has its earlier text again.", zo.memoryUndo("g1"))
+    assertEquals(listOf("memory_undo", "g1"), body().let { listOf(it["op"]!!.jsonPrimitive.content, it["id"]!!.jsonPrimitive.content) })
+    server.enqueue(ok("""{"ok":true,"every":2,"min_every":2,"show_updates":false}"""))
+    val st = zo.memorySettings(every = 1, showUpdates = false)
+    assertEquals(Triple(2, 2, false), Triple(st.every, st.minEvery, st.showUpdates))
+    val sb = body()
+    assertEquals(listOf("memory_settings", "1", "false"), listOf(sb["op"]!!.jsonPrimitive.content, sb["every"]!!.jsonPrimitive.content, sb["show_updates"]!!.jsonPrimitive.content))
+    server.enqueue(ok("""{"ok":true,"new":true}""")); server.enqueue(ok("""{"ok":true,"new":true}"""))
+    zo.memoryAdd("The atlas release ships on Friday", "project", scope = "p1"); zo.memoryAdd("Likes tea")
+    val withScope = body(); val without = body()
+    assertEquals("p1", withScope["scope"]!!.jsonPrimitive.content)
+    assertTrue("scope" !in without)
+  }
+
+  @Test fun memoryListAsksForAScopeAndReadsProjectsAndNotesScopes() = runBlocking {
+    server.enqueue(ok("""{"ok":true,"enabled":true,"every":3,"min_every":2,"show_updates":true,"projects":[{"id":"p1","name":"Atlas"}],"items":[{"id":"m1","text":"Ships Friday","kind":"project","title":"","chat":"","pinned":false,"updated":5,"scope":"p1","scope_name":"Atlas"},{"id":"m2","text":"Likes tea","kind":"preference","title":"","chat":"","pinned":false,"updated":4,"scope":"","scope_name":""}]}"""))
+    val m = zo.memory("p1")
+    assertEquals("p1", body()["scope"]!!.jsonPrimitive.content)
+    assertEquals(listOf("Atlas"), m.projects.map { it.name })
+    assertEquals(listOf("p1", ""), m.items.map { it.scope }); assertEquals("Atlas", m.items[0].scopeName)
+    // an older server without the new fields still reads
+    server.enqueue(ok("""{"ok":true,"enabled":true,"every":3,"items":[{"id":"m1","text":"x","kind":"fact"}]}"""))
+    val old = zo.memory()
+    assertTrue("scope" !in body())
+    assertEquals(Triple(2, true, 0), Triple(old.minEvery, old.showUpdates, old.projects.size))
+  }
+
+  @Test fun memoryExportImportAndProjectDelete() = runBlocking {
+    server.enqueue(ok("""{"ok":true,"format":"zo-memory-1","exported_at":5,"projects":[{"id":"p1","name":"Atlas"}],"notes":[{"text":"Ships Friday","kind":"project","scope":"p1","pinned":false}]}"""))
+    val ex = zo.memoryExport()
+    assertEquals("zo-memory-1", ex["format"]!!.jsonPrimitive.content)
+    server.enqueue(ok("""{"ok":true,"added":1,"already_there":2,"skipped":3}"""))
+    val r = zo.memoryImport(ex)
+    assertEquals(Triple(1, 2, 3), Triple(r.added, r.alreadyThere, r.skipped))
+    server.takeRequest()
+    assertEquals("zo-memory-1", body()["data"]!!.jsonObject["format"]!!.jsonPrimitive.content)
+    server.enqueue(ok("""{"ok":true,"notes_removed":4}"""))
+    assertEquals(4, api.projectDelete("p1"))
+    val d = body()
+    assertEquals(listOf("project_delete", "p1", "true"), listOf(d["op"]!!.jsonPrimitive.content, d["id"]!!.jsonPrimitive.content, d["confirm"]!!.jsonPrimitive.content))
+    // the server refuses without the confirm; the app always sends it
+    server.enqueue(ok("""{"ok":false,"error":"There is no such project."}"""))
+    val e = try { api.projectDelete("p404"); null } catch (e: org.zohara.agent.core.net.ApiException) { e.text }
+    assertEquals("There is no such project.", e)
+  }
 }

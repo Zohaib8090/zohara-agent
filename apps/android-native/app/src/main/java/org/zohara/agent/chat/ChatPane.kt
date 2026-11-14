@@ -127,7 +127,10 @@ fun ChatPane(session: ChatSession, hub: ChatHub.Instance, greetingText: String?,
     androidx.compose.foundation.layout.Row(Modifier.fillMaxSize()) {
       Box(Modifier.weight(1f)) {
         androidx.compose.runtime.CompositionLocalProvider(androidx.compose.ui.platform.LocalUriHandler provides remember(context) { ChatUriHandler(context) }) {
-          ChatContent(state, cb, model, draft, { session.draft.value = it }, greetingText, container.session.restricted, attachmentCount > 0)
+          ChatContent(
+            state, cb, model, draft, { session.draft.value = it }, greetingText, container.session.restricted, attachmentCount > 0,
+            onMemoryView = { session.dismissMemory(); sheet = "memory" }, onMemoryDismiss = { session.dismissMemory() },
+          )
         }
       }
       if (panelOn) ContextPanel(contextView, onUnpin = { pinnedPanel = false }, onRefresh = refresh, onCompact = compact)
@@ -142,6 +145,7 @@ fun ChatPane(session: ChatSession, hub: ChatHub.Instance, greetingText: String?,
         // PERM-03, LINK-11: only Manual and Auto on a computer, Bypass is shown as Auto, and a note says the computer may limit it
         org.zohara.agent.link.ModeRows(org.zohara.agent.link.LinkModes.available(true, container.session.restricted), pills.mode.api, true) { m -> hub.pills.setMode(PermMode.parse(m)) { err -> if (err != null) toast(err) }; sheet = "" }
       } else ModeSheet(pills.mode, hub.pills.bypassAllowed(), { sheet = "" }, onPick = { m -> hub.pills.setMode(m) { err -> if (err != null) toast(err) }; sheet = "" })
+      "memory" -> MemoryChangesSheet({ sheet = "" }, latestOnly = true, onOpenPage = { nav.settings(Routes.SETTINGS_MEMORY) })
       "context" -> if (wide && pinnedPanel) sheet = "" else ContextSheet(
         contextView, { sheet = "" }, onRefresh = refresh, onCompact = compact,
         onPin = if (wide) ({ pinnedPanel = true; sheet = "" }) else null,
@@ -184,6 +188,7 @@ fun DraftKeeper(draft: kotlinx.coroutines.flow.MutableStateFlow<String>) {
 fun ChatContent(
   state: ChatUiState, cb: ThreadCallbacks, model: ComposerModel, draft: String, onDraft: (String) -> Unit,
   greetingText: String?, restricted: Boolean, hasAttachments: Boolean, modifier: Modifier = Modifier,
+  onMemoryView: () -> Unit = {}, onMemoryDismiss: () -> Unit = {},
 ) {
   val showHero = greetingText != null && state.items.isEmpty() && !state.loading
   Column(modifier.fillMaxSize()) {
@@ -191,6 +196,7 @@ fun ChatContent(
       Column(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
         ZoLogo(size = 52.dp)
         Text(greetingText!!, style = ZoTheme.type.hero, color = ZoTheme.colors.text, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 14.dp, bottom = 22.dp))
+        MemoryChip(state.memoryNote, onMemoryView, onMemoryDismiss)
         Composer(draft, onDraft, model, hasAttachments = hasAttachments)
         if (restricted) {
           Text(
@@ -201,6 +207,7 @@ fun ChatContent(
       }
     } else {
       Box(Modifier.weight(1f).fillMaxWidth()) { ThreadView(state, cb) }
+      MemoryChip(state.memoryNote, onMemoryView, onMemoryDismiss, Modifier.padding(horizontal = 12.dp))
       Composer(draft, onDraft, model, Modifier.padding(horizontal = 12.dp).navigationBarsPadding(), hasAttachments = hasAttachments)
     }
   }

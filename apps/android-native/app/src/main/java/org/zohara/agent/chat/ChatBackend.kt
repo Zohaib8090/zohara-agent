@@ -28,6 +28,8 @@ interface ChatBackend {
   suspend fun compact(id: String)
   suspend fun deleteChat(id: String)
   suspend fun pinChat(id: String, on: Boolean)
+  /** The memory agent's change log, for the "Memory updated" chip. Null when this backend has none (a test fake). */
+  suspend fun memoryChanges(since: Long, limit: Int = 50): org.zohara.agent.core.net.MemoryChangesResp? = null
 }
 
 /** What the model and mode pills need. */
@@ -54,6 +56,7 @@ class ZoChatBackend(private val api: ZoApi) : ChatBackend, PillsBackend {
   override suspend fun compact(id: String) = api.compact(id)
   override suspend fun deleteChat(id: String) = api.deleteChat(id)
   override suspend fun pinChat(id: String, on: Boolean) = api.pinChat(id, on)
+  override suspend fun memoryChanges(since: Long, limit: Int) = api.memoryChanges(since, limit)
 
   override suspend fun status() = api.status()
   override suspend fun profiles() = api.profiles()

@@ -11,6 +11,7 @@ import org.zohara.agent.core.net.Limits
 import org.zohara.agent.core.net.McpServer
 import org.zohara.agent.core.net.Machine
 import org.zohara.agent.core.net.MemoryItem
+import org.zohara.agent.core.net.MemoryProject
 import org.zohara.agent.core.net.MemoryResp
 import org.zohara.agent.core.net.PersonalitiesResp
 import org.zohara.agent.core.net.Personality
@@ -126,6 +127,31 @@ class SettingsLogicTest {
     val t = MemoryLogic.explainer(MemoryResp(true, 3, listOf(mem("a", "fact", 1), mem("b", "preference", 1), mem("c", "episode", 1))))
     assertTrue(t.startsWith("2 notes about you and 1 chat summaries, shared with the computer and the phone. After every 3 messages of yours"))
     assertTrue(t.endsWith("Never passwords or keys."))
+  }
+
+  @Test fun memoryScopeSwitchFiltersNotesAndFallsBackWhenAProjectIsGone() {
+    val items = listOf(mem("a", "preference", 1), mem("b", "project", 2).copy(scope = "p1", scopeName = "Atlas"), mem("c", "project", 3).copy(scope = "p2", scopeName = "Harbor"))
+    assertEquals(listOf("a", "b", "c"), MemoryLogic.inScope(items, "all").map { it.id })
+    assertEquals(listOf("a"), MemoryLogic.inScope(items, "global").map { it.id })
+    assertEquals(listOf("b"), MemoryLogic.inScope(items, "p1").map { it.id })
+    assertTrue(MemoryLogic.inScope(items, "p404").isEmpty())
+    val none = MemoryResp(true, 3, items)
+    assertTrue("no project, no switch", MemoryLogic.scopes(none).isEmpty())
+    val r = MemoryResp(true, 3, items, projects = listOf(MemoryProject("p1", "Atlas"), MemoryProject("p2", "Harbor")))
+    assertEquals(listOf("all" to "All notes", "global" to "Every chat", "p1" to "Project: Atlas", "p2" to "Project: Harbor"), MemoryLogic.scopes(r))
+    assertEquals("p1", MemoryLogic.validScope(r, "p1")); assertEquals("global", MemoryLogic.validScope(r, "global"))
+    assertEquals("all", MemoryLogic.validScope(r, "p9"))
+    // a note added from a project's list belongs to the project, from the other lists to the whole memory
+    assertEquals("p1", MemoryLogic.addScope("p1")); assertEquals("", MemoryLogic.addScope("all")); assertEquals("", MemoryLogic.addScope("global"))
+    assertEquals("text a", MemoryLogic.noteText(items[0]))
+    assertEquals("text b\nProject: Atlas", MemoryLogic.noteText(items[1]))
+    assertEquals("text x\nProject: (gone)", MemoryLogic.noteText(mem("x", "fact", 1).copy(scope = "p9")))
+  }
+
+  @Test fun theAgentReadsAtLeastEveryTwoMessagesAndAtMostEveryTwenty() {
+    assertEquals(2, MemoryLogic.clampEvery(1, 2)); assertEquals(2, MemoryLogic.clampEvery(-4, 2))
+    assertEquals(3, MemoryLogic.clampEvery(3, 2)); assertEquals(20, MemoryLogic.clampEvery(99, 2))
+    assertEquals("a server with a higher floor wins", 3, MemoryLogic.clampEvery(1, 3))
   }
 
   // ---- connected apps, machines

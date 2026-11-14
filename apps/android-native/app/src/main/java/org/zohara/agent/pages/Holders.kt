@@ -105,6 +105,10 @@ class ProjectsHolder(private val api: PagesApi, scope: CoroutineScope) : ListHol
   /** Creates a project; returns null when it worked (the list reloads), else the server's sentence. */
   suspend fun create(name: String, goal: String): String? =
     attempt { api.projectCreate(name.trim(), goal.trim()) }.fold({ refresh(); null }, { it.sentence() })
+
+  /** Deletes a project and the memory notes kept for it; returns null when it worked (the list reloads), else the server's sentence. */
+  suspend fun delete(id: String): String? =
+    attempt { api.projectDelete(id) }.fold({ refresh(); null }, { it.sentence() })
 }
 
 // ------------------------------------------------------------------ artifacts (ART-01..05)
