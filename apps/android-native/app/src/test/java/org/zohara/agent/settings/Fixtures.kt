@@ -45,18 +45,22 @@ class FakeServer {
   fun shutdown() = server.shutdown()
 }
 
-fun provider(id: String, name: String = id, local: Boolean = false, hasKey: Boolean = false, needsUrl: Boolean = false, defaultUrl: String = "", baseUrl: String = defaultUrl) =
-  ProviderInfo(id, name, local, hasKey, needsUrl, defaultUrl, baseUrl)
+fun provider(
+  id: String, name: String = id, local: Boolean = false, hasKey: Boolean = false, needsUrl: Boolean = false, defaultUrl: String = "", baseUrl: String = defaultUrl,
+  custom: Boolean = false, format: String = "", takesFormat: Boolean = false, apiFormat: String? = null,
+) = ProviderInfo(id, name, local, hasKey, needsUrl, defaultUrl, baseUrl, false, custom, format, takesFormat, apiFormat)
 
 val SAMPLE_PROVIDERS = listOf(
   provider("anthropic", "Anthropic (Claude)", hasKey = true, defaultUrl = "https://api.anthropic.com/v1"),
-  provider("openai", "OpenAI", hasKey = false, defaultUrl = "https://api.openai.com/v1"),
+  provider("openai", "OpenAI", hasKey = false, defaultUrl = "https://api.openai.com/v1", format = "chat", takesFormat = true),
   provider("gemini", "Google Gemini", hasKey = true),
   provider("groq", "Groq", hasKey = false),
   provider("openrouter", "OpenRouter", hasKey = true),
   provider("ollama", "Ollama (this computer)", local = true, needsUrl = true, defaultUrl = "http://127.0.0.1:11434/v1"),
   provider("claude-code", "Claude Code (your subscription)", local = true),
-  provider("custom", "Custom endpoint", needsUrl = true),
+  provider("custom", "Custom endpoint: OpenAI Chat (/v1/chat/completions)", needsUrl = true, custom = true, format = "chat"),
+  provider("custom-responses", "Custom endpoint: OpenAI Responses (/v1/responses)", needsUrl = true, custom = true, format = "responses"),
+  provider("custom-claude", "Custom endpoint: Claude format (/v1/messages)", needsUrl = true, custom = true, format = "claude"),
 )
 
 val SAMPLE_PROFILES = ProfilesResp(

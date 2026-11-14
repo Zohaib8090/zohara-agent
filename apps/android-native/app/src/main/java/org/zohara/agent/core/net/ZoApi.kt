@@ -173,16 +173,20 @@ class ZoApi(
   // ------------------------------------------------------------ 4.2 models, keys, profiles
 
   suspend fun providers(): ProvidersResp = opAs("providers", true)
-  suspend fun models(provider: String? = null, baseUrl: String? = null): ModelsResp = opAs("models") {
+  suspend fun models(provider: String? = null, baseUrl: String? = null, apiFormat: String? = null): ModelsResp = opAs("models") {
     if (provider != null) put("provider", provider)
     if (baseUrl != null) put("base_url", baseUrl)
+    if (apiFormat != null) put("api_format", apiFormat)
   }
-  suspend fun modelTest(provider: String? = null, model: String? = null, baseUrl: String? = null): ModelTestResp = opAs("model_test") {
+  suspend fun modelTest(provider: String? = null, model: String? = null, baseUrl: String? = null, apiFormat: String? = null): ModelTestResp = opAs("model_test") {
     if (provider != null) put("provider", provider)
     if (model != null) put("model", model)
     if (baseUrl != null) put("base_url", baseUrl)
+    if (apiFormat != null) put("api_format", apiFormat)
   }
-  suspend fun select(provider: String? = null, model: String? = null, effort: String? = null, baseUrl: String? = null): SelectResp = opAs("select") {
+  /** [apiFormat]: chat, responses or claude for a hosted OpenAI-compatible provider; "" goes back to its normal format. */
+  suspend fun select(provider: String? = null, model: String? = null, effort: String? = null, baseUrl: String? = null, apiFormat: String? = null): SelectResp = opAs("select") {
+    if (apiFormat != null) put("api_format", apiFormat)
     if (provider != null) put("provider", provider)
     if (model != null) put("model", model)
     if (effort != null) put("effort", effort)

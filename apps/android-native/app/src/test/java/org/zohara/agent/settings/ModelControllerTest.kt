@@ -33,10 +33,12 @@ class ModelControllerTest {
 
   private val providersJson = """{"ok":true,"current":"anthropic","hidden_providers":["groq"],"providers":[
     {"id":"anthropic","name":"Anthropic (Claude)","has_key":true,"default_url":"https://api.anthropic.com/v1","base_url":"https://api.anthropic.com/v1"},
-    {"id":"openai","name":"OpenAI","has_key":false,"default_url":"https://api.openai.com/v1","base_url":"https://api.openai.com/v1"},
+    {"id":"openai","name":"OpenAI","has_key":false,"default_url":"https://api.openai.com/v1","base_url":"https://api.openai.com/v1","format":"chat","takes_format":true,"api_format":"responses"},
     {"id":"groq","name":"Groq","has_key":false},
     {"id":"ollama","name":"Ollama","local":true,"needs_url":true,"default_url":"http://127.0.0.1:11434/v1"},
-    {"id":"custom","name":"Custom endpoint","needs_url":true}]}"""
+    {"id":"custom","name":"Custom endpoint: OpenAI Chat (/v1/chat/completions)","needs_url":true,"custom":true,"format":"chat"},
+    {"id":"custom-responses","name":"Custom endpoint: OpenAI Responses (/v1/responses)","needs_url":true,"custom":true,"format":"responses"},
+    {"id":"custom-claude","name":"Custom endpoint: Claude format (/v1/messages)","needs_url":true,"custom":true,"format":"claude"}]}"""
   private val profilesJson = """{"ok":true,"active":"p1","profiles":[{"id":"p1","name":"Work","provider":"anthropic","model":"claude-sonnet-5","pinned":["claude-sonnet-5"]}]}"""
 
   @Before fun up() {
@@ -268,7 +270,7 @@ class ModelControllerTest {
     fake.on("select", """{"ok":true}"""); fake.on("set_key", """{"ok":true}"""); fake.on("profile_create", """{"ok":true,"id":"p7"}""")
     val c = AddEndpointController(fake.api, CoroutineScope(Dispatchers.Default), false, { toasts.add(it) }, { invalidated++ })
     var done = false
-    c.add("Home GPU", "http://192.168.1.20:8000/v1", "sk-x", "llama3", { done = true })
+    c.add(ModelLogic.FORMATS[0], "Home GPU", "http://192.168.1.20:8000/v1", "sk-x", "llama3", { done = true })
     runBlocking { withTimeout(5000) { while (!done) kotlinx.coroutines.delay(20) } }
     assertEquals(listOf("select", "set_key", "profile_create"), fake.ops())
     assertEquals("custom", str(fake.body("select"), "provider")); assertEquals("http://192.168.1.20:8000/v1", str(fake.body("select"), "base_url")); assertEquals("llama3", str(fake.body("select"), "model"))
@@ -278,11 +280,11 @@ class ModelControllerTest {
 
   @Test fun addingAnEndpointValidatesFirst() {
     val c = AddEndpointController(fake.api, CoroutineScope(Dispatchers.Default), true, { }, { })
-    c.add("x", "", "", "", { })
+    c.add(ModelLogic.FORMATS[0], "x", "", "", "", { })
     assertEquals("Type the address first.", c.state.value.error)
-    c.add("x", "192.168.1.1/v1", "", "", { })
+    c.add(ModelLogic.FORMATS[0], "x", "192.168.1.1/v1", "", "", { })
     assertEquals("The address should start with http:// or https://", c.state.value.error)
-    c.add("", "https://api.example.com/v1", "", "", { })
+    c.add(ModelLogic.FORMATS[0], "", "https://api.example.com/v1", "", "", { })
     assertEquals("Give it a name first.", c.state.value.error)
     assertTrue(fake.ops().isEmpty())
   }
@@ -290,9 +292,58 @@ class ModelControllerTest {
   @Test fun testingAnEndpointShowsTheMessage() {
     fake.on("select", """{"ok":true}"""); fake.on("model_test", """{"ok":true,"works":true,"message":"Connected. 2 models available."}""")
     val c = AddEndpointController(fake.api, CoroutineScope(Dispatchers.Default), false, { }, { })
-    c.test("https://my-host.example/v1", "", "")
+    c.test(ModelLogic.FORMATS[0], "https://my-host.example/v1", "", "")
     runBlocking { withTimeout(5000) { c.state.first { it.testOk != null } } }
     assertEquals("Connected. 2 models available.", c.state.value.testText)
     assertFalse("set_key" in fake.ops()) // no key typed: nothing saved
+  }
+
+  @Test fun addingAResponsesOrClaudeEndpointUsesItsOwnProviderIdForTheSelectKeyAndTest() {
+    for (f in ModelLogic.FORMATS.drop(1)) {
+      fake.requests.clear()
+      fake.on("select", """{"ok":true}"""); fake.on("set_key", """{"ok":true}"""); fake.on("profile_create", """{"ok":true,"id":"p7"}""")
+      fake.on("model_test", """{"ok":true,"works":true,"message":"Connected."}""")
+      val c = AddEndpointController(fake.api, CoroutineScope(Dispatchers.Default), false, { }, { })
+      c.test(f, "https://router.example.com/v1", "sk-r", "m1")
+      runBlocking { withTimeout(5000) { c.state.first { it.testOk != null } } }
+      assertEquals(listOf("select", "set_key", "model_test"), fake.ops())
+      assertEquals(f.providerId, str(fake.body("select"), "provider"))
+      assertEquals(f.providerId, str(fake.body("set_key"), "provider"))
+      assertEquals(f.providerId, str(fake.body("model_test"), "provider"))
+      assertEquals("https://router.example.com/v1", str(fake.body("model_test"), "base_url"))
+      assertNull("a custom endpoint carries its format in the id", fake.body("model_test")["api_format"])
+    }
+  }
+
+  @Test fun aTestThatAnswersWithTheFormatHintIsShownAndOffersTheOtherFormat() {
+    fake.on("select", """{"ok":true}"""); fake.on("model_test", """{"ok":true,"works":false,"message":"This server speaks the OpenAI Responses format: pick \"Custom endpoint: OpenAI Responses\"."}""")
+    val c = controller(); c.start(); waitFor(c) { !it.loading && !it.fetching }
+    c.selectProvider("custom"); c.setAddress("https://router.example.com/v1")
+    c.testConnection()
+    val s = waitFor(c) { it.testOk == false }
+    assertEquals("responses", s.hintedFormat?.id)
+    c.switchToFormat(s.hintedFormat!!)
+    val t = waitFor(c) { it.providerId == "custom-responses" }
+    assertEquals("https://router.example.com/v1", t.address)
+    assertNull(t.hintedFormat)
+  }
+
+  @Test fun theApiFormatOfAHostedProviderIsShownAskedAndSavedAndACustomOneSendsNone() {
+    fake.on("select", """{"ok":true}"""); fake.on("model_test", """{"ok":true,"works":true,"message":"ok"}""")
+    val c = controller(); c.start(); waitFor(c) { !it.loading && !it.fetching }
+    c.selectProvider("openai")
+    assertEquals("responses", c.state.value.apiFormat)
+    waitFor(c) { !it.fetching }
+    assertEquals("responses", str(fake.body("models"), "api_format"))
+    c.setApiFormat("claude"); waitFor(c) { !it.fetching && it.models.isNotEmpty() }
+    assertEquals("claude", str(fake.body("models"), "api_format"))
+    c.choose("gpt-4o"); c.use { }
+    runBlocking { withTimeout(5000) { while ("select" !in fake.ops()) kotlinx.coroutines.delay(20) } }
+    assertEquals("claude", str(fake.body("select"), "api_format"))
+    c.setApiFormat(""); waitFor(c) { !it.fetching }
+    assertNull("the normal format asks nothing special", fake.body("models")["api_format"])
+    c.selectProvider("custom-claude"); c.setAddress("https://r.example.com/v1"); c.addressDone(); waitFor(c) { !it.fetching && it.models.isNotEmpty() }
+    assertNull(fake.body("models")["api_format"])
+    assertEquals("custom-claude", str(fake.body("models"), "provider"))
   }
 }
