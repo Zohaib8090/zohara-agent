@@ -1,6 +1,7 @@
-//! Runs scheduled tasks when their time comes, on their own, and leaves each result as a chat under Recents.
+//! The desktop's timer for scheduled tasks. The work itself (what a task is, how it runs, approvals, history, reminders, catch-up of
+//! missed runs) is `zo_core::scheduler`, the same code the cloud server and "Test" use; this file only wakes up every 20 seconds, runs
+//! what is due on a thread of its own and shows the result as a desktop notification (docs/SCHEDULED.md).
 
-use crate::chats::{self, Chat, Entry};
 use adw::prelude::*;
 use gtk4 as gtk;
 use gtk::glib;
@@ -10,100 +11,70 @@ use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
-use zo_core::ai::agent::{self, Config, Event};
-use zo_core::ai::claude_code;
-use zo_core::ai::wire::Turn;
-use zo_core::ai::Selection;
+use zo_core::approval::AppApprover;
+use zo_core::scheduler::{self, Notice};
 use zo_core::store::schedules::{self, Task};
-
-fn entry(kind: &str, text: impl Into<String>) -> Entry {
-    Entry { kind: kind.into(), text: text.into(), ..Default::default() }
-}
-
-/// Does one task now and returns the chat it leaves behind.
-fn run_task(task: &Task) -> Chat {
-    let sel = Selection::load();
-    let now = schedules::now_millis();
-    let mut entries = vec![entry("msg-user", task.prompt.clone())];
-    let system = format!(
-        "{}\n\nThis is a scheduled task. It is running on its own at the planned time and nobody is watching. Do it, then say briefly what you did.",
-        agent::SYSTEM_PROMPT
-    );
-    let mut history: Vec<Turn> = Vec::new();
-    let mut session = None;
-    // shown in the tray and the Activity page; Stop there sets this flag
-    let cancel = Arc::new(AtomicBool::new(false));
-    let activity = zo_core::activity::start(
-        if sel.provider == "claude-code" { zo_core::activity::Kind::ClaudeCode } else { zo_core::activity::Kind::Scheduled },
-        &format!("Scheduled: {}", task.title),
-        &sel.model,
-        "scheduler",
-        None,
-        Some(cancel.clone()),
-    );
-    let result = {
-        let mut on = |e: Event| match e {
-            Event::TextDelta(_) | Event::Usage(_) => {}
-            Event::Text(t) => entries.push(entry("msg-ai", t)),
-            Event::ToolStart { name, summary } => entries.push(entry("msg-tool", format!("▸ {name}  {}", summary.lines().nth(1).unwrap_or("")))),
-            Event::ToolDone { ok, output, .. } => {
-                let short: String = output.chars().take(300).collect();
-                entries.push(entry(if ok { "msg-tool-out" } else { "msg-error" }, format!("{} {short}", if ok { "✓" } else { "✗" })));
-            }
-        };
-        if sel.provider == "claude-code" {
-            let model = if sel.model.is_empty() { "sonnet".to_string() } else { sel.model.clone() };
-            claude_code::run(&model, sel.effort.as_deref(), &mut session, &task.prompt, &system, &cancel, &mut on)
-        } else {
-            match Config::from_selection(&sel, &system) {
-                Ok(cfg) => agent::run(&cfg, &mut history, &task.prompt, zo_core::Mode::load(), &zo_core::approval::AppApprover, &zo_core::approval::NoQuestions, &cancel, &mut on),
-                Err(e) => Err(e),
-            }
-        }
-    };
-    drop(activity);
-    if let Err(e) = result {
-        entries.push(entry("msg-error", e));
-    }
-    Chat { id: format!("c{now}"), title: format!("Scheduled: {}", task.title), updated: now, entries, history, session, context: String::new(), pinned: false, branches: Default::default() }
-}
 
 thread_local! {
     static RUNNING: Cell<bool> = const { Cell::new(false) };
 }
 
+/// A finished run, on its way from a worker thread to the main thread.
+type Shown = (Task, Notice);
+
+/// Shows a finished task: a desktop notification (the result in one line; a failure says why) and a refresh of the Scheduled page.
+/// Main thread only.
+pub fn show(task: &Task, n: &Notice, done: &dyn Fn()) {
+    if let Some(app) = gtk::gio::Application::default() {
+        let note = gtk::gio::Notification::new(&n.title);
+        note.set_body(Some(&n.body));
+        note.set_default_action("app.zo-show");
+        if n.kind == "reminder" || !n.ok {
+            note.set_priority(gtk::gio::NotificationPriority::High);
+        }
+        app.send_notification(Some(&format!("zo-task-{}", task.id)), &note);
+    }
+    done();
+}
+
+/// Registers how every finished run of this computer reaches the person (the timer, "Run now" in the window, and "Run now" from the
+/// phone or the web through the service). The runner may call it from any thread; the notification is made on the main one.
+pub fn register_notifier() {
+    scheduler::set_notifier(Arc::new(|_tenant, task, notice| {
+        let (task, notice): Shown = (task.clone(), notice.clone());
+        glib::MainContext::default().invoke(move || {
+            let f = crate::TASKS_DONE.with(|t| t.borrow().clone());
+            show(&task, &notice, &|| {
+                if let Some(f) = &f {
+                    f();
+                }
+            });
+        });
+    }));
+}
+
+/// Starts "Run now" for a task of this computer (the result shows in its card and as a notification).
+pub fn run_now(id: &str) -> Result<(), String> {
+    scheduler::run_now_in_background(id, Arc::new(AppApprover), "scheduler", Arc::new(|t, o| scheduler::notify("", t, &o.notice)))
+}
+
 /// Looks for tasks that are due and runs them one after another in the background. `done` is called when they have finished.
 pub fn check(done: Rc<dyn Fn()>) {
-    if RUNNING.with(Cell::get) {
-        return;
-    }
-    let due = schedules::due(schedules::now_millis());
-    if due.is_empty() {
+    if RUNNING.with(Cell::get) || schedules::due(schedules::now_millis()).is_empty() {
         return;
     }
     RUNNING.with(|r| r.set(true));
-    let (tx, rx) = mpsc::channel::<String>();
+    let (tx, rx) = mpsc::channel::<()>();
     std::thread::spawn(move || {
-        for task in due {
-            let chat = run_task(&task);
-            let id = chat.id.clone();
-            chats::upsert(chat);
-            schedules::mark_ran(&task.id, schedules::now_millis(), Some(id));
-            let _ = tx.send(task.title);
-        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        // a task that is late (the computer was off) runs once now and says "Missed 09:00"; the finished run reaches the person
+        // through the registered notifier
+        scheduler::run_due(&AppApprover, "scheduler", &cancel, &mut |task, out| scheduler::notify("", task, &out.notice));
+        let _ = tx.send(());
     });
     glib::timeout_add_local(Duration::from_millis(500), move || match rx.try_recv() {
-        Ok(title) => {
-            if let Some(app) = gtk::gio::Application::default() {
-                let n = gtk::gio::Notification::new("Zohara Agent finished a scheduled task");
-                n.set_body(Some(&title));
-                app.send_notification(None, &n);
-            }
-            done();
-            glib::ControlFlow::Continue
-        }
         Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-        Err(mpsc::TryRecvError::Disconnected) => {
+        _ => {
             RUNNING.with(|r| r.set(false));
             done();
             glib::ControlFlow::Break
@@ -111,8 +82,9 @@ pub fn check(done: Rc<dyn Fn()>) {
     });
 }
 
-/// Starts looking every 20 seconds.
+/// Starts looking every 20 seconds (and once now, which runs what was missed while the computer was off).
 pub fn start(done: Rc<dyn Fn()>) {
+    register_notifier();
     let d = done.clone();
     glib::timeout_add_seconds_local(20, move || {
         check(d.clone());

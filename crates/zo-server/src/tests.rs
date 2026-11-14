@@ -3175,3 +3175,38 @@ fn the_operator_can_turn_cloud_tasks_off_or_keep_them_to_the_owner() {
 
 /// Tests that change an environment variable of the whole process take turns.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+#[test]
+fn test_of_a_scheduled_task_streams_over_http_and_changes_nothing_in_the_task() {
+    let u = uniq("cloud-test");
+    let r = rig(&[("tok-r", &u, "r@x.test")], "", 200, 600);
+    let a = call(&r, "tok-r", "/api/op", json!({"op": "schedule_add", "task": "call mom", "title": "Call", "when": "in 2 hours", "kind": "reminder"}));
+    let id = a.body["task"]["id"].as_str().unwrap().to_string();
+    let before = call(&r, "tok-r", "/api/op", json!({"op": "scheduled"})).body["tasks"].clone();
+    let post = |body: Value| {
+        let res = match ureq::post(&format!("{}/api/schedule/test", r.base)).set("Authorization", "Bearer tok-r").send_string(&body.to_string()) {
+            Ok(r) => r,
+            Err(ureq::Error::Status(_, r)) => r,
+            Err(e) => panic!("{e}"),
+        };
+        assert_eq!(res.header("Content-Type"), Some("application/x-ndjson"));
+        res.into_string().unwrap().lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).collect::<Vec<_>>()
+    };
+    let saved = post(json!({"id": id}));
+    let kinds: Vec<&str> = saved.iter().map(|e| e["event"].as_str().unwrap_or("")).collect();
+    assert_eq!(kinds.first(), Some(&"stream"), "{kinds:?}");
+    assert!(kinds.contains(&"notify") && kinds.contains(&"result") && kinds.last() == Some(&"done"), "{kinds:?}");
+    let n = saved.iter().find(|e| e["event"] == "notify").unwrap();
+    assert_eq!((n["title"].clone(), n["body"].clone()), (json!("Test: Call"), json!("call mom")));
+    assert_eq!(call(&r, "tok-r", "/api/op", json!({"op": "scheduled"})).body["tasks"], before, "a test changes nothing in the task");
+    // a draft that is not saved, and the limits of the person hold in a test too
+    let draft = post(json!({"draft": {"task": "hi", "kind": "reminder"}}));
+    assert!(draft.iter().any(|e| e["event"] == "result"), "{draft:?}");
+    let browser = post(json!({"draft": {"task": "x", "kind": "browser"}}));
+    assert!(browser.iter().any(|e| e["error"].is_string()), "{browser:?}");
+    assert_eq!(call(&r, "tok-r", "/api/op", json!({"op": "scheduled"})).body["tasks"].as_array().unwrap().len(), 1);
+    // somebody else cannot test it
+    let r2 = rig(&[("tok-x", &uniq("cloud-test-x"), "x@x.test")], "", 200, 600);
+    let res = ureq::post(&format!("{}/api/schedule/test", r2.base)).set("Authorization", "Bearer tok-x").send_string(&json!({"id": id}).to_string()).unwrap().into_string().unwrap();
+    assert!(res.contains("gone"), "{res}");
+}
