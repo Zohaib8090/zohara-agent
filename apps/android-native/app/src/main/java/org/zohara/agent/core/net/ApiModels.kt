@@ -63,14 +63,30 @@ val ZoJson: Json = Json {
 @Serializable data class SettingsResp(val hiddenProviders: List<String> = emptyList(), val providerPrefs: Map<String, ProviderPref> = emptyMap(), val updated: Long = 0)
 
 // ---- memory, personalities ----
-@Serializable data class MemoryItem(val id: String, val kind: String = "fact", val text: String = "", val title: String = "", val chat: String = "", val pinned: Boolean = false, val updated: Long = 0)
-@Serializable data class MemoryResp(val enabled: Boolean = true, val every: Int = 3, val items: List<MemoryItem> = emptyList())
+@Serializable data class MemoryItem(val id: String, val kind: String = "fact", val text: String = "", val title: String = "", val chat: String = "", val pinned: Boolean = false, val updated: Long = 0, val scope: String = "", val scopeName: String = "")
+@Serializable data class MemoryProject(val id: String, val name: String = "")
+@Serializable data class MemoryResp(
+  val enabled: Boolean = true, val every: Int = 3, val items: List<MemoryItem> = emptyList(),
+  val minEvery: Int = 2, val showUpdates: Boolean = true, val projects: List<MemoryProject> = emptyList(),
+)
+/** One entry of the memory change log (`memory_changes`): [action] is added, updated or deleted; [scope] is "" for the whole memory, else a project id. */
+@Serializable data class MemoryChange(
+  val id: String, val time: Long = 0, val batch: String = "", val source: String = "", val chat: String = "", val title: String = "",
+  val scope: String = "", val scopeName: String = "", val action: String = "", val note: String = "", val kind: String = "",
+  val before: String = "", val after: String = "", val undone: Boolean = false,
+)
+@Serializable data class MemoryChangesResp(
+  val changes: List<MemoryChange> = emptyList(), val latest: Long = 0, val running: Boolean = false, val showUpdates: Boolean = true, val summary: String = "",
+)
+@Serializable data class MemorySettingsResp(val every: Int = 3, val minEvery: Int = 2, val showUpdates: Boolean = true)
+@Serializable data class MemoryImportResp(val added: Int = 0, val alreadyThere: Int = 0, val skipped: Int = 0)
 @Serializable data class Personality(val id: String, val name: String = "", val prompt: String = "", val generated: Boolean = false, val builtin: Boolean = false)
 @Serializable data class PersonalitiesResp(val active: String = "", val items: List<Personality> = emptyList())
 @Serializable data class PersonalityGenerated(val id: String = "", val name: String = "", val prompt: String = "")
 
 // ---- projects, artifacts, schedules, machines, MCP ----
 @Serializable data class ProjectsResp(val text: String = "")
+@Serializable data class ProjectDeleteResp(val notesRemoved: Int = 0)
 @Serializable data class ArtifactItem(val id: String = "", val kind: String = "", val title: String = "", val path: String = "", val text: String? = null, val chat: String = "", val created: Long = 0)
 @Serializable data class ArtifactsResp(val items: List<ArtifactItem> = emptyList())
 @Serializable data class ScheduledTask(val id: String, val title: String = "", val prompt: String = "", val nextRun: Long = 0, val repeat: String = "once", val enabled: Boolean = true)

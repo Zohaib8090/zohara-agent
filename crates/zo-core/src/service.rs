@@ -534,15 +534,71 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             Ok(json!({}))
         }
         "memory" => {
-            // the long-term memory, for the phone's Memory page
+            // the long-term memory, for the phone's Memory page. "scope": "all" (default), "global" or a project id
             let st = crate::store::memory::load();
-            let mut items = st.items.clone();
+            let scope = s(req, "scope");
+            let mut items: Vec<_> = st.items.iter().filter(|i| match scope {
+                "" | "all" => true,
+                "global" => i.scope.is_empty(),
+                p => i.scope == p,
+            }).cloned().collect();
             items.sort_by(|a, b| (b.pinned, b.updated).cmp(&(a.pinned, a.updated)));
-            Ok(json!({"enabled": st.enabled, "every": st.every, "items": items.iter().take(300).map(|i| json!({"id": i.id, "text": i.text, "kind": i.kind, "title": i.title, "chat": i.chat, "pinned": i.pinned, "updated": i.updated})).collect::<Vec<_>>()}))
+            let projects = crate::store::memory_io::projects();
+            let name = |id: &str| projects.iter().find(|(p, _)| p == id).map(|(_, n)| n.clone()).unwrap_or_default();
+            Ok(json!({
+                "enabled": st.enabled, "every": st.every, "min_every": crate::store::memory::MIN_EVERY, "show_updates": st.show_updates,
+                "projects": projects.iter().map(|(id, n)| json!({"id": id, "name": n})).collect::<Vec<_>>(),
+                "items": items.iter().take(300).map(|i| json!({"id": i.id, "text": i.text, "kind": i.kind, "title": i.title, "chat": i.chat, "pinned": i.pinned, "updated": i.updated, "scope": i.scope, "scope_name": name(&i.scope)})).collect::<Vec<_>>(),
+            }))
         }
         "memory_add" => {
-            let (_, new) = crate::store::memory::remember(s(req, "text"), if s(req, "kind").is_empty() { "fact" } else { s(req, "kind") }, "").ok_or("That note is too short.")?;
+            let scope = s(req, "scope");
+            let scope = if scope.is_empty() || scope == "global" { "" } else { scope };
+            if !scope.is_empty() && !crate::store::memory_io::projects().iter().any(|(id, _)| id == scope) {
+                return Err("There is no such project.".into());
+            }
+            let (_, new) = crate::store::memory::remember_in(s(req, "text"), if s(req, "kind").is_empty() { "fact" } else { s(req, "kind") }, "", scope).ok_or("That note is too short.")?;
             Ok(json!({"new": new}))
+        }
+        "memory_changes" => {
+            // what the memory agent changed, newest first (the "Memory updated" list); "since" is a time in ms: only newer entries
+            let since = req.get("since").and_then(Value::as_u64).unwrap_or(0);
+            let limit = req.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
+            let list = crate::store::memory_log::list(since, limit);
+            Ok(json!({
+                "changes": list.iter().map(crate::store::memory_log::to_json).collect::<Vec<_>>(),
+                "latest": crate::store::memory_log::latest(),
+                "running": crate::ai::memory_agent::is_running(),
+                "show_updates": crate::store::memory::load().show_updates,
+                "summary": crate::store::memory_log::summary(&list),
+            }))
+        }
+        "memory_undo" => Ok(json!({"message": crate::store::memory_log::undo(s(req, "id"))?})),
+        "memory_settings" => {
+            if let Some(on) = req.get("show_updates").and_then(Value::as_bool) {
+                crate::store::memory::set_show_updates(on);
+            }
+            if let Some(n) = req.get("every").and_then(Value::as_u64) {
+                crate::store::memory::set_every(n as usize);
+            }
+            let st = crate::store::memory::load();
+            Ok(json!({"every": st.every, "min_every": crate::store::memory::MIN_EVERY, "show_updates": st.show_updates}))
+        }
+        "memory_export" => Ok(crate::store::memory_io::export(s(req, "scope"))),
+        "memory_import" => {
+            let data = req.get("data").unwrap_or(req);
+            let (added, same, skipped) = crate::store::memory_io::import(data)?;
+            Ok(json!({"added": added, "already_there": same, "skipped": skipped}))
+        }
+        "project_delete" => {
+            // deleting a project also deletes its memory notes: the client asks first, and says so in the request
+            if req.get("confirm").and_then(Value::as_bool) != Some(true) {
+                return Err("Confirm first: deleting a project also deletes its memory notes.".into());
+            }
+            let mut st = crate::store::projects::Store::load();
+            let n = st.remove(s(req, "id")).ok_or("There is no such project.")?;
+            st.save();
+            Ok(json!({"notes_removed": n}))
         }
         "memory_update" => {
             if crate::store::memory::update_text(s(req, "id"), s(req, "text")) { Ok(json!({})) } else { Err("That note is gone or the text is too short.".into()) }
@@ -724,6 +780,15 @@ fn entry(kind: &str, text: impl Into<String>) -> Entry {
     Entry { kind: kind.into(), text: text.into(), ..Default::default() }
 }
 
+/// A project id that exists for this person, else "" (a restricted account has no projects).
+fn valid_project(id: &str) -> String {
+    if id.is_empty() || !crate::store::memory_io::projects().iter().any(|(p, _)| p == id) {
+        String::new()
+    } else {
+        id.to_string()
+    }
+}
+
 fn send(req: &Value, mut reader: BufReader<UnixStream>, out: Arc<Mutex<UnixStream>>) {
     let mut text = s(req, "text").trim().to_string();
     let edit = req.get("edit").and_then(Value::as_u64).map(|n| n as usize);
@@ -787,6 +852,19 @@ fn send(req: &Value, mut reader: BufReader<UnixStream>, out: Arc<Mutex<UnixStrea
             }
         }
     }
+    // the project a chat belongs to is decided when it starts (a request may name one; a restricted account has none)
+    if chat.entries.is_empty() && chat.project.is_empty() {
+        chat.project = valid_project(s(req, "project"));
+    }
+    let project = valid_project(&chat.project);
+    let _scope = crate::store::memory::project_guard(&project);
+    // what the memory agent changed while this stream is open is told here as well (the clients also ask for the list afterwards)
+    let heard = {
+        let o = out.clone();
+        crate::store::memory_log::subscribe(move |ev| {
+            line(&o, ev);
+        })
+    };
     line(&out, &json!({"event": "chat", "id": chat.id, "title": chat.title}));
     // a mode in the request is for this question only (the saved mode, which the app and the phone share, is not changed)
     let mode = req.get("mode").and_then(Value::as_str).and_then(Mode::parse_known).unwrap_or_else(Mode::load);
@@ -894,7 +972,7 @@ fn send(req: &Value, mut reader: BufReader<UnixStream>, out: Arc<Mutex<UnixStrea
         crate::store::memory::system_without_notes(agent::system_prompt())
     } else {
         let base = format!("{}\n\nThe person is talking to you from their phone (Zohara Link). Keep answers short and easy to read on a small screen.", agent::system_prompt());
-        crate::store::memory::system_with(&base, &text)
+        crate::store::memory::system_in(&base, &text, &project)
     };
     let mut session = chat.session.clone();
     let mut history = chat.history.clone();
@@ -957,9 +1035,10 @@ fn send(req: &Value, mut reader: BufReader<UnixStream>, out: Arc<Mutex<UnixStrea
     chat.session = session;
     chat.branches = chat.snapshot_branches();
     chat.updated = chats::now_millis();
-    crate::ai::memory_agent::after_turn(&chat.id, &chat.title, &chat.entries);
+    crate::ai::memory_agent::after_turn_in(&chat.id, &chat.title, &chat.entries, &project);
     chats::upsert_checked(chat, base);
     drop(activity);
+    drop(heard);
     line(&out, &json!({"event": "done"}));
     // the helper thread that listens for answers still holds the other end: close the connection so the client sees the end
     let _ = out.lock().unwrap().shutdown(std::net::Shutdown::Both);
@@ -1989,6 +2068,146 @@ mod tenant_tests {
         // the same refusal for a profile's address
         let id = ask(json!({"op": "profile_create", "name": "P"}))["id"].as_str().unwrap().to_string();
         assert!(ask(json!({"op": "profile_update", "id": id, "base_url": "http://192.168.1.2/v1"}))["error"].as_str().unwrap().contains("public https"));
+    }
+
+    fn make_project(t: &crate::tenant::Tenant, name: &str) -> String {
+        crate::tenant::scope(t, || {
+            let mut st = crate::store::projects::Store::load();
+            let id = st.add(name.into(), String::new());
+            st.save();
+            id
+        })
+    }
+
+    #[test]
+    fn the_memory_feed_ops_scope_filter_settings_undo_and_project_delete() {
+        let _g = lock();
+        let t = fresh(false);
+        let pa = make_project(&t, "Atlas");
+        let ask = |req: Value| talk(with_tenant(req, &t), true).remove(0);
+        // notes in the whole memory and in a project; a project that is not there is refused
+        assert_eq!(ask(json!({"op": "memory_add", "text": "Likes green tea in the morning", "kind": "preference"}))["ok"], true);
+        assert_eq!(ask(json!({"op": "memory_add", "text": "The atlas release ships on Friday", "kind": "project", "scope": pa}))["ok"], true);
+        assert!(ask(json!({"op": "memory_add", "text": "Nowhere", "scope": "p404"}))["error"].as_str().unwrap().contains("no such project"));
+        let all = ask(json!({"op": "memory"}));
+        assert_eq!(all["items"].as_array().unwrap().len(), 2);
+        assert_eq!(all["projects"][0]["name"], "Atlas");
+        assert_eq!((all["min_every"].as_u64(), all["show_updates"].as_bool()), (Some(2), Some(true)));
+        let only_project = ask(json!({"op": "memory", "scope": pa}));
+        assert_eq!(only_project["items"].as_array().unwrap().len(), 1);
+        assert_eq!(only_project["items"][0]["scope_name"], "Atlas");
+        assert_eq!(ask(json!({"op": "memory", "scope": "global"}))["items"].as_array().unwrap().len(), 1);
+
+        // settings: the floor is 2
+        let st = ask(json!({"op": "memory_settings", "every": 1, "show_updates": false}));
+        assert_eq!((st["every"].as_u64(), st["show_updates"].as_bool()), (Some(2), Some(false)));
+        assert_eq!(ask(json!({"op": "memory_settings", "every": 4, "show_updates": true}))["every"], 4);
+
+        // the log: a change made by the agent is listed, with before and after, and can be undone once
+        crate::tenant::scope(&t, || {
+            let before = crate::store::memory_log::snapshot();
+            let id = crate::store::memory::load().items.iter().find(|i| i.kind == "preference").unwrap().id.clone();
+            crate::store::memory::update_text(&id, "Likes black coffee in the morning");
+            crate::store::memory_log::record_diff(&before, "engine", "c1", "Morning");
+        });
+        let r = ask(json!({"op": "memory_changes"}));
+        let ch = r["changes"].as_array().unwrap();
+        assert_eq!(ch.len(), 1, "{r}");
+        assert_eq!((ch[0]["before"].as_str(), ch[0]["after"].as_str(), ch[0]["action"].as_str()), (Some("Likes green tea in the morning"), Some("Likes black coffee in the morning"), Some("updated")));
+        assert_eq!(r["summary"], "updated 1 note");
+        assert_eq!(ask(json!({"op": "memory_changes", "since": r["latest"]}))["changes"].as_array().unwrap().len(), 0, "since");
+        let id = ch[0]["id"].as_str().unwrap().to_string();
+        assert_eq!(ask(json!({"op": "memory_undo", "id": id}))["ok"], true);
+        assert!(ask(json!({"op": "memory_undo", "id": id}))["error"].as_str().unwrap().contains("already"));
+        assert!(ask(json!({"op": "memory"}))["items"].as_array().unwrap().iter().any(|i| i["text"] == "Likes green tea in the morning"));
+
+        // export, then import into someone else: the project note only follows to a project of the same name
+        let ex = ask(json!({"op": "memory_export"}));
+        assert_eq!(ex["notes"].as_array().unwrap().len(), 2);
+        let (t2, t3) = (fresh(false), fresh(true));
+        let pa2 = make_project(&t2, "atlas");
+        let import = |who: &crate::tenant::Tenant| talk(with_tenant(json!({"op": "memory_import", "data": ex}), who), true).remove(0);
+        let r2 = import(&t2);
+        assert_eq!((r2["added"].as_u64(), r2["skipped"].as_u64()), (Some(2), Some(0)), "{r2}");
+        assert_eq!(import(&t2)["already_there"], 2, "importing twice adds nothing");
+        crate::tenant::scope(&t2, || assert!(crate::store::memory::load().items.iter().any(|i| i.scope == pa2 && i.text.contains("Friday"))));
+        let r3 = import(&t3);
+        assert_eq!((r3["added"].as_u64(), r3["skipped"].as_u64()), (Some(1), Some(1)), "a restricted person has no project: {r3}");
+        crate::tenant::scope(&t3, || assert!(crate::store::memory::load().items.iter().all(|i| i.scope.is_empty())));
+        assert!(talk(with_tenant(json!({"op": "memory_import", "data": {"x": 1}}), &t2), true)[0]["error"].as_str().unwrap().contains("not a memory export"));
+
+        // deleting the project takes its notes along, only after a confirm
+        assert!(ask(json!({"op": "project_delete", "id": pa}))["error"].as_str().unwrap().contains("Confirm"));
+        let d = ask(json!({"op": "project_delete", "id": pa, "confirm": true}));
+        assert_eq!(d["notes_removed"], 1);
+        let left = ask(json!({"op": "memory"}));
+        assert_eq!(left["items"].as_array().unwrap().len(), 1);
+        assert_eq!(left["projects"].as_array().unwrap().len(), 0);
+        assert!(ask(json!({"op": "project_delete", "id": pa, "confirm": true}))["error"].as_str().unwrap().contains("no such project"));
+        // the other person's project and notes are untouched
+        crate::tenant::scope(&t2, || assert!(crate::store::projects::Store::load().get(&pa2).is_some() && crate::store::memory::load().items.len() == 2));
+    }
+
+    #[test]
+    fn every_person_has_only_their_own_log_and_a_restricted_one_cannot_touch_projects() {
+        let _g = lock();
+        let (a, b) = (fresh(false), fresh(true));
+        for who in [&a, &b] {
+            crate::tenant::scope(who, || {
+                let before = crate::store::memory_log::snapshot();
+                crate::store::memory::remember(&format!("A private note of {}", &who.id[16..]), "fact", "c");
+                crate::store::memory_log::record_diff(&before, "engine", "c", "t");
+            });
+        }
+        for (who, other) in [(&a, &b), (&b, &a)] {
+            let r = talk(with_tenant(json!({"op": "memory_changes"}), who), true).remove(0);
+            let text = r.to_string();
+            assert_eq!(r["changes"].as_array().unwrap().len(), 1, "{r}");
+            assert!(text.contains(&who.id[16..]) && !text.contains(&other.id[16..]), "{text}");
+            // and cannot undo the other's entry
+            let other_id = crate::tenant::scope(other, || crate::store::memory_log::list(0, 5)[0].id.clone());
+            let me = r["changes"][0]["id"].as_str().unwrap();
+            if me != other_id {
+                assert!(talk(with_tenant(json!({"op": "memory_undo", "id": other_id}), who), true)[0]["error"].is_string());
+            }
+        }
+        for req in [json!({"op": "project_delete", "id": "p1", "confirm": true}), json!({"op": "projects"})] {
+            assert!(talk(with_tenant(req, &b), true)[0]["error"].as_str().unwrap().contains("not available"));
+        }
+        assert!(talk(with_tenant(json!({"op": "memory_add", "text": "Sneaky", "scope": "p1"}), &b), true)[0]["error"].is_string());
+    }
+
+    #[test]
+    fn a_chat_inside_a_project_is_told_only_that_projects_notes() {
+        let _g = lock();
+        let t = fresh(false);
+        let pa = make_project(&t, "Atlas");
+        std::thread::sleep(std::time::Duration::from_millis(5)); // project ids are made from the clock
+        let pb = make_project(&t, "Harbor");
+        crate::tenant::scope(&t, || {
+            crate::store::memory::remember("Likes short answers without long explanations", "preference", "c0");
+            crate::store::memory::remember_in("The atlas release uses a Postgres database", "project", "c1", &pa);
+            crate::store::memory::remember_in("The harbor release uses a GTK window", "project", "c2", &pb);
+        });
+        let (url, seen) = fake_model(vec![chat_reply("one"), chat_reply("two"), chat_reply("three")]);
+        use_model(&t, &url);
+        let first = talk(with_tenant(json!({"op": "send", "text": "which database does the atlas release use, and the harbor release window", "project": pa}), &t), true);
+        let chat_id = first.iter().find(|l| l["event"] == "chat").unwrap()["id"].as_str().unwrap().to_string();
+        // the same chat goes on in the project even when the client does not say so again
+        talk(with_tenant(json!({"op": "send", "text": "which database does the atlas release use, and the harbor release window", "chat": chat_id}), &t), true);
+        // a chat outside every project (a request naming a project that is not there is outside too)
+        talk(with_tenant(json!({"op": "send", "text": "which database does the atlas release use, and the harbor release window", "project": "p404"}), &t), true);
+        let seen = seen.join().unwrap();
+        let system = |n: usize| seen[n]["messages"][0]["content"].as_str().unwrap().to_string();
+        for n in [0, 1] {
+            assert!(system(n).contains("Postgres") && system(n).contains("short answers") && !system(n).contains("GTK"), "request {n}: {}", system(n));
+        }
+        assert!(!system(2).contains("Postgres") && !system(2).contains("GTK") && system(2).contains("short answers"), "{}", system(2));
+        crate::tenant::scope(&t, || {
+            let c = chats::load().into_iter().find(|c| c.id == chat_id).unwrap();
+            assert_eq!(c.project, pa);
+            assert!(chats::load().iter().filter(|c| c.project.is_empty()).count() == 1);
+        });
     }
 }
 

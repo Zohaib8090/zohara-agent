@@ -78,7 +78,7 @@ pub fn memory_search(a: &Value) -> Result<String, String> {
     if !store.enabled {
         return Ok("Memory is switched off.".into());
     }
-    let hits = memory::search(&store, text(a, "query")?, 8);
+    let hits = memory::search_in(&store, text(a, "query")?, 8, &memory::current_project());
     if hits.is_empty() {
         return Ok("Nothing in memory matches.".into());
     }
@@ -93,7 +93,12 @@ pub fn memory_save(a: &Value) -> Result<String, String> {
     crate::tenant::check_room()?;
     let note = text(a, "text")?;
     let kind = a.get("kind").and_then(Value::as_str).unwrap_or("fact");
-    match memory::remember(note, kind, "") {
+    // in a project's chat, what is not about the person itself is kept for that project
+    let scope = memory::default_scope(kind, &memory::current_project());
+    let before = crate::store::memory_log::snapshot();
+    let r = memory::remember_in(note, kind, "", &scope);
+    crate::store::memory_log::record_diff(&before, "chat", "", "");
+    match r {
         Some((_, true)) => Ok("Remembered.".into()),
         Some((_, false)) => Ok("Updated what I remembered about this.".into()),
         None => Err("That note is too short to keep.".into()),
@@ -102,7 +107,9 @@ pub fn memory_save(a: &Value) -> Result<String, String> {
 
 pub fn memory_forget(a: &Value) -> Result<String, String> {
     use crate::store::memory;
-    let gone = memory::forget_matching(text(a, "what")?);
+    let before = crate::store::memory_log::snapshot();
+    let gone = memory::forget_matching_in(text(a, "what")?, &memory::current_project());
+    crate::store::memory_log::record_diff(&before, "chat", "", "");
     if gone.is_empty() {
         return Ok("Nothing in memory matched that closely enough to forget. Use zohara_memory_search to see the notes.".into());
     }

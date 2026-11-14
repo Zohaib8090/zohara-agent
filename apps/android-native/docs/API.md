@@ -116,6 +116,7 @@ Errors that happen inside the service arrive as an `error` event followed by `do
 | `usage` | `input`, `output` (numbers) | tokens of the last request as the provider counted them | live |
 | `question` | `id` (u64), `questions:[{question, header, multi_select, options:[{label, description}]}]` | **contract**: the model asks the person. Answer with `/api/reply` `{"op":"answer",...}` (3.5). Not sent by any server yet | contract |
 | `error` | `error` (text); relay errors also `message` | the answer failed; `desktop_offline`, `desktop_busy`, `limit`, `desktop_timeout`, `desktop_lost`, `job_timeout`, `too_much_output`, `desktop_revoked`, `account_deleted` are the relay codes (use `message`) | live (`desktop_offline`) |
+| `memory_updated` | `summary` ("Added 2 notes, updated 1 note"), `counts` `{added, updated, deleted}`, `ids` (change ids), `time` (ms of the newest change) | the memory agent changed notes while this stream was open (rare: it normally works after `done`, so the apps also ask `memory_changes` a few times after an answer); unknown to older apps, which ignore it | "Memory updated · View" chip |
 | `stopped` | none | the answer was stopped (by `/api/reply stop`, Activity Stop, or a desktop that ignored a stop for 20 s); `done` follows | code |
 | `ping` | none | computer relay only: every 15 s of silence; ignore | code |
 | `done` | none | the stream is over | live |
@@ -257,13 +258,18 @@ limits (2 at once, 8 server-wide): `compact`, `memory_edit`, `personality_genera
 
 | Op | Request | Response |
 |---|---|---|
-| `memory` | `{"op":"memory"}` | live: `{"ok":true,"enabled":true,"every":3,"items":[{"id":"m1794509148940000","kind":"preference","text":"I prefer short answers","title":"","chat":"","pinned":false,"updated":1794509148940}]}`; kinds person, preference, project, fact, episode (chat summary, `title` set); up to 300 items, pinned first |
-| `memory_add` | `{"op":"memory_add","text":"I prefer short answers","kind":"preference"}` (`kind` default `fact`) | live: `{"ok":true,"new":true}`; too short: "That note is too short." |
+| `memory` | `{"op":"memory"}` (optional `"scope"`: `all` default, `global` = notes for every chat, or a project id) | also (added 2026-11-14) `"min_every":2,"show_updates":true,"projects":[{"id":"p1","name":"Atlas"}]` and on each item `"scope":""` / `"scope_name":""` (a project id and its name for a project note); an older server leaves them out. Live before that change: `{"ok":true,"enabled":true,"every":3,"items":[{"id":"m1794509148940000","kind":"preference","text":"I prefer short answers","title":"","chat":"","pinned":false,"updated":1794509148940}]}`; kinds person, preference, project, fact, episode (chat summary, `title` set); up to 300 items, pinned first |
+| `memory_add` | `{"op":"memory_add","text":"I prefer short answers","kind":"preference"}` (`kind` default `fact`; optional `"scope"`: a project id, default the whole memory) | live: `{"ok":true,"new":true}`; too short: "That note is too short."; unknown project (or a restricted account): "There is no such project." |
 | `memory_update` | `{"op":"memory_update","id":"m...","text":"..."}` | `{"ok":true}`; "That note is gone or the text is too short." (live) |
 | `memory_pin` | `{"op":"memory_pin","id":"m...","on":true}` | `{"ok":true}` |
 | `memory_forget` | `{"op":"memory_forget","id":"m..."}` | `{"ok":true}` |
 | `memory_enable` | `{"op":"memory_enable","on":true}` | `{"ok":true}` |
 | `memory_clear` | `{"op":"memory_clear"}` | `{"ok":true}` |
+| `memory_changes` | `{"op":"memory_changes","since":0,"limit":60}` (`since` ms: only newer entries; `limit` 1 to 200) | `{"ok":true,"changes":[{"id":"g1794509131852001","time":1794509131852,"batch":"b1794509131852","source":"engine","chat":"c1","title":"Phone","scope":"p1","scope_name":"Atlas","action":"updated","note":"m1","kind":"fact","before":"Uses an A22","after":"Uses an A26","undone":false}],"latest":1794509131852,"running":false,"show_updates":true,"summary":"updated 1 note"}`; newest first; `action` is added, updated or deleted; `batch` groups the entries of one job (the "latest update" is the newest batch); only this person's own log; never holds a secret |
+| `memory_undo` | `{"op":"memory_undo","id":"g..."}` | `{"ok":true,"message":"The note has its earlier text again."}`; errors: "That change was already undone.", "That note is already gone.", "That note is gone, so its old text cannot be put back.", "The project this note belonged to is gone.", "That change is not in the list any more." |
+| `memory_settings` | `{"op":"memory_settings","every":4,"show_updates":false}` (both optional) | `{"ok":true,"every":4,"min_every":2,"show_updates":false}`; `every` is kept between `min_every` (2) and 20 |
+| `memory_export` | `{"op":"memory_export","scope":"all"}` (`all` default, `global`, or a project id) | `{"ok":true,"format":"zo-memory-1","exported_at":...,"projects":[{"id","name"}],"notes":[{"text","kind","scope","pinned","created","updated"}]}`; chat summaries are not part of it |
+| `memory_import` | `{"op":"memory_import","data":{...the export...}}` | `{"ok":true,"added":2,"already_there":1,"skipped":1}`; a note of a project goes to the project with the same id or name here, else it is skipped (never moved into the whole memory); text that looks like a secret is skipped; at most 2000 notes; "That is not a memory export." |
 | `memory_edit` | `{"op":"memory_edit","text":"join my preferences into one note"}` | `{"ok":true,"message":"..."}`; counts as an answer |
 | `personalities` | `{"op":"personalities"}` | live: `{"ok":true,"active":"friend","items":[{"id":"friend","name":"Friendly buddy","prompt":"Sound like a warm ...","generated":false,"builtin":true}, ...]}`; built-in ids: friend, engineer, mentor, sharp; own ones `p<ms>`; `active:""` = Plain |
 | `personality_use` | `{"op":"personality_use","id":"friend"}` (`""` = Plain) | `{"ok":true}` |
@@ -279,6 +285,7 @@ For a restricted account every op in this block except `artifacts` answers `{"ok
 | Op | Request | Response |
 |---|---|---|
 | `projects` | `{"op":"projects"}` | live: `{"ok":true,"text":"p1794509093697 \| Demo \| g \| 0 memory notes"}` (one line per project: id, name, goal, "N memory notes", separated by vertical bars; none: `"There are no projects."`) |
+| `project_delete` | `{"op":"project_delete","id":"p...","confirm":true}` | `{"ok":true,"notes_removed":3}`; without `"confirm":true`: "Confirm first: deleting a project also deletes its memory notes."; unknown: "There is no such project."; the project's notes and their log entries go, its chats stay |
 | `project_create` | `{"op":"project_create","name":"Demo","goal":"g"}` | live: `{"ok":true,"message":"Created the project \"Demo\" (id p1794509093697). It is on the Projects page."}`; duplicate name: error |
 | `artifacts` | `{"op":"artifacts"}` | live: `{"ok":true,"items":[]}`; items `{id, kind ("code"/"screenshot"/"file"), title, path, text (<= 20,000 characters or null), chat, created}`, at most 100 (code) |
 | `scheduled` | `{"op":"scheduled"}` | live: `{"ok":true,"tasks":[{"id":"t17945090995370","title":"t","prompt":"t","next_run":1794512699000,"repeat":"once","enabled":true}]}` |

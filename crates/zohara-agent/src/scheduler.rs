@@ -65,7 +65,7 @@ fn run_task(task: &Task) -> Chat {
     if let Err(e) = result {
         entries.push(entry("msg-error", e));
     }
-    Chat { id: format!("c{now}"), title: format!("Scheduled: {}", task.title), updated: now, entries, history, session, context: String::new(), pinned: false, branches: Default::default() }
+    Chat { id: format!("c{now}"), title: format!("Scheduled: {}", task.title), updated: now, entries, history, session, context: String::new(), pinned: false, project: String::new(), branches: Default::default() }
 }
 
 thread_local! {

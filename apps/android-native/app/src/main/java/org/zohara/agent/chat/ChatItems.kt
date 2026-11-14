@@ -79,6 +79,9 @@ data class QuestionItem(override val key: Long, val id: Long, val questions: Lis
 /** What a send was running on, for the status line and the pills. */
 data class Usage(val input: Long, val output: Long)
 
+/** What the "Memory updated" chip says: [summary] like "Added 2 notes"; [time] is the newest change (ms). */
+data class MemoryNote(val summary: String, val time: Long)
+
 data class ChatUiState(
   val chatId: String? = null,
   val title: String = "",
@@ -93,6 +96,8 @@ data class ChatUiState(
   val visibleFrom: Int = 0,
   /** name of the computer when this answer runs there */
   val computerName: String? = null,
+  /** "Memory updated · View": set when the memory agent changed notes, cleared by the person or after a few seconds */
+  val memoryNote: MemoryNote? = null,
 ) {
   val isEmpty: Boolean get() = items.isEmpty() && !loading
   /** a question card waits: the composer is off (COMP-16) */

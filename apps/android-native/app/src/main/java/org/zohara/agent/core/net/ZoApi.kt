@@ -207,8 +207,21 @@ class ZoApi(
 
   // ------------------------------------------------------------ 4.3 memory, personalities
 
-  suspend fun memory(): MemoryResp = opAs("memory", true)
-  suspend fun memoryAdd(text: String, kind: String = "fact") { op("memory_add") { put("text", text); put("kind", kind) } }
+  /** [scope]: "all" (default), "global" (notes for every chat) or a project id */
+  suspend fun memory(scope: String = "all"): MemoryResp = opAs("memory", true) { if (scope != "all") put("scope", scope) }
+  /** [scope] "" = the whole memory, else a project id */
+  suspend fun memoryAdd(text: String, kind: String = "fact", scope: String = "") { op("memory_add") { put("text", text); put("kind", kind); if (scope.isNotEmpty()) put("scope", scope) } }
+  /** What the memory agent changed, newest first; only entries newer than [since] (ms). */
+  suspend fun memoryChanges(since: Long = 0, limit: Int = 60): MemoryChangesResp = opAs("memory_changes", true) { if (since > 0) put("since", since); put("limit", limit) }
+  /** Undoes one change; returns the sentence to show. */
+  suspend fun memoryUndo(id: String): String = opAs<TextResp>("memory_undo") { put("id", id) }.message
+  suspend fun memorySettings(every: Int? = null, showUpdates: Boolean? = null): MemorySettingsResp = opAs("memory_settings") {
+    if (every != null) put("every", every)
+    if (showUpdates != null) put("show_updates", showUpdates)
+  }
+  /** The `zo-memory-1` document with every note and the project of each. */
+  suspend fun memoryExport(): JsonObject = op("memory_export", true)
+  suspend fun memoryImport(data: JsonObject): MemoryImportResp = opAs("memory_import") { put("data", data) }
   suspend fun memoryUpdate(id: String, text: String) { op("memory_update") { put("id", id); put("text", text) } }
   suspend fun memoryPin(id: String, on: Boolean) { op("memory_pin") { put("id", id); put("on", on) } }
   suspend fun memoryForget(id: String) { op("memory_forget") { put("id", id) } }
@@ -226,6 +239,8 @@ class ZoApi(
 
   suspend fun projects(): String = opAs<ProjectsResp>("projects", true).text
   suspend fun projectCreate(name: String, goal: String = ""): String = opAs<TextResp>("project_create") { put("name", name); put("goal", goal) }.message
+  /** Deletes a project and the memory notes kept for it (the caller has asked the person first). Returns how many notes went. */
+  suspend fun projectDelete(id: String): Int = opAs<ProjectDeleteResp>("project_delete") { put("id", id); put("confirm", true) }.notesRemoved
   suspend fun artifacts(): List<ArtifactItem> = opAs<ArtifactsResp>("artifacts", true).items
   suspend fun scheduled(): List<ScheduledTask> = opAs<ScheduledResp>("scheduled", true).tasks
   /** [`when`] is plain words; a leading "in " is rewritten to "now + " because the server parses it with GNU date (API.md 4.4 known bug) */

@@ -105,6 +105,9 @@ pub struct Chat {
     pub context: String,
     #[serde(default)]
     pub pinned: bool,
+    /// The project this chat belongs to ("" = none). Its notes in the memory are read and written only by chats of the project.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project: String,
     /// By the number of your message (counting from 0): the takes it has had.
     #[serde(default)]
     pub branches: BTreeMap<usize, Branch>,

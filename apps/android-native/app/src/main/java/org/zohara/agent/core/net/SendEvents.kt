@@ -28,6 +28,8 @@ sealed interface SendEvent {
   data class Usage(val input: Long, val output: Long) : SendEvent
   /** [code] is the raw `error` field (for example `desktop_offline`), [message] what to show */
   data class Error(val code: String, val message: String) : SendEvent
+  /** the memory agent changed notes (docs/MEMORY.md): [summary] such as "Added 2 notes", [time] of the newest change */
+  data class MemoryUpdated(val summary: String, val time: Long) : SendEvent
   data object Stopped : SendEvent
   data object Ping : SendEvent
   data object Done : SendEvent
@@ -64,6 +66,7 @@ object SendEventParser {
         val msg = obj.str("message")?.takeIf { it.isNotBlank() } ?: friendlyCode(code)
         SendEvent.Error(code, msg)
       }
+      "memory_updated" -> SendEvent.MemoryUpdated(obj.str("summary").orEmpty(), obj.long("time") ?: 0)
       "stopped" -> SendEvent.Stopped
       "ping" -> SendEvent.Ping
       "done" -> SendEvent.Done

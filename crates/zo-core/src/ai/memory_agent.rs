@@ -95,18 +95,27 @@ fn transcript(entries: &[Entry], read: usize) -> String {
     out
 }
 
-fn prompt_for(title: &str, chat: &str, text: &str, existing_episode: Option<&str>) -> String {
-    // every note (not only the closest ones), so that the model can merge into an old note instead of writing a new one
+fn prompt_for(title: &str, chat: &str, text: &str, existing_episode: Option<&str>, project: &str) -> String {
+    // every note this chat can see (not only the closest ones), so that the model can merge into an old note instead of writing a new one
     let all = memory::load();
-    let mut notes: Vec<&memory::Item> = all.items.iter().filter(|i| i.kind != "episode").collect();
+    let mut notes: Vec<&memory::Item> = all.items.iter().filter(|i| i.kind != "episode" && memory::visible(i, project)).collect();
     notes.sort_by(|a, b| b.updated.cmp(&a.updated));
     let known = if notes.is_empty() {
         "(nothing yet)".to_string()
     } else {
-        notes.iter().take(60).map(|i| format!("[{}] ({}) {}", i.id, i.kind, i.text)).collect::<Vec<_>>().join("\n")
+        notes.iter().take(60).map(|i| format!("[{}] ({}{}) {}", i.id, i.kind, if i.scope.is_empty() { "" } else { ", this project" }, i.text)).collect::<Vec<_>>().join("\n")
+    };
+    let name = if project.is_empty() { String::new() } else { crate::store::projects::Store::load().get(project).map(|p| p.name.clone()).unwrap_or_default() };
+    let scope_rule = if name.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "This chat belongs to the project \"{name}\". Notes marked \"this project\" are only told to chats of this project. For every added note also give \"scope\": \"project\" for a fact about this project's work (its goal, files, decisions, who is involved) or \"global\" for a fact about the person that matters in every chat (who they are, how they like things done, what they use). \
+            A note about the person stays global even when it came up here.\n"
+        )
     };
     format!(
-        "Chat title: {title}\nChat id: {chat}\n\nWHAT IS ALREADY REMEMBERED (the id is in brackets):\n{known}\n\n{ep}\
+        "Chat title: {title}\nChat id: {chat}\n\nWHAT IS ALREADY REMEMBERED (the id is in brackets):\n{known}\n\n{ep}{scope_rule}\
         THE CONVERSATION:\n{text}\n\n\
         Write the JSON object with these keys:\n\
         \"add\": a list of {{\"text\": \"...\", \"kind\": \"...\"}} for new things worth remembering. kind is one of: person (who they are: name, work, where they live, family, languages), preference (how they like things done or said, what they like), project (what they are building or working on, with names), fact (anything else lasting: their devices, accounts they use, decisions made). \
@@ -130,15 +139,32 @@ pub fn parse(answer: &str) -> Option<Value> {
     serde_json::from_str(&answer[a..=b]).ok()
 }
 
-/// Applies the model's answer to the memory. Returns (added, updated, deleted).
+/// Applies the model's answer to the memory (a chat outside every project). Returns (added, updated, deleted).
 pub fn apply(v: &Value, chat: &str, title: &str) -> (usize, usize, usize) {
+    apply_in(v, chat, title, "")
+}
+
+/// Applies the model's answer for a chat of `project` ("" = none): new notes go to the project or to the whole memory (the model says
+/// which; without a word, what is about the person stays global and the rest belongs to the project), and only notes this chat can see
+/// are changed or removed. Returns (added, updated, deleted).
+pub fn apply_in(v: &Value, chat: &str, title: &str, project: &str) -> (usize, usize, usize) {
     let (mut added, mut updated, mut deleted) = (0, 0, 0);
     for it in v.get("add").and_then(Value::as_array).into_iter().flatten() {
         let text = it.get("text").and_then(Value::as_str).unwrap_or("");
         if looks_secret(text) {
             continue;
         }
-        if let Some((_, new)) = memory::remember(text, it.get("kind").and_then(Value::as_str).unwrap_or("fact"), chat) {
+        let kind = it.get("kind").and_then(Value::as_str).unwrap_or("fact");
+        let scope = if project.is_empty() {
+            String::new()
+        } else {
+            match it.get("scope").and_then(Value::as_str) {
+                Some("project") => project.to_string(),
+                Some("global") => String::new(),
+                _ => memory::default_scope(kind, project),
+            }
+        };
+        if let Some((_, new)) = memory::remember_in(text, kind, chat, &scope) {
             if new {
                 added += 1;
             } else {
@@ -148,12 +174,12 @@ pub fn apply(v: &Value, chat: &str, title: &str) -> (usize, usize, usize) {
     }
     for it in v.get("update").and_then(Value::as_array).into_iter().flatten() {
         let (id, text) = (it.get("id").and_then(Value::as_str).unwrap_or(""), it.get("text").and_then(Value::as_str).unwrap_or(""));
-        if !looks_secret(text) && memory::update_text(id, text) {
+        if !looks_secret(text) && memory::update_text_in(id, text, project) {
             updated += 1;
         }
     }
     for id in v.get("delete").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
-        if memory::forget(id) {
+        if memory::forget_in(id, project) {
             deleted += 1;
         }
     }
@@ -166,7 +192,7 @@ pub fn apply(v: &Value, chat: &str, title: &str) -> (usize, usize, usize) {
 }
 
 /// A last guard: nothing that looks like a key or a password is kept, whatever the model wrote.
-fn looks_secret(text: &str) -> bool {
+pub(crate) fn looks_secret(text: &str) -> bool {
     let t = text.to_lowercase();
     if ["password is", "passcode", "api key is", "secret key", "token is", "pin is"].iter().any(|k| t.contains(k)) {
         return true;
@@ -178,7 +204,7 @@ fn looks_secret(text: &str) -> bool {
 }
 
 /// Reads one chat now: returns what changed, or why it could not. `ask` sends one prompt to the model and returns its answer.
-fn process(ask: &dyn Fn(&str) -> Result<String, String>, chat: &str, title: &str, entries: &[Entry]) -> Result<(usize, usize, usize), String> {
+fn process(ask: &dyn Fn(&str) -> Result<String, String>, chat: &str, title: &str, entries: &[Entry], project: &str) -> Result<(usize, usize, usize), String> {
     let count = user_count(entries);
     let read = memory::load().read.get(chat).copied().unwrap_or(0);
     let text = transcript(entries, read);
@@ -186,12 +212,17 @@ fn process(ask: &dyn Fn(&str) -> Result<String, String>, chat: &str, title: &str
         return Ok((0, 0, 0));
     }
     let episode = memory::load().items.into_iter().find(|i| i.kind == "episode" && i.chat == chat).map(|i| i.text);
-    let answer = ask(&prompt_for(title, chat, &text, episode.as_deref()))?;
+    // a project that was deleted meanwhile is no project
+    let project = if project.is_empty() || crate::store::projects::Store::load().get(project).is_some() { project } else { "" };
+    let answer = ask(&prompt_for(title, chat, &text, episode.as_deref(), project))?;
     let v = parse(&answer).ok_or("The memory agent's answer was not JSON.")?;
-    let r = apply(&v, chat, title);
+    // what changed is written into the change log (the "Memory updated" feed) and announced
+    let before = crate::store::memory_log::snapshot();
+    let r = apply_in(&v, chat, title, project);
     memory::change(|s| {
         s.read.insert(chat.to_string(), count);
     });
+    crate::store::memory_log::record_diff(&before, "engine", chat, title);
     Ok(r)
 }
 
@@ -239,7 +270,9 @@ pub fn edit_by_instruction(instruction: &str) -> Result<String, String> {
     let _activity = crate::activity::start(crate::activity::Kind::MemoryJob, "Editing memory", instruction, "desktop", None, None);
     let answer = ask(&edit_prompt(instruction))?;
     let v = parse(&answer).ok_or("The model's answer could not be read. Try again.")?;
+    let before = crate::store::memory_log::snapshot();
     let (a, u, d) = apply(&v, "", "");
+    crate::store::memory_log::record_diff(&before, "edit", "", "");
     let say = v.get("say").and_then(Value::as_str).unwrap_or("").trim().to_string();
     Ok(if say.is_empty() { format!("{a} added, {u} changed, {d} removed.") } else { format!("{say} ({a} added, {u} changed, {d} removed)") })
 }
@@ -248,11 +281,16 @@ pub fn edit_by_instruction(instruction: &str) -> Result<String, String> {
 /// messages), a background job brings the memory up to date. Does nothing when memory is off or no model is set up. With Claude Code
 /// as the model, the small and quick `haiku` does the reading.
 pub fn after_turn(chat_id: &str, title: &str, entries: &[Entry]) {
+    after_turn_in(chat_id, title, entries, "");
+}
+
+/// `after_turn` for a chat that belongs to `project` ("" = none): the notes the job writes may belong to the project.
+pub fn after_turn_in(chat_id: &str, title: &str, entries: &[Entry], project: &str) {
     let store = memory::load();
     if !store.enabled || chat_id.is_empty() {
         return;
     }
-    let due_here = user_count(entries).saturating_sub(store.read.get(chat_id).copied().unwrap_or(0)) >= store.every.max(1);
+    let due_here = user_count(entries).saturating_sub(store.read.get(chat_id).copied().unwrap_or(0)) >= store.every.max(memory::MIN_EVERY);
     let now = chats::now_millis();
     let idle: Vec<chats::Chat> = chats::load()
         .into_iter()
@@ -267,16 +305,16 @@ pub fn after_turn(chat_id: &str, title: &str, entries: &[Entry]) {
         return;
     }
     let key = tenant_key();
-    let (id, title, entries) = (chat_id.to_string(), title.to_string(), entries.to_vec());
+    let (id, title, entries, project) = (chat_id.to_string(), title.to_string(), entries.to_vec(), project.to_string());
     // registered here (not on the thread) so it shows from this moment, and it ends with the thread whatever happens
     let activity = crate::activity::start(crate::activity::Kind::MemoryJob, "Updating memory", &title, "background", Some(&id), None);
     crate::tenant::spawn(move || {
         let _activity = activity;
         if due_here {
-            let _ = process(&*ask, &id, &title, &entries);
+            let _ = process(&*ask, &id, &title, &entries, &project);
         }
         for c in idle {
-            let _ = process(&*ask, &c.id, &c.title, &c.entries);
+            let _ = process(&*ask, &c.id, &c.title, &c.entries, &c.project);
         }
         end(&key);
     });
@@ -333,6 +371,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn the_agent_decides_the_scope_and_cannot_touch_another_projects_notes() {
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("zo-magent-scope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("XDG_DATA_HOME", &dir);
+        let other = memory::remember_in("The harbor project ships in March", "project", "c9", "pb").unwrap().0;
+        let global = memory::remember("Lives in Karachi", "person", "c0").unwrap().0;
+        let v: Value = serde_json::json!({
+            "add": [
+                {"text": "The atlas project uses a Postgres database", "kind": "project", "scope": "project"},
+                {"text": "The person is called Zohaib and writes Rust", "kind": "person", "scope": "global"},
+                {"text": "The atlas project is checked on a Samsung phone", "kind": "fact"},
+                {"text": "Prefers answers in short sentences", "kind": "preference"}
+            ],
+            "update": [{"id": other, "text": "Changed from the wrong project"}, {"id": global, "text": "Lives in Lahore"}],
+            "delete": [other],
+        });
+        let (a, u, d) = apply_in(&v, "c1", "Atlas", "pa");
+        assert_eq!((a, u, d), (4, 1, 0), "the other project's note is neither rewritten nor deleted");
+        let s = memory::load();
+        let scope_of = |t: &str| s.items.iter().find(|i| i.text.contains(t)).unwrap_or_else(|| panic!("{t}")).scope.clone();
+        assert_eq!(scope_of("Postgres"), "pa");
+        assert_eq!(scope_of("Zohaib"), "", "the model said it is about the person");
+        assert_eq!(scope_of("Samsung"), "pa", "no word from the model: a fact in a project chat belongs to the project");
+        assert_eq!(scope_of("short sentences"), "", "a preference stays global without a word");
+        assert_eq!(scope_of("harbor"), "pb");
+        assert!(s.items.iter().any(|i| i.text == "The harbor project ships in March"));
+        assert!(s.items.iter().any(|i| i.text == "Lives in Lahore"), "a global note can be corrected from a project chat");
+        // outside every project the model's "project" scope is ignored: nothing lands in a project that is not there
+        let v2: Value = serde_json::json!({"add": [{"text": "The person keeps bees on a farm", "kind": "fact", "scope": "project"}]});
+        assert_eq!(apply_in(&v2, "c2", "t", ""), (1, 0, 0));
+        assert_eq!(memory::load().items.iter().find(|i| i.text.contains("bees")).unwrap().scope, "");
+        // the prompt tells the model about the project's notes and the global ones, never another project's
+        let p = prompt_for("Atlas", "c1", "PERSON: hi\n", None, "pa");
+        assert!(p.contains("Postgres") && p.contains("Lahore") && !p.contains("harbor"), "{p}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// A model server that answers one request with `content` and hands back what it was asked.
     fn model(content: &str) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
@@ -380,7 +458,10 @@ mod tests {
         sel.save();
 
         let es = vec![e("msg-user", "test the phone app"), e("msg-ai", "ok"), e("msg-user", "profiles are empty"), e("msg-ai", "fixed"), e("msg-user", "I am building Zohara OS, keep answers short"), e("msg-ai", "noted")];
-        // two messages: not yet
+        let heard: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
+        let h2 = heard.clone();
+        let _sub = crate::store::memory_log::subscribe(move |v| h2.lock().unwrap().push(v.clone()));
+        // two messages: the agent now runs after every 2 messages at the soonest (default 3)
         after_turn("c1", "Phone app", &es[..4]);
         assert!(!is_running());
         // the third: the agent runs
@@ -397,6 +478,14 @@ mod tests {
         assert_eq!(st.read.get("c1"), Some(&3));
         assert!(st.items.iter().any(|i| i.kind == "project" && i.text.contains("Zohara Link")), "{:?}", st.items);
         assert!(st.items.iter().any(|i| i.kind == "episode" && i.chat == "c1"));
+        // what it did is in the change log and was announced
+        let log = crate::store::memory_log::list(0, 10);
+        assert_eq!(log.len(), 2, "{log:?}");
+        assert!(log.iter().all(|c| c.action == "added" && c.source == "engine" && c.chat == "c1" && c.title == "Phone app"));
+        let got = heard.lock().unwrap();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!((got[0]["summary"].as_str(), got[0]["counts"]["added"].as_u64()), (Some("Added 2 notes"), Some(2)));
+        drop(got);
 
         // a new chat on the phone or the computer is told, without being asked
         let sys = memory::system_with("BASE", "how is my phone app going");

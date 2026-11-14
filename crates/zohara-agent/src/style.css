@@ -879,3 +879,19 @@ textview.code-view { padding: 10px; }
 .q-opt:hover { background-color: alpha(white, 0.05); }
 .q-opt-label { color: #ECECEC; font-size: 13.5px; font-weight: 500; }
 .q-opt-desc { color: #8C8C8C; font-size: 12px; }
+
+/* "Memory updated · View": the slim chip above the message box */
+.mem-chip {
+  background-color: #303030;
+  border: 1px solid alpha(white, 0.08);
+  border-radius: 999px;
+  padding: 2px 4px 2px 12px;
+  margin-bottom: 2px;
+}
+.mem-chip image { color: #5FD4D4; }
+.mem-chip-text { font-size: 12px; color: #BDBDBD; }
+.mem-chip-view { font-size: 12px; font-weight: 600; color: #ECECEC; min-height: 22px; padding: 0 6px; border-radius: 999px; }
+.mem-chip-go, .mem-chip-close { min-width: 24px; min-height: 24px; border-radius: 999px; padding: 0; color: #BDBDBD; }
+.mem-chip-go { background-color: #5FD4D4; color: #0B0E14; }
+.mem-chip-go:hover { background-color: #7EE0E0; color: #0B0E14; }
+.mem-chip-close:hover { background-color: alpha(white, 0.08); color: #ECECEC; }

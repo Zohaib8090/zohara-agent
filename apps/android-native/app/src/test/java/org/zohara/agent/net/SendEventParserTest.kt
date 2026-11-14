@@ -23,6 +23,11 @@ class SendEventParserTest {
     assertEquals(SendEvent.Ping, p("""{"event":"ping"}"""))
   }
 
+  @Test fun memoryUpdatedEvent() {
+    assertEquals(SendEvent.MemoryUpdated("Added 2 notes, updated 1 note", 1794509131852), p("""{"event":"memory_updated","summary":"Added 2 notes, updated 1 note","counts":{"added":2,"updated":1,"deleted":0},"ids":["g1","g2","g3"],"time":1794509131852}"""))
+    assertEquals(SendEvent.MemoryUpdated("", 0), p("""{"event":"memory_updated"}"""))
+  }
+
   @Test fun questionCard() {
     val ev = p("""{"event":"question","id":4,"questions":[{"question":"Which?","header":"Pick","multi_select":true,"options":[{"label":"A","description":"first"},{"label":"B"}]}]}""")
     ev as SendEvent.Question

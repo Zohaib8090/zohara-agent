@@ -132,6 +132,16 @@ impl Store {
         id
     }
 
+    /// Removes a project and the notes in the memory that belong to it. Returns how many memory notes went, or None when there is no such project.
+    pub fn remove(&mut self, id: &str) -> Option<usize> {
+        let before = self.projects.len();
+        self.projects.retain(|p| p.id != id);
+        if self.projects.len() == before {
+            return None;
+        }
+        Some(super::memory::delete_scope(id))
+    }
+
     pub fn get(&self, id: &str) -> Option<&Project> {
         self.projects.iter().find(|p| p.id == id)
     }

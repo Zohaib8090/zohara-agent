@@ -309,6 +309,18 @@ select optgroup{background:var(--card);color:var(--accent);font-size:11px;font-w
 .switch::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .12s}
 .switch:checked{background:#3584e4;border-color:#3584e4}.switch:checked::after{left:20px}
 .mem-group{font-size:13px;color:var(--dim);padding:14px 16px 4px}
+.memchip{display:flex;align-items:center;gap:6px;width:max-content;max-width:100%;margin:0 0 8px 4px;padding:3px 4px 3px 12px;border:1px solid var(--line8);border-radius:99px;background:var(--comp);font-size:12px;color:var(--text2);animation:memin .25s ease-out}
+.memchip svg{width:14px;height:14px;fill:none;stroke:var(--accent);stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.memchip .mc-view{font-size:12px;font-weight:600;color:var(--text);padding:3px 6px;border-radius:99px}.memchip .mc-view:hover{background:var(--hov)}
+.memchip .mc-go,.memchip .mc-x{width:24px;height:24px;min-width:24px;min-height:24px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;padding:0;flex:none}
+.memchip .mc-go{background:var(--accent);color:var(--onaccent)}.memchip .mc-go:hover{background:var(--accent2)}.memchip .mc-go svg{stroke:var(--onaccent);width:14px;height:14px}
+.memchip .mc-x{color:var(--dim)}.memchip .mc-x:hover{background:var(--hov);color:var(--text)}.memchip .mc-x svg{stroke:currentColor;width:12px;height:12px}
+.memchip.fade{opacity:0;transition:opacity .3s}@keyframes memin{from{opacity:0;transform:translateY(4px)}}
+.mc-item{border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin:6px 0;display:flex;gap:10px;align-items:center;background:var(--card)}.mc-item .col{flex:1;min-width:0}
+.mc-before{font-size:12px;color:var(--dim);text-decoration:line-through;overflow-wrap:anywhere}.mc-text{font-size:13px;overflow-wrap:anywhere}.mc-sub{font-size:11px;color:var(--dim);margin-top:2px}
+.mc-head{font-size:12px;color:var(--dim);margin:12px 0 2px;text-transform:uppercase;letter-spacing:.04em}
+.mem-scope{font-size:11px;color:var(--accent);margin-left:6px}
+
 .mem-text{font-size:13.5px}
 
 /* sheets and popovers */
@@ -581,6 +593,8 @@ const P = {
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/>', speaker: '<path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16 9a4 4 0 010 6M18.5 6.5a8 8 0 010 11"/>',
   out: '<path d="M14 5h4a1 1 0 011 1v12a1 1 0 01-1 1h-4M10 8l-4 4 4 4M6 12h10"/>', stop: '<rect x="7" y="7" width="10" height="10" rx="2"/>', check: '<path d="M5 12l5 5 9-10"/>', pin: '<path d="M9 4h6l-1 6 3 3H7l3-3-1-6zM12 13v7"/>',
 };
+P.memory = '<path d="M9 4a3 3 0 00-3 3v.5A3 3 0 004 10.5 3 3 0 005.5 13 3 3 0 007 17a3 3 0 005 2V5a2 2 0 00-3-1zM15 4a3 3 0 013 3v.5a3 3 0 012 3 3 3 0 01-1.5 2.5A3 3 0 0117 17a3 3 0 01-5 2"/>';
+P.arrow = '<path d="M5 12h14M13 6l6 6-6 6"/>'; P.close = '<path d="M6 6l12 12M18 6L6 18"/>';
 P.paste = '<rect x="6" y="5" width="12" height="15" rx="2"/><path d="M9 5V4h6v1M9 11h6M9 15h6"/>';
 P.star = '<path d="M12 4l2.4 5 5.4.7-4 3.8 1 5.4L12 16.3 7.2 18.9l1-5.4-4-3.8 5.4-.7z"/>';
 const icon = n => `<svg viewBox="0 0 24 24">${P[n] || ""}</svg>`;
@@ -722,7 +736,7 @@ function greet() {
 
 /* ---------- the composer (home and chat share it) ---------- */
 function composerHTML() {
-  return `<div class="composer"><div class="att-strip" id="attStrip" aria-label="Attachments"></div><textarea id="text" rows="1" placeholder="How can I help you today?"></textarea>
+  return `<div class="memchip hide" id="memChip" role="status" aria-live="polite"><i data-i="memory"></i><span id="memChipT">Memory updated</span><span>·</span><button class="mc-view" id="memView" title="See what changed in the memory">View</button><button class="mc-go" id="memGo" title="See what changed in the memory" aria-label="See what changed in the memory" data-i="arrow"></button><button class="mc-x" id="memX" title="Dismiss" aria-label="Dismiss" data-i="close"></button></div><div class="composer"><div class="att-strip" id="attStrip" aria-label="Attachments"></div><textarea id="text" rows="1" placeholder="How can I help you today?"></textarea>
     <div class="row"><button class="tool-btn" id="plus" title="Add pictures, files or a link" aria-label="Add pictures, files or a link" data-i="plus"></button><span class="grow"></span>
     <button class="tool-btn mic" id="mic" data-i="mic" aria-pressed="false"></button>
     <button class="tool-btn send" id="send" title="Send" data-i="up"></button><button class="tool-btn stop hide" id="stop" title="Stop" data-i="stop"></button></div></div>
@@ -1144,6 +1158,7 @@ async function send(opts) {
   const taken = re ? { items: [], links: [], attachments: [], meta: [] } : aTake(), text = re ? text0 : [text0, aLinkText(taken.links)].filter(Boolean).join("\n\n");
   if (!$("thread")) showThread("New chat");
   const first = !chatId;
+  if (!dsk) memStart();
   if (!re) { t.value = ""; t.style.height = "auto"; }
   const bubble = re ? re.reuse : addUser(text, taken.meta); setBusy(true);
   let ai = null, acc = "", group = null, began = false, gotDone = false;
@@ -1161,6 +1176,7 @@ async function send(opts) {
         switch (ev.event) {
           case "stream": stream = ev.id; if (dsk) { const m = document.createElement("div"); m.className = "pc-meta"; m.textContent = "Running on your computer" + (ev.device ? " (" + String(ev.device).slice(0, 60) + ")" : ""); thread().appendChild(m); } break;
           case "done": gotDone = true; clearWait(); break;
+          case "memory_updated": memShow(ev); break;
           case "chat": chatId = ev.id; began = true; setTitle(ev.title || "Chat"); break;
           case "delta": clearWait(); endGroup(group); group = null; if (!ai) { ai = aiBox(); acc = ""; } acc += ev.text; setAi(ai, acc); break;
           case "text": if (!acc) { if (!ai) ai = aiBox(); acc = ev.text; setAi(ai, acc); } break;
@@ -1181,6 +1197,7 @@ async function send(opts) {
     addError(e.message);
   }
   closeQuestionCards(); clearWait(); endGroup(group); stream = 0; setBusy(false); $("text")?.focus(); refreshChats(); noteAnswer(chatId, $("title") ? $("title").textContent : "", !!ai);
+  if (!dsk) memWatch();
   if (dsk) setTimeout(refreshChats, 6000); /* the computer syncs the chat to the server after the turn */
   if (ai && acc && ai.isConnected && voiceGet("read") === "1") voiceSpeak(acc, ai);
 }
@@ -2030,7 +2047,8 @@ async function showProjects() {
     const lines = /no projects/i.test(t) ? [] : t.split("\n").map(l => l.split("|").map(x => x.trim())).filter(c => c.length >= 2);
     if (!lines.length) return b.innerHTML = empty("No projects yet", "Projects keep one long-running thing together — its files, notes and context — so Zohara Agent keeps working inside it.");
     lines.forEach(c => { const d = document.createElement("div"); d.className = "card project-card"; d.style.cursor = "default"; d.innerHTML = `<div class="pc-icon">${icon("folder")}</div><div class="pc-col"><div class="pc-name"></div><div class="pc-meta"></div></div>`;
-      d.querySelector(".pc-name").textContent = c[1]; d.querySelector(".pc-meta").textContent = c.slice(2).filter(Boolean).join(" · "); b.appendChild(d); });
+      d.querySelector(".pc-name").textContent = c[1]; d.querySelector(".pc-meta").textContent = c.slice(2).filter(Boolean).join(" · ");
+      const del = document.createElement("button"); del.className = "icon-btn"; del.title = "Delete this project"; del.innerHTML = icon("trash"); del.onclick = () => confirmBox("Delete this project?", `"${c[1]}" is deleted with its instructions and the memory notes Zohara Agent kept for it. Chats you had in it stay. This cannot be undone.`, "Delete", async () => { try { await op("project_delete", { id: c[0], confirm: true }); showProjects(); } catch (e) { toast(e.message); } }); d.appendChild(del); b.appendChild(d); });
   } catch (e) { b.innerHTML = `<div class="msg-error">${esc(e.message)}</div>`; }
 }
 async function showArtifacts() {
@@ -2675,14 +2693,58 @@ async function pagePersonality(b) {
   const both = document.createElement("div"); both.style.cssText = "display:flex;gap:6px"; both.append(own, gen);
   b.appendChild(head("Personality")); b.appendChild(cardOf(...rows, row("Add a personality", "The AI can write one from a description (it uses the model you chose). A personality changes the voice only, never the rules or what Zohara Agent may do.", both)));
 }
+/* ---------- the memory feed: "Memory updated · View", the list of what changed, Undo (docs/MEMORY.md) ---------- */
+let memSince = null, memTimer = 0, memHide = 0, memPolls = [];
+async function memStart() { if (memSince !== null) return; memSince = 0; try { memSince = (await op("memory_changes", { limit: 1 })).latest || 0; } catch { memSince = Date.now(); } }
+function memShow(ev) {
+  if (ev.time && ev.time > memSince) memSince = ev.time;
+  const c = $("memChip"); if (!c) return; $("memChipT").textContent = ev.summary ? "Memory updated (" + String(ev.summary).toLowerCase() + ")" : "Memory updated";
+  c.classList.remove("hide", "fade"); clearTimeout(memHide); memHide = setTimeout(memDismiss, 12000);
+}
+function memDismiss() { const c = $("memChip"); clearTimeout(memHide); if (!c) return; c.classList.add("fade"); setTimeout(() => { if (c.classList.contains("fade")) c.classList.add("hide"); }, 300); }
+/* the memory agent works after the answer, on the server: ask a few times whether it changed something */
+function memWatch() {
+  memPolls.forEach(clearTimeout); memPolls = [4000, 10000, 20000, 40000, 70000].map(ms => setTimeout(async () => {
+    try { const r = await op("memory_changes", { since: memSince || 0, limit: 50 }); if (r.changes.length) { const n = r.changes.length; memSince = r.latest; if (r.show_updates) memShow({ summary: r.summary, time: r.latest, n }); memPolls.forEach(clearTimeout); } } catch {}
+  }, ms));
+}
+document.addEventListener("click", e => { const t = e.target.closest && e.target.closest("#memView,#memGo"); if (t) { memDismiss(); memSheet(true); } else if (e.target.closest && e.target.closest("#memX")) memDismiss(); });
+async function memSheet(latest) {
+  const w = document.createElement("div"); const all = btn(latest ? "Show earlier changes" : "Show only the latest", "", null), page = btn("Open the memory page", "", () => { sh.close(); settingsPage("memory"); });
+  const sh = sheet("Memory updated", w, [all, page, btn("Close", "primary", () => sh.close())], true); let only = !!latest;
+  const fill = async () => {
+    let r; try { r = await op("memory_changes", { limit: 60 }); } catch (e) { w.innerHTML = `<div class="msg-error">${esc(e.message)}</div>`; return; }
+    let list = r.changes; if (only && list.length) list = list.filter(c => c.batch === list[0].batch); all.textContent = only ? "Show earlier changes" : "Show only the latest";
+    w.innerHTML = ""; if (!list.length) { w.innerHTML = '<div class="pc-meta">Nothing has changed in the memory yet. When Zohara Agent learns something about you, it is listed here, and you can undo it.</div>'; return; }
+    const hint = document.createElement("div"); hint.className = "pc-meta"; hint.textContent = "This is what Zohara Agent changed in its memory. Undo puts a note back the way it was."; w.appendChild(hint);
+    [["added", "Added"], ["updated", "Updated"], ["deleted", "Removed"]].forEach(([a, title]) => { const mine = list.filter(c => c.action === a); if (!mine.length) return;
+      const h = document.createElement("div"); h.className = "mc-head"; h.textContent = title; w.appendChild(h);
+      mine.forEach(c => { const d = document.createElement("div"); d.className = "mc-item"; d.innerHTML = '<div class="col"></div>'; const col = d.firstChild;
+        const add = (cls, t) => { const x = document.createElement("div"); x.className = cls; x.textContent = t; col.appendChild(x); };
+        if (a === "updated") { add("mc-before", c.before); add("mc-text", c.after); } else add("mc-text", a === "deleted" ? c.before : c.after);
+        add("mc-sub", (c.scope ? "Project: " + (c.scope_name || "a project") : "All chats") + " · " + ago(c.time) + (c.title ? ' · from "' + c.title + '"' : ""));
+        const u = btn(c.undone ? "Undone" : "Undo", "", async () => { try { await op("memory_undo", { id: c.id }); fill(); } catch (e) { u.textContent = "Cannot undo"; u.title = e.message; u.disabled = true; } }); u.disabled = !!c.undone; d.appendChild(u); w.appendChild(d); }); });
+  };
+  all.onclick = () => { only = !only; fill(); }; fill();
+}
+let memScope = "all";
 async function pageMemory(b) {
-  const m = await op("memory"); b.innerHTML = "";
+  const m = await op("memory", memScope === "all" ? {} : { scope: memScope }); b.innerHTML = "";
+  if (memScope !== "all" && memScope !== "global" && !m.projects.some(p => p.id === memScope)) { memScope = "all"; return pageMemory(b); }
   const sw = document.createElement("input"); sw.type = "checkbox"; sw.className = "switch"; sw.checked = m.enabled; sw.onchange = () => op("memory_enable", { on: sw.checked });
   const notes = m.items.filter(i => i.kind !== "episode").length;
   const talk = btn("Chat about memory…", "primary", () => memoryChat(b));
+  const upd = document.createElement("input"); upd.type = "checkbox"; upd.className = "switch"; upd.checked = m.show_updates !== false; upd.onchange = () => op("memory_settings", { show_updates: upd.checked });
+  const every = document.createElement("input"); every.type = "number"; every.className = "field-input"; every.style.width = "86px"; every.min = m.min_every || 2; every.max = 20; every.value = m.every; every.onchange = async () => { try { every.value = (await op("memory_settings", { every: Number(every.value) || 3 })).every; } catch (e) { toast(e.message); } };
+  const chg = btn("View changes", "", () => memSheet(false));
   const card = cardOf(row("Remember things between chats", `${notes} notes about you and ${m.items.length - notes} chat summaries, shared with the computer and the phone. After every ${m.every} messages of yours, Zohara Agent reads the chat in the background and keeps what is worth remembering. Never passwords or keys.`, sw),
-    row("Edit by talking", 'Tell Zohara Agent what to change, in your own words: "join my preferences into one note", "forget the old laptop", "my name is spelled Zohaib". This chat only edits the notes.', talk));
+    row("Edit by talking", 'Tell Zohara Agent what to change, in your own words: "join my preferences into one note", "forget the old laptop", "my name is spelled Zohaib". This chat only edits the notes.', talk),
+    row("Show memory updates", 'When Zohara Agent changes the memory, a small "Memory updated · View" note shows above the message box. View lists what changed and lets you undo it.', upd),
+    row("How often it reads your chats", "After this many messages of yours in a chat (at least " + (m.min_every || 2) + ", normally 3). Fewer is more up to date, more is cheaper.", every),
+    row("Recent changes", "What the memory agent added, updated or removed lately, with Undo for each.", chg));
   b.appendChild(head("Memory")); b.appendChild(card);
+  if (m.projects.length) { const sel = document.createElement("select"); sel.style.width = "220px"; [["all", "All notes"], ["global", "Every chat (global)"], ...m.projects.map(p => [p.id, "Project: " + p.name])].forEach(([v, t]) => { const o = document.createElement("option"); o.value = v; o.textContent = t; o.selected = v === memScope; sel.appendChild(o); }); sel.onchange = () => { memScope = sel.value; pageMemory(b); };
+    card.appendChild(row("Show", "Notes for every chat, and the notes Zohara Agent keeps for one project (only chats in that project are told them).", sel)); }
   const items = [...m.items].sort((x, y) => (y.pinned - x.pinned) || (y.updated - x.updated));
   const textSheet = (title, ok, text, run) => { const w = document.createElement("div"); w.innerHTML = '<div class="field-label">What should Zohara Agent remember?</div><textarea class="field-input" rows="4" placeholder="I prefer short answers"></textarea>'; const ta = w.querySelector("textarea"); ta.value = text;
     const sh = sheet(title, w, [btn("Cancel", "", () => sh.close()), btn(ok, "primary", async () => { try { await run(ta.value); sh.close(); pageMemory(b); } catch (er) { toast(er.message); } })]); };
@@ -2693,12 +2755,19 @@ async function pageMemory(b) {
       if (k !== "episode") mkb("Edit this note", "edit", () => textSheet("Edit note", "Save", i.text, t => op("memory_update", { id: i.id, text: t })));
       const p = mkb(i.pinned ? "Always tell the AI (pinned)" : "Pin: always tell the AI", "star", async () => { await op("memory_pin", { id: i.id, on: !i.pinned }); pageMemory(b); }); if (i.pinned) p.querySelector("svg").style.fill = "currentColor";
       mkb("Forget this", "trash", async () => { await op("memory_forget", { id: i.id }); pageMemory(b); });
-      const r = row(k === "episode" ? i.title : "", i.text, ctl); if (k !== "episode") r.querySelector(".pc-name2").remove(); card.appendChild(r); }); });
+      const r = row(k === "episode" ? i.title : "", i.text, ctl); if (k !== "episode") r.querySelector(".pc-name2").remove();
+      if (i.scope) { const tag = document.createElement("div"); tag.className = "mem-scope"; tag.textContent = "Project: " + (i.scope_name || "(gone)"); r.querySelector(".col").appendChild(tag); } card.appendChild(r); }); });
   if (items.length > 80) card.appendChild(row("…", `${items.length - 80} more are kept; the AI can search all of them.`));
-  const add = btn("Add a note…", "", () => textSheet("Add a note", "Add", "", t => op("memory_add", { text: t })));
+  const target = () => (memScope === "all" || memScope === "global") ? {} : { scope: memScope };
+  const add = btn("Add a note…", "", () => textSheet("Add a note", "Add", "", t => op("memory_add", { text: t, ...target() })));
   const forget = btn("Forget everything", "danger", () => confirmBox("Forget everything?", "All notes and chat summaries are removed, on every device. Saved chats stay.", "Forget", async () => { await op("memory_clear"); pageMemory(b); }));
   const both = document.createElement("div"); both.style.cssText = "display:flex;gap:6px"; both.append(add, forget);
   card.appendChild(row("Your notes", 'Pin a note to make sure the AI always knows it. Delete one that is wrong. You can also just tell Zohara Agent: "remember that ..." or "forget that ...".', both));
+  const ex = btn("Export…", "", async () => { try { const d = await op("memory_export"); delete d.ok; const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(d, null, 2)], { type: "application/json" })); a.download = "zohara-memory-" + new Date().toISOString().slice(0, 10) + ".json"; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); } catch (e) { toast(e.message); } });
+  const fi = document.createElement("input"); fi.type = "file"; fi.accept = ".json,application/json"; fi.className = "hide";
+  fi.onchange = async () => { const f = fi.files[0]; fi.value = ""; if (!f) return; try { const r = await op("memory_import", { data: JSON.parse(await f.text()) }); toast(`Imported ${r.added} note${r.added === 1 ? "" : "s"}. ${r.already_there} were already here, ${r.skipped} were left out.`, 5000); pageMemory(b); } catch (e) { toast(e instanceof SyntaxError ? "That file is not a memory export." : e.message); } };
+  const im = btn("Import…", "", () => fi.click()); const io = document.createElement("div"); io.style.cssText = "display:flex;gap:6px"; io.append(ex, im, fi);
+  card.appendChild(row("Export and import", "A file with all your notes, including each project's. Importing adds what is not there yet; a project's notes go to the project with the same name, or are left out.", io));
 }
 function memoryChat(b) {
   const w = document.createElement("div"); w.innerHTML = '<div id="ml" style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px"><div class="pc-meta">Say what to change. Zohara Agent edits the notes and tells you what it did.</div></div><input class="field-input" id="mi" placeholder="For example: join all my preferences into one note">';

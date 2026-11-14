@@ -1,6 +1,6 @@
 # Memory feed, project memory and Scheduled v2 (owner's request, 2026-11-14)
 
-Status: specified, not built. Build after the "updates / Play / greetings / persona / questions" workflow has merged.
+Status: sections 1 (memory feed) and 2 (project memory) are built on branch `feat/memfeed` (2026-11-14), see `docs/MEMORY.md` for how they work; section 3 (Scheduled v2) is not built here. Build after the "updates / Play / greetings / persona / questions" workflow has merged.
 
 ## How things work today (read before changing)
 

@@ -29,6 +29,8 @@ pub struct Ctl {
     session: RefCell<Option<String>>,
     /// What the model should know about the project this chat belongs to.
     extra: RefCell<String>,
+    /// The project this chat belongs to ("" = none): its memory notes are told to the model and written by the memory agent.
+    project: RefCell<String>,
     title: RefCell<String>,
     id: RefCell<String>,
     /// Everything shown in this chat, so it can be saved and shown again.
@@ -113,7 +115,7 @@ impl Ctl {
         scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
         scroll.set_visible(false);
         chat.insert_child_after(&scroll, Some(hero));
-        Rc::new(Ctl { chat: chat.clone(), hero: hero.clone(), thread, scroll, history: RefCell::new(Vec::new()), session: RefCell::new(None), extra: RefCell::new(String::new()), title: RefCell::new(String::new()), id: RefCell::new(String::new()), entries: RefCell::new(Vec::new()), on_saved: RefCell::new(None), busy: Cell::new(false), cancel: Arc::new(AtomicBool::new(false)), on_busy: RefCell::new(None), on_retry: Rc::new(RefCell::new(None)), on_edit: Rc::new(RefCell::new(None)), last_retry: RefCell::new(None), branches: RefCell::new(Default::default()), on_switch: Rc::new(RefCell::new(None)), last_nav: RefCell::new(None), last_usage: Cell::new(None), group: RefCell::new(None), base: Cell::new(Default::default()) })
+        Rc::new(Ctl { chat: chat.clone(), hero: hero.clone(), thread, scroll, history: RefCell::new(Vec::new()), session: RefCell::new(None), extra: RefCell::new(String::new()), project: RefCell::new(String::new()), title: RefCell::new(String::new()), id: RefCell::new(String::new()), entries: RefCell::new(Vec::new()), on_saved: RefCell::new(None), busy: Cell::new(false), cancel: Arc::new(AtomicBool::new(false)), on_busy: RefCell::new(None), on_retry: Rc::new(RefCell::new(None)), on_edit: Rc::new(RefCell::new(None)), last_retry: RefCell::new(None), branches: RefCell::new(Default::default()), on_switch: Rc::new(RefCell::new(None)), last_nav: RefCell::new(None), last_usage: Cell::new(None), group: RefCell::new(None), base: Cell::new(Default::default()) })
     }
 
     pub fn on_saved(&self, f: Rc<dyn Fn()>) {
@@ -134,6 +136,7 @@ impl Ctl {
             session: self.session.borrow().clone(),
             context: self.extra.borrow().clone(),
             pinned: false,
+            project: self.project.borrow().clone(),
             branches: self.snapshot_branches(),
         };
         // a chat the sync changed since it was opened keeps what was added there (see chats::upsert_checked); if that happened, the
@@ -152,7 +155,7 @@ impl Ctl {
                 self.redraw();
             }
         }
-        zo_core::ai::memory_agent::after_turn(&self.id.borrow(), &self.title.borrow(), &self.entries.borrow());
+        zo_core::ai::memory_agent::after_turn_in(&self.id.borrow(), &self.title.borrow(), &self.entries.borrow(), &self.project.borrow());
         let f = self.on_saved.borrow().clone();
         if let Some(f) = f {
             f();
@@ -171,6 +174,7 @@ impl Ctl {
         *self.history.borrow_mut() = chat.history;
         *self.session.borrow_mut() = chat.session;
         *self.extra.borrow_mut() = chat.context;
+        *self.project.borrow_mut() = chat.project;
         *self.branches.borrow_mut() = chat.branches;
         self.hero.set_visible(false);
         self.scroll.set_visible(true);
@@ -473,6 +477,11 @@ impl Ctl {
         *self.extra.borrow_mut() = text;
     }
 
+    /// The chat that starts now belongs to this project ("" = none).
+    pub fn set_project(&self, id: &str) {
+        *self.project.borrow_mut() = id.to_string();
+    }
+
     pub fn title(&self) -> String {
         self.title.borrow().clone()
     }
@@ -487,6 +496,7 @@ impl Ctl {
         self.history.borrow_mut().clear();
         *self.session.borrow_mut() = None;
         self.extra.borrow_mut().clear();
+        self.project.borrow_mut().clear();
         self.title.borrow_mut().clear();
         self.id.borrow_mut().clear();
         self.entries.borrow_mut().clear();
@@ -767,9 +777,10 @@ impl Ctl {
             *self.title.borrow_mut() = t;
         }
         // the notes about the person, then the character LAST (after the abilities, tool rules and project text)
-        let system = zo_core::store::memory::system_with(&format!("{}\n\n{}", agent::SYSTEM_PROMPT, self.extra.borrow()), &text);
+        let project = self.project.borrow().clone();
+        let system = zo_core::store::memory::system_in(&format!("{}\n\n{}", agent::SYSTEM_PROMPT, self.extra.borrow()), &text, &project);
         // Claude Code gets the same notes and character, as extra instructions
-        let extra = format!("{}\n\n{}", self.extra.borrow(), zo_core::store::memory::extras(&text));
+        let extra = format!("{}\n\n{}", self.extra.borrow(), zo_core::store::memory::extras_in(&text, &project));
 
         let claude = sel.provider == "claude-code";
         let cfg = if claude {
@@ -808,6 +819,8 @@ impl Ctl {
         );
         std::thread::spawn(move || {
             let _activity = activity;
+            // the memory tools (remember, forget, search) work for this chat's project
+            let _scope = zo_core::store::memory::project_guard(&project);
             let tx2 = tx.clone();
             let mut emit = |e: Event| {
                 let _ = tx2.send(Msg::Ev(e));
