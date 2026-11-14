@@ -25,6 +25,8 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+mod sched;
+
 fn runtime_base(name: &str) -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -137,7 +139,7 @@ fn serve(conn: UnixStream) {
             Ok(t) => tenant::scope(&t, || serve_request(&req, reader, writer)),
             Err(e) => {
                 let op = req.get("op").and_then(Value::as_str).unwrap_or("");
-                if op == "send" {
+                if op == "send" || op == "schedule_test" {
                     line(&writer, &json!({"event": "error", "error": e}));
                     line(&writer, &json!({"event": "done"}));
                 } else {
@@ -167,11 +169,12 @@ fn restricted_refusal(op: &str, req: &Value) -> Option<&'static str> {
     if op.starts_with("mcp_") {
         return Some("MCP servers are not available to this account.");
     }
-    if op.starts_with("schedule") {
-        return Some("Scheduled tasks are not available to this account.");
+    // scheduled tasks on the server (reminders and web search tasks, with limits) when the operator allows them; the checks are in `scheduler`
+    if sched::handles(op) || op == "schedule_test" {
+        return if crate::scheduler::cloud_allowed_here() { None } else { Some("Scheduled tasks are not available to this account.") };
     }
-    if op == "scheduled" || op.starts_with("project") {
-        return Some("Projects and scheduled tasks are not available to this account.");
+    if op.starts_with("project") {
+        return Some("Projects are not available to this account.");
     }
     if op == "sync_status" {
         return Some("Sync is not available here.");
@@ -192,7 +195,7 @@ fn serve_request(req: &Value, reader: BufReader<UnixStream>, writer: Arc<Mutex<U
     let op = req.get("op").and_then(Value::as_str).unwrap_or("").to_string();
     if tenant::is_restricted() {
         if let Some(why) = restricted_refusal(&op, req) {
-            if op == "send" {
+            if op == "send" || op == "schedule_test" {
                 line(&writer, &json!({"event": "error", "error": why}));
                 line(&writer, &json!({"event": "done"}));
             } else {
@@ -205,6 +208,10 @@ fn serve_request(req: &Value, reader: BufReader<UnixStream>, writer: Arc<Mutex<U
     crate::activity::seen(client_source(&req));
     if op == "send" {
         send(&req, reader, writer);
+        return;
+    }
+    if op == "schedule_test" {
+        sched::test_stream(&req, reader, writer);
         return;
     }
     let reply = match handle(&op, &req) {
@@ -482,21 +489,7 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             }
             Ok(json!({}))
         }
-        "scheduled" => Ok(json!({"tasks": crate::store::schedules::load().iter().map(|t| json!({
-            "id": t.id, "title": t.title, "prompt": t.prompt, "next_run": t.next_run, "repeat": t.repeat, "enabled": t.enabled,
-        })).collect::<Vec<_>>()})),
-        "schedule_cancel" => {
-            if crate::store::schedules::remove(s(req, "id")) { Ok(json!({})) } else { Err("That task is gone.".into()) }
-        }
-        "schedule_add" => {
-            let mut a = json!({"task": s(req, "task"), "when": s(req, "when")});
-            for k in ["repeat", "title"] {
-                if let Some(v) = req.get(k).and_then(Value::as_str).filter(|v| !v.is_empty()) {
-                    a[k] = json!(v);
-                }
-            }
-            Ok(json!({"message": crate::tools::call("zohara_ai_schedule", &a)?}))
-        }
+        op if sched::handles(op) => sched::handle(op, req),
         "machines" => Ok(json!({"machines": crate::store::machines::load().iter().map(|m| json!({
             "name": m.name, "host": m.host, "user": m.user, "port": m.port, "note": m.note, "has_key": m.has_key(),
         })).collect::<Vec<_>>()})),
@@ -1297,9 +1290,6 @@ mod tenant_tests {
             json!({"op": "mcp_import", "config": "{}"}),
             json!({"op": "mcp_remove", "name": "x"}),
             json!({"op": "mcp_toggle", "name": "x"}),
-            json!({"op": "scheduled"}),
-            json!({"op": "schedule_add", "task": "x", "when": "in 1 hour"}),
-            json!({"op": "schedule_cancel", "id": "x"}),
             json!({"op": "projects"}),
             json!({"op": "project_create", "name": "x"}),
             json!({"op": "mode", "set": "bypass"}),
