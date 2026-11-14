@@ -261,7 +261,7 @@ pub fn show(ui: &Rc<Ui>) {
                 crate::modelpick::add_endpoint_sheet(&ui2, move || show(&ui3));
             });
         }
-        card.append(&row("Add a custom endpoint", "Your own server or a gateway that speaks the OpenAI API: a name, its address, a key and a model. It is saved as a profile.", Some(&endpoint)));
+        card.append(&row("Add a custom endpoint", "Your own server or a router that speaks the OpenAI Chat, OpenAI Responses or Claude format: a name, the format, its address, a key and a model. It is saved as a profile.", Some(&endpoint)));
     }
     content.append(&sec);
 
