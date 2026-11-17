@@ -761,7 +761,7 @@ fn sync_refuses_ids_the_database_cannot_hold_and_never_lets_a_chat_name_a_file_o
 
 #[test]
 fn a_client_that_sends_a_body_too_slowly_is_let_go_and_model_ops_take_a_place_like_an_answer() {
-    assert!(["compact", "memory_edit", "personality_generate", "models", "model_test"].iter().all(|o| op_uses_model(o)) && !op_uses_model("chats"));
+    assert!(["compact", "memory_edit", "personality_generate", "models", "model_test", "custom_provider_test", "account_test"].iter().all(|o| op_uses_model(o)) && !op_uses_model("chats"));
     let u = uniq("slow");
     let r = rig(&[("tok-s", &u, "s@x.test")], "", 200, 600);
     use std::io::{Read, Write};

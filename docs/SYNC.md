@@ -134,7 +134,7 @@ follow the person to the other devices like the hidden providers do. No key is i
 `<provider>:<account slug>`, `custom:<slug>[:<account slug>]`, `<provider>@<profile>`) travel only when key sync is on, one document per
 key as before; a key id for a custom provider is only taken in once the settings document that names it has arrived, and the other way
 round the settings document does not make a key appear. An address with a secret in it (`?api_key=...`, `user:password@host`) stays on
-the computer that has it (it is left out of the document, and a document that carries one is refused). A restricted account of the public
+the computer that has it (it is left out of the document; a document that carries one has that entry dropped and the rest is taken, and what stays only here is kept when a newer settings document is taken in). An account of a hosted provider keeps to that provider's host in synced data too (the same check as when it is added). When a taken-in document changes the address of a custom provider, the keys typed for the old address are removed. A restricted account of the public
 service takes only public https addresses in instances and accounts, like in a profile: an instance or account whose address does not fit is left out of what it takes in (the rest of the document is taken), and a profile that names it stays on the computer it came from. In a round the settings are applied first, then the profiles, then the keys, so a profile or a key finds the instance it names; a key id may now contain `:` (`groq:groq-2`). A profile that names the old fixed providers
 (`custom`, `custom-responses`, `custom-claude`) from a computer that has not been updated lands on the named instance made for it (see
 `docs/PROVIDERS.md`).

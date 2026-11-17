@@ -261,10 +261,16 @@ pub fn check_all(p: &ui_prefs::Prefs) -> Result<(), String> {
                 return Err(format!("There is already an account named \"{}\".", a.name.trim()));
             }
             if let Some(u) = a.base_url.as_deref().filter(|u| !u.trim().is_empty()) {
-                super::probe::check_address(u)?;
-                if crate::tenant::is_restricted() {
-                    let any = providers::find("openai").ok_or("no provider")?;
-                    super::agent::check_restricted_provider(any, u)?;
+                match providers::find(prov) {
+                    // the same rule as `add` and `set_address`: a built-in provider's account keeps to that provider's host (its key goes there)
+                    Some(p) => providers::check_base_url(p, u)?,
+                    None => {
+                        super::probe::check_address(u)?;
+                        if crate::tenant::is_restricted() {
+                            let any = providers::find("openai").ok_or("no provider")?;
+                            super::agent::check_restricted_provider(any, u)?;
+                        }
+                    }
                 }
             }
         }
@@ -346,5 +352,15 @@ mod tests {
         assert!(is_limit_error("You exceeded your current quota"));
         assert!(!is_limit_error("The provider answered 401: bad key"));
         assert!(!is_limit_error("Cannot reach the server"));
+    }
+
+    #[test]
+    fn a_synced_account_address_keeps_to_the_providers_host() {
+        let mut p = ui_prefs::Prefs::default();
+        let acct = |u: &str| Account { id: "g2".into(), name: "Groq 2".into(), base_url: Some(u.into()), hidden: false };
+        p.accounts.insert("groq".into(), vec![acct("https://evil.example/v1")]);
+        assert!(check_all(&p).is_err());
+        p.accounts.insert("groq".into(), vec![acct("https://api.groq.com/openai/v1")]);
+        assert!(check_all(&p).is_ok());
     }
 }

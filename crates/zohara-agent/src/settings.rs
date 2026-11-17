@@ -323,7 +323,9 @@ pub fn show(ui: &Rc<Ui>) {
                 del.connect_clicked(move |_| {
                     let (ui3, id) = (ui2.clone(), c2.id.clone());
                     crate::confirm_delete(&ui2, &format!("Delete {}?", c2.name), "The provider, its API key, its accounts and the profiles that use it are removed from this computer. Chats stay.", move || {
-                        let _ = custom::remove(&id);
+                        if let Err(e) = custom::remove(&id) {
+                            crate::problem(&ui3, &e);
+                        }
                         let s = Selection::load();
                         ui3.model_label.set_text(&chat::pill_text(&s));
                         show(&ui3);
@@ -386,7 +388,9 @@ pub fn show(ui: &Rc<Ui>) {
                 {
                     let (ui2, a2) = (ui.clone(), a.clone());
                     hide.connect_clicked(move |_| {
-                        let _ = accounts::set_hidden(p.id, &a2.id, !a2.hidden);
+                        if let Err(e) = accounts::set_hidden(p.id, &a2.id, !a2.hidden) {
+                            crate::problem(&ui2, &e);
+                        }
                         show(&ui2);
                     });
                 }
@@ -398,7 +402,9 @@ pub fn show(ui: &Rc<Ui>) {
                     del.connect_clicked(move |_| {
                         let (ui3, id) = (ui2.clone(), a2.id.clone());
                         crate::confirm_delete(&ui2, &format!("Delete {} · {}?", p.name, a2.name), "The account and its API key are removed from this computer. Profiles that used it go back to the Default account.", move || {
-                            let _ = accounts::remove(p.id, &id);
+                            if let Err(e) = accounts::remove(p.id, &id) {
+                                crate::problem(&ui3, &e);
+                            }
                             show(&ui3);
                         });
                     });
@@ -418,9 +424,14 @@ pub fn show(ui: &Rc<Ui>) {
         }
         let rotate = gtk::Switch::new();
         rotate.set_active(accounts::rotate_on_limit());
-        rotate.connect_active_notify(|s| {
-            let _ = accounts::set_rotate_on_limit(s.is_active());
-        });
+        {
+            let ui2 = ui.clone();
+            rotate.connect_active_notify(move |s| {
+                if let Err(e) = accounts::set_rotate_on_limit(s.is_active()) {
+                    crate::problem(&ui2, &e);
+                }
+            });
+        }
         card.append(&row(
             "When an account hits its rate limit, switch to the next account",
             "On a rate limit (HTTP 429) or a quota error the next account of the same provider is tried once, and the chat says so. Never another provider. Off by default.",

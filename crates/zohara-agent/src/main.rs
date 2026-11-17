@@ -482,6 +482,13 @@ fn refresh_search(ui: &Rc<Ui>) {
     }
 }
 
+/// Says what went wrong in a small dialog (a button that could not do what it says).
+pub(crate) fn problem(ui: &Rc<Ui>, text: &str) {
+    let dialog = adw::AlertDialog::new(Some("That did not work"), Some(text));
+    dialog.add_response("ok", "OK");
+    dialog.present(Some(&ui.window));
+}
+
 /// Asks "are you sure?" before something is deleted; `on_yes` runs only when the person confirms.
 pub(crate) fn confirm_delete(ui: &Rc<Ui>, title: &str, body: &str, on_yes: impl Fn() + 'static) {
     let dialog = adw::AlertDialog::new(Some(title), Some(body));

@@ -51,8 +51,8 @@ Before names existed there were three fixed providers: `custom`, `custom-respons
 reads the configuration it turns the ones the person used (a saved address, key, profile, pins, hidden state or the current choice) into
 named ones, once per configuration folder: "Custom endpoint", "Custom endpoint (Responses)" and "Custom endpoint (Claude)", ids
 `custom:custom-endpoint`, `custom:custom-endpoint-responses` and `custom:custom-endpoint-claude`. Their address, key, profiles (and the
-profiles' keys), pins, hidden state and the current choice move over with nothing lost; an address that today's rules refuse falls back
-to `http://127.0.0.1:8000/v1`. A person who never used them gets none. A profile that arrives by sync from a computer with the old
+profiles' keys), pins, hidden state and the current choice move over; an address that today's rules refuse falls back
+to `http://127.0.0.1:8000/v1` (which a restricted account refuses too: that provider is then not moved over, its key stays where it was, and it is tried again at the next start). A person who never used them gets none. A profile that arrives by sync from a computer with the old
 providers lands on the instance made for it.
 
 ## Several accounts (API keys) per provider

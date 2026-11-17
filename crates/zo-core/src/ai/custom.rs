@@ -144,11 +144,8 @@ pub fn get(id: &str) -> Option<CustomProvider> {
 
 fn to_provider(c: &CustomProvider) -> &'static Provider {
     let protocol = providers::format_protocol(&c.format).unwrap_or(Protocol::OpenAi);
-    let models: &'static [&'static str] = match c.default_model.as_deref().filter(|m| !m.trim().is_empty()) {
-        Some(m) => Box::leak(vec![providers::leak_str(m.trim())].into_boxed_slice()),
-        None => &[],
-    };
-    providers::leak(Provider { id: providers::leak_str(&c.id), name: providers::leak_str(&c.name), protocol, base_url: providers::leak_str(c.base_url.trim()), local: false, models })
+    let model = c.default_model.as_deref().map(str::trim).filter(|m| !m.is_empty());
+    providers::leak_custom(&c.id, &c.name, protocol, c.base_url.trim(), model)
 }
 
 /// The provider of one custom entry (`custom:<slug>`); none when there is no such one.
@@ -165,7 +162,7 @@ pub fn providers() -> Vec<&'static Provider> {
 pub fn draft(format: &str, base_url: &str) -> Result<&'static Provider, String> {
     let protocol = providers::format_protocol(format).ok_or("The API format is one of: chat, responses, claude.")?;
     check_address(base_url)?;
-    Ok(providers::leak(Provider { id: "custom:draft", name: "this server", protocol, base_url: providers::leak_str(base_url.trim()), local: false, models: &[] }))
+    Ok(providers::leak_custom("custom:draft", "this server", protocol, base_url.trim(), None))
 }
 
 /// Adds a custom provider. The key (if any) is the caller's to store under the returned id.
@@ -211,12 +208,24 @@ pub fn update(id: &str, name: Option<&str>, format: Option<&str>, base_url: Opti
     let c = out.ok_or_else(|| "That custom provider is gone.".to_string())?;
     // a key typed for one address is never sent to another: a new address leaves the provider (and its accounts) without keys
     if old.base_url.trim().trim_end_matches('/') != c.base_url.trim().trim_end_matches('/') {
-        keys::clear(&c.id);
-        for a in super::accounts::extra(&c.id) {
-            keys::clear(&super::accounts::key_id(&c.id, Some(&a.id)));
-        }
+        clear_keys(&c.id);
     }
     Ok(c)
+}
+
+/// Forgets the keys typed for a custom provider's old address: the provider's, its accounts' (an account with an address of its own
+/// has a key typed for that address, so it keeps it) and its profiles' copies.
+pub fn clear_keys(id: &str) {
+    keys::clear(id);
+    for a in super::accounts::extra(id) {
+        if a.base_url.as_deref().is_some_and(|u| !u.trim().is_empty()) {
+            continue;
+        }
+        keys::clear(&super::accounts::key_id(id, Some(&a.id)));
+    }
+    for pr in profiles::load().into_iter().filter(|p| p.provider == id) {
+        keys::clear(&format!("{id}@{}", pr.id));
+    }
 }
 
 /// Removes a custom provider and everything that belongs to it: its key and its accounts' keys, its profiles (and their keys), its
@@ -259,6 +268,8 @@ thread_local! {
     static MIGRATING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 static MIGRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Configuration folders where the migration was tried and failed in this run (it is not tried again until the next start).
+static TRIED: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
 
 /// Turns the old fixed custom providers the person used into named ones, once per configuration folder.
 pub fn ensure_migrated() {
@@ -266,17 +277,24 @@ pub fn ensure_migrated() {
         return;
     }
     let _g = MIGRATION.lock().unwrap_or_else(|e| e.into_inner());
-    if marker().exists() {
+    if marker().exists() || TRIED.lock().unwrap_or_else(|e| e.into_inner()).contains(&marker()) {
         return;
     }
     MIGRATING.with(|m| m.set(true));
-    migrate();
+    let done = migrate();
     MIGRATING.with(|m| m.set(false));
-    let _ = std::fs::create_dir_all(crate::audit::config_dir());
-    let _ = std::fs::write(marker(), "1");
+    // when an old provider could not be stored now, the marker is not written: it is tried again at the next start
+    if done {
+        let _ = std::fs::create_dir_all(crate::audit::config_dir());
+        let _ = std::fs::write(marker(), "1");
+    } else {
+        TRIED.lock().unwrap_or_else(|e| e.into_inner()).push(marker());
+    }
 }
 
-fn migrate() {
+/// Returns false when an old provider could not be turned into a named one (its key stays where it was).
+fn migrate() -> bool {
+    let mut ok = true;
     let mut sel = Selection::load();
     let mut all_profiles = profiles::load();
     let prefs = ui_prefs::load();
@@ -293,7 +311,7 @@ fn migrate() {
             continue;
         }
         let url = sel.base_urls.get(old).map(|u| u.trim().to_string()).filter(|u| !u.is_empty()).unwrap_or_else(|| DEFAULT_URL.to_string());
-        // an address that does not pass today's checks is kept as typed would be lost: fall back to the default one but keep the old in the name
+        // an address that does not pass today's checks falls back to the default address (the old one would not be allowed now)
         let mut entry = CustomProvider { id: String::new(), name: name.to_string(), format: format.to_string(), base_url: url, default_model: None };
         let mut new_id = String::new();
         let r = ui_prefs::edit(|p| {
@@ -311,6 +329,7 @@ fn migrate() {
             }
         });
         if r.is_err() || new_id.is_empty() {
+            ok = false;
             continue;
         }
         if let Some(k) = keys::get(old) {
@@ -341,6 +360,7 @@ fn migrate() {
     if sel_changed {
         sel.save();
     }
+    ok
 }
 
 /// A profile or setting from a computer that still has the three fixed providers names `custom`, `custom-responses` or

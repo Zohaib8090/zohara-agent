@@ -2107,7 +2107,7 @@ async function modelSheet() {
     try {
       const body = { provider: p.id, model: chosen, base_url: url.value.trim() };
       if (!$$("mEffBox").classList.contains("hide")) body.effort = $$("mEff").value;
-      if (dsk) { delete body.base_url; } else Object.assign(body, fmtBody(p), p.takes_accounts ? { account: acctNow() || "default" } : {});
+      if (dsk) { delete body.base_url; } else Object.assign(body, fmtBody(p), p.takes_accounts && !dsk ? { account: acctNow() || "default" } : {});
       await mop("select", body); dropCache("profiles"); sh.close(); await refreshModel(); toast("Using " + chosen);
     } catch (e) { toast(e.message); useBtn.disabled = false; }
   }

@@ -105,7 +105,13 @@ pub fn key_id(sel: &Selection, provider_id: &str) -> String {
 pub fn get_key(sel: &Selection, provider_id: &str) -> Option<String> {
     // the shared key of the provider only goes to the provider's own address: a profile (which can arrive by sync) that points
     // somewhere else must have a key of its own
-    let shared_ok = sel.profile.is_some() && super::providers::find(provider_id).is_some_and(|p| p.key_fits(&sel.base_url_for(p)));
+    // (a custom provider's key was typed for its own address, so a profile with another address does not get it either)
+    let shared_ok = sel.profile.is_some()
+        && super::providers::find(provider_id).is_some_and(|p| {
+            let base = sel.base_url_for(p);
+            let own = sel.account_for(p.id).and_then(|a| super::accounts::address_of(p.id, a)).unwrap_or_else(|| p.base_url.to_string());
+            p.key_fits(&base) && (!p.is_custom() || super::providers::same_address(&base, &own))
+        });
     keys::get(&key_id(sel, provider_id)).or_else(|| if shared_ok { keys::get(&super::accounts::key_id(provider_id, sel.account_for(provider_id))) } else { None })
 }
 

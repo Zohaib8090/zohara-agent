@@ -125,7 +125,7 @@ pub fn listed() -> Vec<&'static Provider> {
 pub(crate) fn leak(p: Provider) -> &'static Provider {
     static CACHE: std::sync::Mutex<Vec<&'static Provider>> = std::sync::Mutex::new(Vec::new());
     let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(f) = c.iter().find(|q| q.id == p.id && q.name == p.name && q.protocol == p.protocol && q.base_url == p.base_url && q.models == p.models) {
+    if let Some(f) = c.iter().find(|q| q.id == p.id && q.name == p.name && q.protocol == p.protocol && q.base_url == p.base_url && q.local == p.local && q.models == p.models) {
         return f;
     }
     let l: &'static Provider = Box::leak(Box::new(p));
@@ -133,8 +133,29 @@ pub(crate) fn leak(p: Provider) -> &'static Provider {
     l
 }
 
+/// The cache is looked at before anything is leaked: asking again for a provider that is already known costs nothing.
+pub(crate) fn leak_custom(id: &str, name: &str, protocol: Protocol, base_url: &str, model: Option<&str>) -> &'static Provider {
+    static CACHE: std::sync::Mutex<Vec<&'static Provider>> = std::sync::Mutex::new(Vec::new());
+    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(f) = c.iter().find(|q| q.id == id && q.name == name && q.protocol == protocol && q.base_url == base_url && q.models.first().copied() == model && q.models.len() == model.iter().count()) {
+        return f;
+    }
+    let models: &'static [&'static str] = match model {
+        Some(m) => Box::leak(vec![leak_str(m)].into_boxed_slice()),
+        None => &[],
+    };
+    let l: &'static Provider = Box::leak(Box::new(Provider { id: leak_str(id), name: leak_str(name), protocol, base_url: leak_str(base_url), local: false, models }));
+    c.push(l);
+    l
+}
+
 pub(crate) fn leak_str(s: &str) -> &'static str {
     Box::leak(s.to_string().into_boxed_str())
+}
+
+/// Are these two the same address (a closing slash and surrounding spaces do not count)?
+pub fn same_address(a: &str, b: &str) -> bool {
+    a.trim().trim_end_matches('/') == b.trim().trim_end_matches('/')
 }
 
 /// The host part of an http(s) address, lowercase, without user name or port (`""` when there is none).

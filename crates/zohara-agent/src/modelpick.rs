@@ -1043,8 +1043,13 @@ impl AccountForm {
                 Ok(a.id)
             }
             Some(old) => {
+                // what can be refused is checked first, so a refusal leaves the account as it was
+                let with_address = !old.is_default && !self.provider.is_custom();
+                if with_address {
+                    providers::check_base_url(self.provider, &url)?;
+                }
                 accounts::rename(pid, &old.id, &name)?;
-                if !old.is_default && !self.provider.is_custom() {
+                if with_address {
                     accounts::set_address(pid, &old.id, &url)?;
                 }
                 if !typed.is_empty() {

@@ -455,6 +455,40 @@ fn local_updated(kind: &str, id: &str) -> Option<u64> {
 
 /// Does this address carry a secret in its path, query or fragment (`?api_key=…`, `?token=…`, `;key=…`)? Such an address is never
 /// synced: what travels is plain text on the server and on the other devices, and "never a token" is the promise.
+/// The settings document leaves out what has a secret inside its address (see `get_doc`), so a pulled document must not delete it here:
+/// those custom providers and accounts, and the addresses of the accounts, are put back. Returns the custom providers that stay but
+/// whose address is different now (their keys were typed for the old one).
+fn merge_local_only(p: &mut ui_prefs::Prefs, local: &ui_prefs::Prefs) -> Vec<String> {
+    for c in &local.custom_providers {
+        if address_carries_secret(&c.base_url) && !p.custom_providers.iter().any(|x| x.id == c.id) {
+            p.custom_providers.push(c.clone());
+            if let Some(a) = local.accounts.get(&c.id) {
+                p.accounts.entry(c.id.clone()).or_insert_with(|| a.clone());
+            }
+            if let Some(d) = local.default_accounts.get(&c.id) {
+                p.default_accounts.entry(c.id.clone()).or_insert_with(|| d.clone());
+            }
+        }
+    }
+    for (prov, list) in &local.accounts {
+        for a in list.iter().filter(|a| a.base_url.as_deref().is_some_and(address_carries_secret)) {
+            match p.accounts.get_mut(prov).and_then(|v| v.iter_mut().find(|x| x.id == a.id)) {
+                Some(x) if x.base_url.as_deref().map_or(true, |u| u.trim().is_empty()) => x.base_url = a.base_url.clone(),
+                Some(_) => {}
+                None => {
+                    if p.custom_providers.iter().any(|c| &c.id == prov) || !prov.starts_with("custom:") {
+                        let v = p.accounts.entry(prov.clone()).or_default();
+                        if !v.iter().any(|x| x.name.trim().eq_ignore_ascii_case(a.name.trim())) {
+                            v.push(a.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    p.custom_providers.iter().filter(|c| local.custom_providers.iter().any(|l| l.id == c.id && !crate::ai::providers::same_address(&l.base_url, &c.base_url))).map(|c| c.id.clone()).collect()
+}
+
 fn address_carries_secret(addr: &str) -> bool {
     let rest = addr.trim().split("://").nth(1).unwrap_or("");
     let tail = match rest.find(['/', '?', '#']) {
@@ -691,7 +725,16 @@ pub fn put_doc(kind: &str, id: &str, doc: &Value) -> Result<bool, String> {
             profiles::save_as_is(&all);
             true
         }
-        Parsed::Settings(p) => ui_prefs::save_as_is(&p).map(|_| true)?,
+        Parsed::Settings(mut p) => {
+            let local = ui_prefs::load();
+            let changed = merge_local_only(&mut p, &local);
+            ui_prefs::save_as_is(&p)?;
+            // a key typed for one address is never sent to another: a provider whose address changed here loses its keys
+            for id in changed {
+                crate::ai::custom::clear_keys(&id);
+            }
+            true
+        }
         Parsed::Mcp(mut s) => {
             let mut all = mcp_client::load_servers();
             if let Some(x) = all.iter().find(|x| mcp_id(&x.name) == id) {

@@ -397,6 +397,11 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
         }
         "account_rename" => {
             let pid = s(req, "provider");
+            // everything that can be refused is checked before anything is stored, so a refusal leaves the account as it was
+            if let Some(u) = req.get("base_url").and_then(Value::as_str) {
+                let prov = providers::find(pid).ok_or("unknown provider")?;
+                providers::check_base_url(prov, u)?;
+            }
             accounts::rename(pid, s(req, "id"), s(req, "name"))?;
             if let Some(u) = req.get("base_url").and_then(Value::as_str) {
                 accounts::set_address(pid, s(req, "id"), u)?;
@@ -444,7 +449,7 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             // an address in the request is tried without being saved (so the form can check it before the person saves)
             let base = req.get("base_url").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty()).map(str::to_string).or_else(|| req_account(req).and_then(|a| accounts::address_of(p.id, a))).unwrap_or_else(|| sel.base_url_for(p));
             // the key only goes to the provider's own address (a different one is tried without it)
-            let key = key_for(&sel, req, p).filter(|_| p.key_fits(&base));
+            let key = key_for(&sel, req, p).filter(|_| key_goes_to(&sel, req, p, &base));
             let (list, error) = match crate::ai::probe::list(p, &base, key.as_deref()) {
                 Ok(l) => (l, None),
                 Err(e) => (Vec::new(), Some(e)),
@@ -463,7 +468,7 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             let p = format_for(&sel, req, p)?;
             let base = req.get("base_url").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty()).map(str::to_string).unwrap_or_else(|| sel.base_url_for(p));
             let model = req.get("model").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| if sel.provider == p.id { sel.model.clone() } else { String::new() });
-            let key = key_for(&sel, req, p).filter(|_| p.key_fits(&base));
+            let key = key_for(&sel, req, p).filter(|_| key_goes_to(&sel, req, p, &base));
             // a failed test is still an answer: the form stays, the message says what to fix
             Ok(match crate::ai::probe::test(p, &base, key, &model) {
                 Ok(m) => json!({"works": true, "message": m}),
@@ -508,6 +513,13 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
                         return Err("That account is gone.".into());
                     }
                     sel.account = Some(a.to_string());
+                }
+                // a profile belongs to one account (its key was copied from it): another account leaves the profile, as in the desktop picker
+                if let Some(pid) = &sel.profile {
+                    let own = crate::ai::profiles::load().into_iter().find(|p| &p.id == pid).and_then(|p| p.account);
+                    if own.as_deref() != sel.account.as_deref() {
+                        sel.profile = None;
+                    }
                 }
             }
             if let Some(m) = req.get("model").and_then(Value::as_str) {
@@ -884,10 +896,25 @@ fn req_account(req: &Value) -> Option<&str> {
     req.get("account").and_then(Value::as_str).filter(|a| !a.is_empty())
 }
 
+/// May the saved key be sent to `base` in this request? A built-in provider's key goes to that provider's host. A custom provider's key
+/// was typed for one address (the provider's, or the named account's own), so only that exact address gets it: an address typed in a
+/// form that is not saved yet is tried without the key.
+fn key_goes_to(sel: &Selection, req: &Value, p: &providers::Provider, base: &str) -> bool {
+    if !p.key_fits(base) {
+        return false;
+    }
+    if !p.is_custom() {
+        return true;
+    }
+    let saved = req_account(req).and_then(|a| accounts::address_of(p.id, a)).unwrap_or_else(|| sel.base_url_for(p));
+    let own = req_account(req).and_then(|a| accounts::address_of(p.id, a)).unwrap_or_else(|| p.base_url.to_string());
+    providers::same_address(base, &own) || providers::same_address(base, &saved)
+}
+
 /// The key to use for a request: the account it names, else the chosen profile's or account's.
 fn key_for(sel: &Selection, req: &Value, p: &providers::Provider) -> Option<String> {
     match req_account(req) {
-        Some(a) => accounts::get_key(p.id, Some(a)),
+        Some(a) => accounts::exists(p.id, a).then(|| accounts::get_key(p.id, Some(a))).flatten(),
         None => crate::ai::profiles::get_key(sel, p.id),
     }
 }
@@ -2734,6 +2761,32 @@ mod tenant_tests {
         assert!(ask(json!({"op": "custom_provider_remove", "id": cid, "confirm": true}))["error"].is_null());
         assert_eq!((key_of(&t, "custom:router"), key_of(&t, "custom:router:second")), (None, None));
         assert_eq!(ask(json!({"op": "account_list", "provider": cid}))["error"], "unknown provider");
+    }
+
+    #[test]
+    fn a_saved_custom_key_is_not_sent_to_another_address_and_an_account_change_leaves_the_profile() {
+        let _g = lock();
+        let t = fresh(false);
+        let ask = |v: Value| talk(with_tenant(v, &t), true).remove(0);
+        use crate::ai::mock::{Answer, Mock};
+        let ok = |_: &str, path: &str, _: &Value| if path.ends_with("/models") { Answer::json(200, json!({"data": [{"id": "m1"}]})) } else { Answer::json(200, json!({"choices": [{"message": {"content": "ok"}}]})) };
+        let home = Mock::start(ok);
+        let other = Mock::start(ok);
+        let cid = ask(json!({"op": "custom_provider_add", "name": "Router", "base_url": home.url, "key": "k-secret"}))["id"].as_str().unwrap().to_string();
+        // the address typed in the form is not the saved one: it is tried without the key
+        ask(json!({"op": "models", "provider": cid, "base_url": other.url}));
+        ask(json!({"op": "model_test", "provider": cid, "base_url": other.url, "model": "m1"}));
+        assert!(other.seen.lock().unwrap().iter().all(|s| !s.3.contains("k-secret")), "{:?}", other.seen.lock().unwrap());
+        ask(json!({"op": "models", "provider": cid, "base_url": home.url}));
+        assert!(home.seen.lock().unwrap().iter().any(|s| s.3 == "Bearer k-secret"));
+        // another account leaves the active profile (whose key is a copy of the old account's)
+        ask(json!({"op": "account_add", "provider": cid, "name": "Second", "key": "k-two"}));
+        ask(json!({"op": "select", "provider": cid, "model": "m1"}));
+        let p = ask(json!({"op": "profile_create", "name": "Mine"}));
+        assert!(p["error"].is_null(), "{p}");
+        ask(json!({"op": "select", "account": "second"}));
+        let sel = crate::tenant::scope(&t, crate::ai::Selection::load);
+        assert_eq!((sel.account.as_deref(), sel.profile.as_deref()), (Some("second"), None));
     }
 
     fn rotation_events(t: &crate::tenant::Tenant, provider: &str, url: &str) -> (Result<(), String>, Vec<String>) {
