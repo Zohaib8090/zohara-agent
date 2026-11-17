@@ -169,7 +169,8 @@ fn restricted_refusal(op: &str, req: &Value) -> Option<&'static str> {
     if op.starts_with("mcp_") {
         return Some("MCP servers are not available to this account.");
     }
-    // the directory itself may be looked at (the `connectors` op answers a restricted account with an explanation and no way to add)
+    // the `connectors` (browse) op does not start with `connector_`, so it is not refused here: it answers a restricted account with an
+    // explanation and no way to add. Every other connector op is refused.
     if op.starts_with("connector_") {
         return Some(crate::connectors::RESTRICTED_MESSAGE);
     }
@@ -694,14 +695,15 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
         }
         "mcp_toggle" => {
             let (name, on) = (s(req, "name"), req.get("enabled").and_then(Value::as_bool).unwrap_or(true));
-            let mut all = crate::mcp_client::load_servers();
-            let x = all.iter_mut().find(|x| x.name == name).ok_or("no such server")?;
-            x.enabled = on;
-            x.held = false; // the person's own choice here
-            if on {
-                x.address_changed = None; // switched on as it is: the old address is kept
-            }
-            crate::mcp_client::save_servers(&all);
+            crate::mcp_client::update_servers(|all| {
+                let x = all.iter_mut().find(|x| x.name == name).ok_or("no such server")?;
+                x.enabled = on;
+                x.held = false; // the person's own choice here
+                if on {
+                    x.address_changed = None; // switched on as it is: the old address is kept
+                }
+                Ok::<_, &str>(())
+            })?;
             Ok(json!({}))
         }
         // the connectors directory (docs/MCP.md "Browse connectors"); adding is two steps: try it, then save what was tried

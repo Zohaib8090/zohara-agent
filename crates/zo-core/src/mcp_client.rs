@@ -77,6 +77,18 @@ pub fn load_servers() -> Vec<ServerConfig> {
     std::fs::read_to_string(file()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
+static SERVERS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Loads the list, lets `f` change it and saves it, all under one lock, so two changes made at the same time (a switch, an add, the
+/// address check) do not lose each other. Do not wait on the network inside `f`.
+pub fn update_servers<R>(f: impl FnOnce(&mut Vec<ServerConfig>) -> R) -> R {
+    let _g = SERVERS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut all = load_servers();
+    let r = f(&mut all);
+    save_servers(&all);
+    r
+}
+
 /// Saves the list. A remote server (an address) that is new or changed gets the time now; one that was removed leaves a tombstone
 /// for the sync.
 pub fn save_servers(all: &[ServerConfig]) {

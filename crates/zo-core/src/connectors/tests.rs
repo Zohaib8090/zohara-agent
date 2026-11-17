@@ -467,6 +467,27 @@ fn a_connector_is_tried_shown_and_only_then_saved_and_its_key_is_not_in_the_file
 }
 
 #[test]
+fn a_failed_retry_under_the_same_name_leaves_the_waiting_preview_its_key() {
+    let (_g, _dir) = sandbox("retry");
+    let url = fake_mcp(true);
+    let header = Header { name: "X-Api-Key".into(), description: "Your key".into(), secret: true, required: true, value: None };
+    let e = local_entry(&url, vec![header]);
+    let opts = tests_opts();
+    let mut good = input(&e.id);
+    good.headers.insert("X-Api-Key".into(), "k-123".into());
+    add::preview_entry(&e, 100, &good, &opts).unwrap();
+    let mut bad = input(&e.id);
+    bad.headers.insert("X-Api-Key".into(), "wrong".into());
+    assert!(add::preview_entry(&e, 101, &bad, &opts).is_err());
+    assert_eq!(crate::ai::keys::get(&mcp_client::header_id("fake", "X-Api-Key")).as_deref(), Some("k-123"));
+    add::commit("fake", 102).unwrap();
+    let saved = mcp_client::load_servers();
+    let mut ext = mcp_client::External::start_with(&saved);
+    assert!(ext.problems.is_empty(), "{:?}", ext.problems);
+    assert_eq!(ext.execute("fake__search", &json!({}), crate::Mode::Auto, &crate::approval::Deny).unwrap(), "key=k-123");
+}
+
+#[test]
 fn cancelling_a_try_removes_what_it_stored() {
     let (_g, _dir) = sandbox("cancel");
     let url = fake_mcp(true);
@@ -585,6 +606,10 @@ fn a_connector_whose_address_changed_is_held_until_the_person_decides() {
     let (_g, _dir) = sandbox("changed");
     let (base, reg) = fake_registry();
     let (src, cache) = (Source::at(&base), Cache::new());
+    // the registry gives a public header value for the new address
+    let mut figma: Value = serde_json::from_str::<Value>(FEATURED_RECORDS).unwrap()["com.figma.mcp/mcp"].clone();
+    figma["server"]["remotes"][0]["headers"] = json!([{"name": "X-Client", "value": "zohara"}]);
+    reg.replace.lock().unwrap().push(("com.figma.mcp/mcp".into(), figma));
     crate::ai::keys::set(&mcp_client::header_id("notion", "X-Api-Key"), "old-secret").unwrap();
     crate::ai::keys::set(&mcp_client::token_id("notion"), "old-token").unwrap();
     mcp_client::save_servers(&[
@@ -607,18 +632,18 @@ fn a_connector_whose_address_changed_is_held_until_the_person_decides() {
     assert!(check_changes(&src, &Cache::new(), 20_000).is_empty());
     assert!(mcp_client::load_servers().iter().find(|s| s.name == "moved").unwrap().held);
     // the person agrees: the new address is used, and nothing saved for the old one goes to it
-    let msg = accept_change_with("moved", true).unwrap();
+    let msg = accept_change_with("moved", true, &src, &cache, 30).unwrap();
     assert!(msg.contains("https://mcp.figma.com/mcp") && msg.contains("forgotten"), "{msg}");
     let s = mcp_client::load_servers().into_iter().find(|s| s.name == "moved").unwrap();
     assert_eq!((s.command.as_str(), s.held, s.enabled, s.address_changed.clone()), ("https://mcp.figma.com/mcp", false, true, None));
-    assert!(s.headers.is_empty() && s.secret_headers.is_empty());
-    assert!(accept_change_with("moved", true).unwrap_err().contains("has not changed"));
-    assert!(accept_change_with("byhand", true).is_err() && accept_change_with("nothere", true).is_err());
+    assert!(s.secret_headers.is_empty() && s.headers.len() == 1 && s.headers["X-Client"] == "zohara", "{:?}", s.headers);
+    assert!(accept_change_with("moved", true, &src, &cache, 30).unwrap_err().contains("has not changed"));
+    assert!(accept_change_with("byhand", true, &src, &cache, 30).is_err() && accept_change_with("nothere", true, &src, &cache, 30).is_err());
     // a new address that is not public is refused even when the person says yes
     let mut all = mcp_client::load_servers();
     all.iter_mut().find(|s| s.name == "notion").unwrap().address_changed = Some("https://10.0.0.1/mcp".into());
     mcp_client::save_servers(&all);
-    assert!(accept_change_with("notion", false).unwrap_err().contains("public https"));
+    assert!(accept_change_with("notion", false, &src, &cache, 30).unwrap_err().contains("public https"));
 }
 
 #[test]
