@@ -16,6 +16,18 @@ pub struct Prefs {
     pub hidden_providers: Vec<String>,
     #[serde(default)]
     pub provider_prefs: BTreeMap<String, Value>,
+    /// The named custom providers (see `custom`): name, API format and address. Never a key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_providers: Vec<super::custom::CustomProvider>,
+    /// The extra named accounts of a provider, by provider id (see `accounts`). Never a key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub accounts: BTreeMap<String, Vec<super::accounts::Account>>,
+    /// Name and visibility of the built-in "Default" account of a provider, by provider id (only those the person changed).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub default_accounts: BTreeMap<String, super::accounts::DefaultAccount>,
+    /// When an account hits its rate limit, switch to the next account of the same provider and retry once. Off by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rotate_on_limit: bool,
     /// When it last changed (ms); 0 = never changed.
     #[serde(default)]
     pub updated: u64,
@@ -46,7 +58,7 @@ pub(crate) fn save_as_is(p: &Prefs) -> Result<(), String> {
 
 fn clean_id(s: &str) -> Option<String> {
     let s = s.trim();
-    (!s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')).then(|| s.to_string())
+    (!s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':')).then(|| s.to_string())
 }
 
 /// Checks a document's shape and size; the same rules for the person's own edits and for a synced document.
@@ -67,13 +79,15 @@ pub fn clean(mut p: Prefs) -> Result<Prefs, String> {
             return Err("The provider preferences are not valid.".into());
         }
     }
+    super::custom::check_all(&p.custom_providers)?;
+    super::accounts::check_all(&p)?;
     if serde_json::to_string(&p).map_or(true, |s| s.len() > MAX_BYTES) {
         return Err("The preferences are too big.".into());
     }
     Ok(p)
 }
 
-fn edit(f: impl FnOnce(&mut Prefs)) -> Result<Prefs, String> {
+pub(crate) fn edit(f: impl FnOnce(&mut Prefs)) -> Result<Prefs, String> {
     let old = load();
     let mut p = old.clone();
     f(&mut p);

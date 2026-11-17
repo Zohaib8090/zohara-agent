@@ -52,23 +52,44 @@ val ZoJson: Json = Json {
   val takesFormat: Boolean = false,
   /** the saved API format of such a provider, null for its normal one */
   val apiFormat: String? = null,
+  /** it has an API key, so the person may add several named accounts (Groq 1, Groq 2) */
+  val takesAccounts: Boolean = false,
+  /** the accounts, the Default one first (empty from an older server) */
+  val accounts: List<AccountInfo> = emptyList(),
+  /** `hosted`, `local` or `custom` ("" from an older server) */
+  val group: String = "",
+  /** the model a custom provider starts with */
+  val defaultModel: String? = null,
 )
-@Serializable data class ProvidersResp(val current: String = "", val hiddenProviders: List<String> = emptyList(), val providers: List<ProviderInfo> = emptyList())
+/** One API key account of a provider. The key itself never leaves the server. */
+@Serializable data class AccountInfo(
+  val id: String, val name: String = "", val default: Boolean = false, val hidden: Boolean = false,
+  val baseUrl: String? = null, val hasKey: Boolean = false, val active: Boolean = false,
+)
+@Serializable data class AccountsResp(val id: String = "", val accounts: List<AccountInfo> = emptyList())
+@Serializable data class CustomProviderInfo(
+  val id: String, val name: String = "", val format: String = "chat", val baseUrl: String = "", val defaultModel: String? = null, val hasKey: Boolean = false,
+)
+@Serializable data class CustomProviderResp(val id: String = "", val customProvider: CustomProviderInfo? = null)
+@Serializable data class ProvidersResp(
+  val current: String = "", val currentAccount: String = "", val rotateOnLimit: Boolean = false,
+  val hiddenProviders: List<String> = emptyList(), val providers: List<ProviderInfo> = emptyList(),
+)
 @Serializable data class ModelsResp(
   val provider: String = "", val models: List<String> = emptyList(), val current: String = "", val efforts: List<String> = emptyList(),
   val effort: String? = null, val baseUrl: String = "", val error: String? = null,
 )
 @Serializable data class ModelTestResp(val works: Boolean = false, val message: String = "")
-@Serializable data class SelectResp(val provider: String = "", val model: String = "", val effort: String? = null, val baseUrl: String = "", val apiFormat: String? = null)
+@Serializable data class SelectResp(val provider: String = "", val account: String? = null, val model: String = "", val effort: String? = null, val baseUrl: String = "", val apiFormat: String? = null)
 @Serializable data class Profile(
-  val id: String, val name: String = "", val provider: String = "", val model: String = "", val effort: String? = null,
+  val id: String, val name: String = "", val provider: String = "", val account: String? = null, val model: String = "", val effort: String? = null,
   val pinned: List<String> = emptyList(), val baseUrl: String = "", val vision: Boolean? = null, val updated: Long = 0,
 )
 @Serializable data class ProfilesResp(val active: String = "", val profiles: List<Profile> = emptyList())
 @Serializable data class IdResp(val id: String = "")
 @Serializable data class ProfileUseResp(val provider: String = "", val model: String = "", val effort: String? = null, val baseUrl: String = "")
 @Serializable data class ProviderPref(val order: Int? = null)
-@Serializable data class SettingsResp(val hiddenProviders: List<String> = emptyList(), val providerPrefs: Map<String, ProviderPref> = emptyMap(), val updated: Long = 0)
+@Serializable data class SettingsResp(val hiddenProviders: List<String> = emptyList(), val rotateOnLimit: Boolean = false, val providerPrefs: Map<String, ProviderPref> = emptyMap(), val updated: Long = 0)
 
 // ---- memory, personalities ----
 @Serializable data class MemoryItem(val id: String, val kind: String = "fact", val text: String = "", val title: String = "", val chat: String = "", val pinned: Boolean = false, val updated: Long = 0)

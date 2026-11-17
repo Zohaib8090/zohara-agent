@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn errors_become_sentences_a_person_can_act_on() {
-        let custom = providers::find("custom").unwrap();
+        let custom = providers::find("custom:t-chat").unwrap();
         let o = providers::find("openai").unwrap();
         assert!(friendly(o, "https://x/v1", false, "The provider answered 401: bad").contains("No API key"));
         assert!(friendly(o, "https://x/v1", true, "The provider answered 401: bad").contains("refused the key"));
@@ -176,26 +176,26 @@ mod tests {
 
     #[test]
     fn friendly_leaves_the_format_hints_alone() {
-        let c = providers::find("custom").unwrap();
-        let hint = "This server speaks the OpenAI Responses format: pick \"Custom endpoint: OpenAI Responses\" (or set the API format to OpenAI Responses).";
+        let c = providers::find("custom:t-chat").unwrap();
+        let hint = "This server speaks the OpenAI Responses format: set the API format of this provider to OpenAI Responses.";
         assert_eq!(friendly(c, "https://x/v1", true, hint), hint);
-        let e = "The server does not take /chat/completions (The provider answered 404: Not Found). It may speak another API format: try \"Custom endpoint: OpenAI Responses\".";
+        let e = "The server does not take /chat/completions (The provider answered 404: Not Found). It may speak another API format: try OpenAI Responses or Claude format as the API format of this provider.";
         assert_eq!(friendly(c, "https://x/v1", true, e), e);
     }
 
     #[test]
     fn the_test_of_a_chat_endpoint_that_speaks_responses_says_which_provider_to_pick() {
         let m = only("/v1/responses", text_answer("ok"));
-        let c = providers::find("custom").unwrap();
+        let c = providers::find("custom:t-chat").unwrap();
         let e = test(c, &m.url, Some("k".into()), "m").unwrap_err();
-        assert!(e.starts_with("This server speaks the OpenAI Responses format") && e.contains("Custom endpoint: OpenAI Responses"), "{e}");
+        assert!(e.starts_with("This server speaks the OpenAI Responses format") && e.contains("set the API format of this provider to OpenAI Responses"), "{e}");
         // the right provider works
-        let r = providers::find("custom-responses").unwrap();
+        let r = providers::find("custom:t-responses").unwrap();
         assert!(test(r, &m.url, Some("k".into()), "m").unwrap().contains("it works"));
         // and a server that speaks the Claude format is found from the Responses provider
         let claude = only("/v1/messages", json!({"type": "message", "role": "assistant", "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"}));
         let e = test(r, &claude.url, Some("k".into()), "m").unwrap_err();
-        assert!(e.contains("Claude format") && e.contains("Custom endpoint: Claude format"), "{e}");
+        assert!(e.contains("Claude format") && e.contains("set the API format of this provider to Claude format"), "{e}");
         // a hosted provider with an API format hint gets the same help
         let o = providers::find("openai").unwrap();
         let e = test(o, &m.url, Some("k".into()), "m").unwrap_err();
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn the_test_does_not_guess_formats_when_the_key_is_refused_or_nothing_speaks() {
-        let c = providers::find("custom").unwrap();
+        let c = providers::find("custom:t-chat").unwrap();
         let m = Mock::start(|_, _, _| Answer::json(401, json!({"error": {"message": "bad key"}})));
         let e = test(c, &m.url, Some("k".into()), "m").unwrap_err();
         assert!(e.contains("refused the key") && !e.contains("speaks"), "{e}");
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn the_model_list_of_every_format_is_read_from_models() {
         let m = only("/nothing", Value::Null);
-        for id in ["custom", "custom-responses", "custom-claude"] {
+        for id in ["custom:t-chat", "custom:t-responses", "custom:t-claude"] {
             let p = providers::find(id).unwrap();
             assert_eq!(list(p, &m.url, Some("k")).unwrap(), ["m1"], "{id}");
         }

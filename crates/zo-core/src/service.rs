@@ -9,7 +9,7 @@
 //! forwards for phones that were allowed Zohara Agent on the computer.
 
 use crate::ai::agent::{self, Config, Event};
-use crate::ai::{claude_code, providers, Selection};
+use crate::ai::{accounts, claude_code, providers, Selection};
 use crate::approval::Approver;
 use crate::policy::Mode;
 use crate::store::chats::{self, Chat, Entry};
@@ -308,27 +308,122 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
         }
         "providers" => {
             let sel = Selection::load();
-            let hidden = crate::ai::ui_prefs::load().hidden_providers;
+            let prefs = crate::ai::ui_prefs::load();
+            let hidden = prefs.hidden_providers.clone();
             Ok(json!({
                 "current": sel.provider,
+                "current_account": sel.account_for(&sel.provider).unwrap_or(accounts::DEFAULT_ID),
                 "hidden_providers": hidden,
+                "rotate_on_limit": prefs.rotate_on_limit,
                 "formats": api_formats_json(),
-                "providers": providers::all().iter().filter(|p| p.protocol != providers::Protocol::ClaudeCode || !tenant::multi_tenant() || claude_code::usable_here()).map(|p| json!({
-                    "id": p.id, "name": if tenant::multi_tenant() && p.protocol == providers::Protocol::ClaudeCode { "Claude Code (your subscription)" } else { p.name }, "local": p.local,
-                    "has_key": p.local || p.protocol == crate::ai::providers::Protocol::ClaudeCode || crate::ai::profiles::get_key(&sel, p.id).is_some(),
-                    // the person types the address (a custom endpoint, or a model server on a computer): the screen shows an Address field
-                    "needs_url": p.protocol != providers::Protocol::ClaudeCode && (p.is_custom() || p.local),
-                    // the wire format it speaks (`chat`, `responses`, `claude`): a custom endpoint's is part of its name; a hosted
-                    // compatible provider may be told another one (`api_format`, saved with `select`)
-                    "custom": p.is_custom(),
-                    "format": providers::format_name(match p.protocol { providers::Protocol::OpenAiResponses => "responses", providers::Protocol::Anthropic => "claude", _ => "chat" }),
-                    "takes_format": p.takes_format(),
-                    "api_format": if p.takes_format() { sel.api_formats.get(p.id).and_then(|f| providers::format_name(f)) } else { None },
-                    "default_url": p.base_url,
-                    "base_url": sel.base_url_for(p),
-                    "hidden": hidden.iter().any(|h| h == p.id),
-                })).collect::<Vec<_>>(),
+                "providers": providers::listed().iter().filter(|p| p.protocol != providers::Protocol::ClaudeCode || !tenant::multi_tenant() || claude_code::usable_here()).map(|p| provider_json(&sel, p, &hidden)).collect::<Vec<_>>(),
             }))
+        }
+        "custom_provider_list" => Ok(json!({"custom_providers": crate::ai::custom::list().iter().map(custom_json).collect::<Vec<_>>(), "formats": api_formats_json(), "max": crate::ai::custom::MAX})),
+        "custom_provider_add" => {
+            let name = s(req, "name");
+            let format = req.get("format").and_then(Value::as_str).unwrap_or("chat");
+            let url = s(req, "base_url");
+            let model = req.get("default_model").and_then(Value::as_str);
+            let key = s(req, "key").trim().to_string();
+            // the address and name are checked (and a restricted account's rules apply) before anything is stored
+            let c = crate::ai::custom::add(name, format, url, model)?;
+            if !key.is_empty() {
+                if let Err(e) = crate::ai::keys::set(&c.id, &key) {
+                    let _ = crate::ai::custom::remove(&c.id);
+                    return Err(e);
+                }
+            }
+            Ok(json!({"id": c.id, "custom_provider": custom_json(&c)}))
+        }
+        "custom_provider_update" => {
+            let id = s(req, "id");
+            let c = crate::ai::custom::update(id, req.get("name").and_then(Value::as_str), req.get("format").and_then(Value::as_str), req.get("base_url").and_then(Value::as_str), req.get("default_model").and_then(Value::as_str))?;
+            if let Some(k) = req.get("key").and_then(Value::as_str).map(str::trim).filter(|k| !k.is_empty()) {
+                crate::ai::keys::set(&c.id, k)?;
+            }
+            Ok(json!({"id": c.id, "custom_provider": custom_json(&c)}))
+        }
+        "custom_provider_test" => {
+            // the form's Test button: a saved provider (`id`) or one still being typed (`format` and `base_url`); the typed key (else the
+            // saved one) is sent only to the address typed with it
+            let saved = req.get("id").and_then(Value::as_str).filter(|i| !i.is_empty()).map(|i| crate::ai::custom::get(i).ok_or("That custom provider is gone.")).transpose()?;
+            let format = req.get("format").and_then(Value::as_str).map(str::to_string).or_else(|| saved.as_ref().map(|c| c.format.clone())).unwrap_or_else(|| "chat".into());
+            let base = req.get("base_url").and_then(Value::as_str).map(|u| u.trim().to_string()).filter(|u| !u.is_empty()).or_else(|| saved.as_ref().map(|c| c.base_url.clone())).unwrap_or_default();
+            let p = crate::ai::custom::draft(&format, &base)?;
+            let typed = req.get("key").and_then(Value::as_str).map(str::trim).filter(|k| !k.is_empty()).map(str::to_string);
+            let same_address = saved.as_ref().is_some_and(|c| c.base_url.trim().trim_end_matches('/') == base.trim_end_matches('/'));
+            let key = typed.or_else(|| saved.as_ref().filter(|_| same_address).and_then(|c| crate::ai::keys::get(&c.id)));
+            let model = req.get("model").and_then(Value::as_str).map(str::trim).unwrap_or("").to_string();
+            Ok(match crate::ai::probe::test(p, &base, key, &model) {
+                Ok(m) => json!({"works": true, "message": m}),
+                Err(e) => json!({"works": false, "message": e}),
+            })
+        }
+        "custom_provider_remove" => {
+            let id = s(req, "id");
+            if !req.get("confirm").and_then(Value::as_bool).unwrap_or(false) {
+                return Err("Deleting a custom provider removes its key and its profiles. Confirm to go on.".into());
+            }
+            crate::ai::custom::remove(id)?;
+            Ok(json!({}))
+        }
+        "account_list" => {
+            let pid = s(req, "provider");
+            let p = providers::find(pid).ok_or("unknown provider")?;
+            Ok(json!({"provider": p.id, "accounts": accounts_json(p.id)}))
+        }
+        "account_add" => {
+            let pid = s(req, "provider");
+            let a = accounts::add(pid, s(req, "name"), req.get("base_url").and_then(Value::as_str))?;
+            if let Some(k) = req.get("key").and_then(Value::as_str).map(str::trim).filter(|k| !k.is_empty()) {
+                if let Err(e) = crate::ai::keys::set(&accounts::key_id(pid, Some(&a.id)), k) {
+                    let _ = accounts::remove(pid, &a.id);
+                    return Err(e);
+                }
+            }
+            Ok(json!({"id": a.id, "accounts": accounts_json(pid)}))
+        }
+        "account_rename" => {
+            let pid = s(req, "provider");
+            accounts::rename(pid, s(req, "id"), s(req, "name"))?;
+            if let Some(u) = req.get("base_url").and_then(Value::as_str) {
+                accounts::set_address(pid, s(req, "id"), u)?;
+            }
+            if let Some(k) = req.get("key").and_then(Value::as_str).map(str::trim).filter(|k| !k.is_empty()) {
+                crate::ai::keys::set(&accounts::key_id(pid, Some(s(req, "id"))), k)?;
+            }
+            Ok(json!({"accounts": accounts_json(pid)}))
+        }
+        "account_hide" => {
+            let pid = s(req, "provider");
+            accounts::set_hidden(pid, s(req, "id"), req.get("hidden").and_then(Value::as_bool).unwrap_or(true))?;
+            Ok(json!({"accounts": accounts_json(pid)}))
+        }
+        "account_remove" => {
+            let pid = s(req, "provider");
+            if !req.get("confirm").and_then(Value::as_bool).unwrap_or(false) {
+                return Err("Deleting an account removes its key. Confirm to go on.".into());
+            }
+            accounts::remove(pid, s(req, "id"))?;
+            Ok(json!({"accounts": accounts_json(pid)}))
+        }
+        "account_test" => {
+            let pid = s(req, "provider");
+            let p = providers::find(pid).ok_or("unknown provider")?;
+            let acct = req.get("id").and_then(Value::as_str).unwrap_or(accounts::DEFAULT_ID);
+            if !accounts::exists(pid, acct) {
+                return Err("That account is gone.".into());
+            }
+            let sel = Selection::load();
+            let p = format_for(&sel, req, p)?;
+            let base = accounts::address_of(pid, acct).unwrap_or_else(|| sel.base_url_for(p));
+            let key = accounts::get_key(pid, Some(acct)).filter(|_| p.key_fits(&base));
+            let model = req.get("model").and_then(Value::as_str).unwrap_or("").to_string();
+            Ok(match crate::ai::probe::test(p, &base, key, &model) {
+                Ok(m) => json!({"works": true, "message": m}),
+                Err(e) => json!({"works": false, "message": e}),
+            })
         }
         "models" => {
             let sel = Selection::load();
@@ -336,9 +431,9 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             let p = providers::find(&pid).ok_or("choose a provider on the computer first")?;
             let p = format_for(&sel, req, p)?;
             // an address in the request is tried without being saved (so the form can check it before the person saves)
-            let base = req.get("base_url").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty()).map(str::to_string).unwrap_or_else(|| sel.base_url_for(p));
+            let base = req.get("base_url").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty()).map(str::to_string).or_else(|| req_account(req).and_then(|a| accounts::address_of(p.id, a))).unwrap_or_else(|| sel.base_url_for(p));
             // the key only goes to the provider's own address (a different one is tried without it)
-            let key = crate::ai::profiles::get_key(&sel, p.id).filter(|_| p.key_fits(&base));
+            let key = key_for(&sel, req, p).filter(|_| p.key_fits(&base));
             let (list, error) = match crate::ai::probe::list(p, &base, key.as_deref()) {
                 Ok(l) => (l, None),
                 Err(e) => (Vec::new(), Some(e)),
@@ -357,7 +452,7 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             let p = format_for(&sel, req, p)?;
             let base = req.get("base_url").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty()).map(str::to_string).unwrap_or_else(|| sel.base_url_for(p));
             let model = req.get("model").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| if sel.provider == p.id { sel.model.clone() } else { String::new() });
-            let key = crate::ai::profiles::get_key(&sel, p.id).filter(|_| p.key_fits(&base));
+            let key = key_for(&sel, req, p).filter(|_| p.key_fits(&base));
             // a failed test is still an answer: the form stays, the message says what to fix
             Ok(match crate::ai::probe::test(p, &base, key, &model) {
                 Ok(m) => json!({"works": true, "message": m}),
@@ -368,6 +463,9 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
         "settings_set" => {
             if let Some(h) = req.get("hidden_providers").and_then(Value::as_array) {
                 crate::ai::ui_prefs::set_hidden(h.iter().filter_map(Value::as_str).map(str::to_string).collect())?;
+            }
+            if let Some(on) = req.get("rotate_on_limit").and_then(Value::as_bool) {
+                accounts::set_rotate_on_limit(on)?;
             }
             if let Some(o) = req.get("provider_prefs").and_then(Value::as_object) {
                 for (k, v) in o {
@@ -382,11 +480,23 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
                 let prov = providers::find(p).ok_or("unknown provider")?;
                 if sel.provider != p {
                     sel.provider = p.to_string();
+                    sel.account = None;
                     // the active profile belongs to the old provider: it must not be rewritten into the new one (the desktop does this too)
                     sel.profile = None;
                     // a new provider starts without the old provider's model
                     sel.model = prov.models.first().map(|m| m.to_string()).unwrap_or_default();
                     sel.effort = None;
+                }
+            }
+            if let Some(a) = req.get("account").and_then(Value::as_str) {
+                let prov = providers::find(&sel.provider).ok_or("choose a provider first")?;
+                if a.is_empty() || a == accounts::DEFAULT_ID {
+                    sel.account = None;
+                } else {
+                    if !prov.takes_accounts() || !accounts::exists(prov.id, a) {
+                        return Err("That account is gone.".into());
+                    }
+                    sel.account = Some(a.to_string());
                 }
             }
             if let Some(m) = req.get("model").and_then(Value::as_str) {
@@ -398,7 +508,7 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             if let Some(f) = req.get("api_format").and_then(Value::as_str) {
                 let prov = providers::find(&sel.provider).ok_or("choose a provider first")?;
                 if !prov.takes_format() {
-                    return Err(format!("{} has no API format to choose: pick the Custom endpoint that speaks the format you need.", prov.name));
+                    return Err(format!("{} has no API format to choose: a custom provider has its own API format: change it in the custom provider's settings.", prov.name));
                 }
                 match f.trim() {
                     "" | "default" => sel.api_formats.remove(prov.id),
@@ -408,16 +518,23 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             if let Some(u) = req.get("base_url").and_then(Value::as_str) {
                 let prov = providers::find(&sel.provider).ok_or("choose a provider first")?;
                 check_base_url(prov, u)?;
-                match u.trim() {
-                    "" => sel.base_urls.remove(prov.id),
-                    u => sel.base_urls.insert(prov.id.to_string(), u.to_string()),
-                };
+                if prov.is_custom() {
+                    // a custom provider's address is part of it: the old screens that send an address change it here
+                    if !u.trim().is_empty() {
+                        crate::ai::custom::update(prov.id, None, None, Some(u), None)?;
+                    }
+                } else {
+                    match u.trim() {
+                        "" => sel.base_urls.remove(prov.id),
+                        u => sel.base_urls.insert(prov.id.to_string(), u.to_string()),
+                    };
+                }
             }
             crate::ai::profiles::update_active(&sel);
             sel.save();
             let base = providers::find(&sel.provider).map(|p| sel.base_url_for(p)).unwrap_or_default();
             let api_format = providers::find(&sel.provider).filter(|p| p.takes_format()).and_then(|p| sel.api_formats.get(p.id).cloned());
-            Ok(json!({"provider": sel.provider, "model": sel.model, "effort": sel.effort, "base_url": base, "api_format": api_format}))
+            Ok(json!({"provider": sel.provider, "account": sel.account, "model": sel.model, "effort": sel.effort, "base_url": base, "api_format": api_format}))
         }
         "set_key" => {
             let sel = Selection::load();
@@ -427,13 +544,19 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             if key.is_empty() {
                 return Err("The key is empty.".into());
             }
-            crate::ai::keys::set(&crate::ai::profiles::key_id(&sel, &pid), &key)?;
+            // a key for a named account goes to that account's own place; otherwise to the profile's or the account in use
+            let id = match req_account(req) {
+                Some(a) if accounts::exists(&pid, a) => accounts::key_id(&pid, Some(a)),
+                Some(_) => return Err("That account is gone.".into()),
+                None => crate::ai::profiles::key_id(&sel, &pid),
+            };
+            crate::ai::keys::set(&id, &key)?;
             Ok(json!({}))
         }
         "profiles" => {
             let sel = Selection::load();
             Ok(json!({"active": sel.profile, "profiles": crate::ai::profiles::load().iter().map(|p| json!({
-                "id": p.id, "name": p.name, "provider": p.provider, "model": p.model, "effort": p.effort, "pinned": p.pinned,
+                "id": p.id, "name": p.name, "provider": p.provider, "account": p.account, "model": p.model, "effort": p.effort, "pinned": p.pinned,
                 "base_url": p.base_url, "vision": p.vision, "updated": p.updated,
             })).collect::<Vec<_>>()}))
         }
@@ -442,14 +565,14 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             let p = crate::ai::profiles::load().into_iter().find(|p| p.id == id).ok_or("that profile is gone")?;
             if let (Some(u), Some(prov)) = (p.base_url.as_deref(), providers::find(&p.provider)) {
                 if !prov.key_fits(u) {
-                    return Err(format!("This profile's address is not {}'s own, so it is not used (its key would be sent there). Use a Custom endpoint.", prov.name));
+                    return Err(format!("This profile's address is not {}'s own, so it is not used (its key would be sent there). Add a custom provider for another address.", prov.name));
                 }
             }
             let mut sel = Selection::load();
             sel.apply_profile(&p);
             sel.profile = Some(p.id.clone());
             sel.save();
-            Ok(json!({"provider": sel.provider, "model": sel.model, "effort": sel.effort}))
+            Ok(json!({"provider": sel.provider, "account": sel.account, "model": sel.model, "effort": sel.effort}))
         }
         "profile_create" => {
             let mut sel = Selection::load();
@@ -668,25 +791,59 @@ fn format_for(sel: &Selection, req: &Value, p: &'static providers::Provider) -> 
     }
 }
 
-/// The address a person typed for a provider: empty (the default), or an http(s) address; a restricted account only a public https one.
+/// The address a person typed for a provider (see `providers::check_base_url`).
 fn check_base_url(p: &providers::Provider, u: &str) -> Result<(), String> {
-    let u = u.trim();
-    if u.is_empty() || p.protocol == providers::Protocol::ClaudeCode {
-        return Ok(());
+    providers::check_base_url(p, u)
+}
+
+/// The account a request names (`account`), if any.
+fn req_account(req: &Value) -> Option<&str> {
+    req.get("account").and_then(Value::as_str).filter(|a| !a.is_empty())
+}
+
+/// The key to use for a request: the account it names, else the chosen profile's or account's.
+fn key_for(sel: &Selection, req: &Value, p: &providers::Provider) -> Option<String> {
+    match req_account(req) {
+        Some(a) => accounts::get_key(p.id, Some(a)),
+        None => crate::ai::profiles::get_key(sel, p.id),
     }
-    crate::ai::probe::check_address(u)?;
-    if !p.key_fits(u) {
-        return Err(format!("{} can only be used at its own address (its key would be sent there). For another address choose a Custom endpoint.", p.name));
-    }
-    if tenant::is_restricted() {
-        crate::ai::agent::check_restricted_provider(p, u)?;
-    }
-    Ok(())
+}
+
+fn custom_json(c: &crate::ai::custom::CustomProvider) -> Value {
+    json!({"id": c.id, "name": c.name, "format": c.format, "base_url": c.base_url, "default_model": c.default_model, "has_key": crate::ai::keys::get(&c.id).is_some()})
+}
+
+fn accounts_json(provider_id: &str) -> Value {
+    let sel = Selection::load();
+    let active = if sel.provider == provider_id { sel.account.clone().unwrap_or_else(|| accounts::DEFAULT_ID.to_string()) } else { String::new() };
+    json!(accounts::list(provider_id).iter().map(|a| json!({"id": a.id, "name": a.name, "default": a.is_default, "hidden": a.hidden, "base_url": a.base_url, "has_key": a.has_key, "active": a.id == active})).collect::<Vec<_>>())
+}
+
+fn provider_json(sel: &Selection, p: &providers::Provider, hidden: &[String]) -> Value {
+    let accts = if p.takes_accounts() { accounts_json(p.id) } else { json!([]) };
+    json!({
+        "id": p.id, "name": if tenant::multi_tenant() && p.protocol == providers::Protocol::ClaudeCode { "Claude Code (your subscription)" } else { p.name }, "local": p.local,
+        "has_key": p.local || p.protocol == providers::Protocol::ClaudeCode || crate::ai::profiles::get_key(sel, p.id).is_some(),
+        // the person types the address (a custom provider, or a model server on a computer): the screen shows an Address field
+        "needs_url": p.protocol != providers::Protocol::ClaudeCode && (p.is_custom() || p.local),
+        // the wire format it speaks (`chat`, `responses`, `claude`): a custom provider has its own; a hosted compatible provider may be told another one
+        "custom": p.is_custom(),
+        "group": if p.is_custom() { "custom" } else if p.local { "local" } else { "hosted" },
+        "format": providers::format_name(match p.protocol { providers::Protocol::OpenAiResponses => "responses", providers::Protocol::Anthropic => "claude", _ => "chat" }),
+        "takes_format": p.takes_format(),
+        "api_format": if p.takes_format() { sel.api_formats.get(p.id).and_then(|f| providers::format_name(f)) } else { None },
+        "takes_accounts": p.takes_accounts(),
+        "accounts": accts,
+        "default_url": p.base_url,
+        "base_url": sel.base_url_for(p),
+        "default_model": p.models.first(),
+        "hidden": hidden.iter().any(|h| h == p.id),
+    })
 }
 
 fn prefs_json() -> Value {
     let p = crate::ai::ui_prefs::load();
-    json!({"hidden_providers": p.hidden_providers, "provider_prefs": p.provider_prefs, "updated": p.updated})
+    json!({"hidden_providers": p.hidden_providers, "provider_prefs": p.provider_prefs, "rotate_on_limit": p.rotate_on_limit, "updated": p.updated})
 }
 
 /// Asks the connected client (the phone) for a yes.
@@ -972,6 +1129,10 @@ fn send(req: &Value, mut reader: BufReader<UnixStream>, out: Arc<Mutex<UnixStrea
             }
             Event::Stuck { n, tool } => {
                 line(&o, &json!({"event": "stuck", "n": n, "tool": tool}));
+            }
+            Event::Notice(t) => {
+                entries.push(entry("msg-tool-out", format!("ℹ {t}")));
+                line(&o, &json!({"event": "notice", "text": t}));
             }
         };
         if sel.provider == "claude-code" {
@@ -1948,18 +2109,20 @@ mod tenant_tests {
         let admin = fresh(false);
         let url = tiny_model_server();
         let ask = |v: Value| talk(with_tenant(v, &admin), true).remove(0);
+        // a custom provider of the person's own: its name, format, address and key
+        let cid = ask(json!({"op": "custom_provider_add", "name": "My router", "format": "chat", "base_url": url, "key": "k-1"}))["id"].as_str().unwrap().to_string();
+        assert_eq!(cid, "custom:my-router");
         // providers say which ones need an address, with their default
         let r = ask(json!({"op": "providers"}));
         let find = |id: &str| r["providers"].as_array().unwrap().iter().find(|p| p["id"] == id).unwrap().clone();
-        assert_eq!((find("custom")["needs_url"].clone(), find("ollama")["needs_url"].clone(), find("openai")["needs_url"].clone()), (json!(true), json!(true), json!(false)));
+        assert_eq!((find(&cid)["needs_url"].clone(), find("ollama")["needs_url"].clone(), find("openai")["needs_url"].clone()), (json!(true), json!(true), json!(false)));
         assert_eq!(find("openai")["default_url"], "https://api.openai.com/v1");
         // select stores the address (and returns it); an empty one resets it; a bad one is refused
-        let r = ask(json!({"op": "select", "provider": "custom", "model": "m1", "base_url": url}));
+        let r = ask(json!({"op": "select", "provider": cid, "model": "m1", "base_url": url}));
         assert_eq!((r["base_url"].as_str(), r["model"].as_str()), (Some(url.as_str()), Some("m1")), "{r}");
         assert!(ask(json!({"op": "select", "base_url": "ftp://nope"}))["error"].as_str().unwrap().contains("http"));
-        assert_eq!(find_in(&ask(json!({"op": "providers"})), "custom")["base_url"], json!(url));
+        assert_eq!(find_in(&ask(json!({"op": "providers"})), &cid)["base_url"], json!(url));
         // models: with the saved address, and with one that is only tried (not saved)
-        crate::tenant::scope(&admin, || crate::ai::keys::set("custom", "k-1").unwrap());
         let r = ask(json!({"op": "models"}));
         assert_eq!((r["models"].clone(), r["current"].clone(), r["base_url"].clone()), (json!(["m1", "m2"]), json!("m1"), json!(url)), "{r}");
         assert!(r.get("error").is_none());
@@ -1970,7 +2133,7 @@ mod tenant_tests {
         assert!(r.get("error").is_some() && r["base_url"] == "http://127.0.0.1:1/v1");
         let r = ask(json!({"op": "models", "base_url": "not an address"}));
         assert!(r["error"].as_str().unwrap().contains("must start with http"), "{r}");
-        assert_eq!(find_in(&ask(json!({"op": "providers"})), "custom")["base_url"], json!(url), "trying an address does not save it");
+        assert_eq!(find_in(&ask(json!({"op": "providers"})), &cid)["base_url"], json!(url), "trying an address does not save it");
         // the connection test: a model that answers, an address that does not
         let r = ask(json!({"op": "model_test", "model": "m1"}));
         assert_eq!(r["works"], true, "{r}");
@@ -1989,7 +2152,7 @@ mod tenant_tests {
         let p = &r["profiles"][0];
         assert_eq!((p["base_url"].clone(), p["pinned"].clone()), (json!("http://127.0.0.1:2/v1"), json!(["m2"])), "{r}");
         assert!(p["updated"].as_u64().unwrap() > 1);
-        assert_eq!(find_in(&ask(json!({"op": "providers"})), "custom")["base_url"], "http://127.0.0.1:2/v1");
+        assert_eq!(find_in(&ask(json!({"op": "providers"})), &cid)["base_url"], "http://127.0.0.1:2/v1");
         assert!(ask(json!({"op": "profile_update", "id": id, "base_url": "gopher://x"}))["error"].is_string());
         assert!(ask(json!({"op": "profile_update", "id": "nope"}))["error"].is_string());
         // hidden providers: set, read back, and the providers list says so
@@ -2019,7 +2182,7 @@ mod tenant_tests {
         assert!(r["error"].as_str().is_some_and(|e| !e.contains("sk-real")), "{r}");
         let p = providers::find("openai").unwrap();
         assert!(p.key_fits("https://api.openai.com/v1") && p.key_fits("") && !p.key_fits("https://evil.example/v1") && !p.key_fits("https://api.openai.com.evil.example/v1") && !p.key_fits("https://api.openai.com@evil.example/v1"));
-        assert!(providers::find("custom").unwrap().key_fits("https://anything.example/v1"));
+        assert!(providers::find("custom:t-chat").unwrap().key_fits("https://anything.example/v1"));
         // a profile that points elsewhere does not get the provider's shared key
         let mut sel = Selection::load();
         sel.provider = "openai".into();
@@ -2029,12 +2192,13 @@ mod tenant_tests {
         sel.base_urls.remove("openai");
         crate::tenant::scope(&admin, || assert_eq!(crate::ai::profiles::get_key(&sel, "openai").as_deref(), Some("sk-real")));
         // selecting another provider leaves the active profile alone instead of rewriting it
-        ask(json!({"op": "select", "provider": "custom", "model": "m", "base_url": "http://127.0.0.1:9/v1"}));
+        let cid = ask(json!({"op": "custom_provider_add", "name": "Work gateway", "format": "chat", "base_url": "http://127.0.0.1:9/v1"}))["id"].as_str().unwrap().to_string();
+        ask(json!({"op": "select", "provider": cid, "model": "m"}));
         let id = ask(json!({"op": "profile_create", "name": "Work"}))["id"].as_str().unwrap().to_string();
         ask(json!({"op": "select", "provider": "ollama", "model": "z"}));
         let r = ask(json!({"op": "profiles"}));
         let work = r["profiles"].as_array().unwrap().iter().find(|p| p["id"] == json!(id)).unwrap().clone();
-        assert_eq!((work["provider"].clone(), work["model"].clone()), (json!("custom"), json!("m")), "{r}");
+        assert_eq!((work["provider"].clone(), work["model"].clone()), (json!(cid), json!("m")), "{r}");
         assert!(r["active"].is_null(), "{r}");
     }
 
@@ -2048,51 +2212,95 @@ mod tenant_tests {
         let t = fresh(true);
         let ask = |v: Value| talk(with_tenant(v, &t), true).remove(0);
         for bad in ["http://127.0.0.1:8000/v1", "https://10.0.0.5/v1", "http://api.example.com/v1"] {
-            let r = ask(json!({"op": "select", "provider": "custom", "base_url": bad}));
+            let r = ask(json!({"op": "custom_provider_add", "name": "Mine", "base_url": bad}));
             assert!(r["error"].as_str().unwrap().contains("public https"), "{bad}: {r}");
-            let r = ask(json!({"op": "models", "provider": "custom", "base_url": bad}));
+            let r = ask(json!({"op": "custom_provider_test", "format": "chat", "base_url": bad, "model": "m"}));
+            assert!(r["error"].as_str().unwrap().contains("public https"), "{bad}: {r}");
+        }
+        let cid = ask(json!({"op": "custom_provider_add", "name": "Mine", "base_url": "https://8.8.8.8/v1"}))["id"].as_str().unwrap().to_string();
+        // a later change of the address is refused the same way
+        for bad in ["http://127.0.0.1:8000/v1", "https://10.0.0.5/v1", "http://api.example.com/v1"] {
+            let r = ask(json!({"op": "custom_provider_update", "id": cid, "base_url": bad}));
+            assert!(r["error"].as_str().unwrap().contains("public https"), "{bad}: {r}");
+            let r = ask(json!({"op": "select", "provider": cid, "base_url": bad}));
+            assert!(r["error"].as_str().unwrap().contains("public https"), "{bad}: {r}");
+            let r = ask(json!({"op": "models", "provider": cid, "base_url": bad}));
             assert_eq!(r["models"], json!([]));
             assert!(r["error"].as_str().unwrap().contains("public https"), "{bad}: {r}");
-            let r = ask(json!({"op": "model_test", "provider": "custom", "base_url": bad, "model": "m"}));
+            let r = ask(json!({"op": "model_test", "provider": cid, "base_url": bad, "model": "m"}));
             assert_eq!(r["works"], false, "{r}");
         }
-        assert_eq!(ask(json!({"op": "select", "provider": "custom", "base_url": "https://8.8.8.8/v1"}))["base_url"], "https://8.8.8.8/v1");
+        assert_eq!(find_in(&ask(json!({"op": "providers"})), &cid)["base_url"], "https://8.8.8.8/v1");
         assert!(ask(json!({"op": "model_test", "provider": "claude-code"}))["error"].as_str().unwrap().contains("not available"));
         // the same refusal for a profile's address
+        assert_eq!(ask(json!({"op": "select", "provider": cid, "model": "m"}))["provider"], json!(cid));
         let id = ask(json!({"op": "profile_create", "name": "P"}))["id"].as_str().unwrap().to_string();
         assert!(ask(json!({"op": "profile_update", "id": id, "base_url": "http://192.168.1.2/v1"}))["error"].as_str().unwrap().contains("public https"));
     }
 
     #[test]
-    fn the_provider_list_has_the_three_custom_endpoints_and_the_api_format_extras() {
+    fn the_provider_list_has_the_named_custom_providers_and_the_api_format_extras() {
         let _g = lock();
         let admin = fresh(false);
         let ask = |v: Value| talk(with_tenant(v, &admin), true).remove(0);
         let r = ask(json!({"op": "providers"}));
-        let names: Vec<(String, String)> = ["custom", "custom-responses", "custom-claude"].iter().map(|id| (id.to_string(), find_in(&r, id)["name"].as_str().unwrap().to_string())).collect();
-        assert_eq!(names, [
-            ("custom".to_string(), "Custom endpoint: OpenAI Chat (/v1/chat/completions)".to_string()),
-            ("custom-responses".to_string(), "Custom endpoint: OpenAI Responses (/v1/responses)".to_string()),
-            ("custom-claude".to_string(), "Custom endpoint: Claude format (/v1/messages)".to_string()),
-        ]);
-        for (id, fmt) in [("custom", "chat"), ("custom-responses", "responses"), ("custom-claude", "claude")] {
+        // nothing custom until the person adds one: no fixed "custom" entries any more
+        assert!(r["providers"].as_array().unwrap().iter().all(|p| p["custom"] == json!(false) && p["id"] != "custom"), "{r}");
+        let mut ids = Vec::new();
+        for (name, fmt, url) in [("My router", "chat", "http://127.0.0.1:1001/v1"), ("Work gateway", "responses", "http://127.0.0.1:1002/v1"), ("Home Ollama", "claude", "http://127.0.0.1:1003/v1")] {
+            let r = ask(json!({"op": "custom_provider_add", "name": name, "format": fmt, "base_url": url}));
+            assert!(r["error"].is_null(), "{r}");
+            ids.push(r["id"].as_str().unwrap().to_string());
+        }
+        assert_eq!(ids, ["custom:my-router", "custom:work-gateway", "custom:home-ollama"]);
+        let r = ask(json!({"op": "providers"}));
+        for ((id, fmt), name) in ids.iter().zip(["chat", "responses", "claude"]).zip(["My router", "Work gateway", "Home Ollama"]) {
             let p = find_in(&r, id);
-            assert_eq!((p["needs_url"].clone(), p["custom"].clone(), p["format"].clone(), p["takes_format"].clone(), p["has_key"].clone()), (json!(true), json!(true), json!(fmt), json!(false), json!(false)), "{id}");
+            assert_eq!((p["name"].clone(), p["needs_url"].clone(), p["custom"].clone(), p["group"].clone(), p["format"].clone(), p["takes_format"].clone(), p["has_key"].clone()), (json!(name), json!(true), json!(true), json!("custom"), json!(fmt), json!(false), json!(false)), "{id}");
         }
         assert_eq!((find_in(&r, "openai")["takes_format"].clone(), find_in(&r, "openai")["custom"].clone(), find_in(&r, "openai")["format"].clone()), (json!(true), json!(false), json!("chat")));
         assert_eq!(find_in(&r, "anthropic")["format"], "claude");
         assert_eq!(r["formats"].as_array().unwrap().iter().map(|f| f["id"].as_str().unwrap()).collect::<Vec<_>>(), ["chat", "responses", "claude"]);
-        // a key typed for one custom endpoint is that endpoint's own
-        assert!(ask(json!({"op": "set_key", "provider": "custom-responses", "key": "sk-resp-1"}))["error"].is_null());
+        // a key typed for one custom provider is that provider's own
+        assert!(ask(json!({"op": "select", "provider": ids[1], "model": "m"}))["error"].is_null());
+        assert!(ask(json!({"op": "set_key", "provider": ids[1], "key": "sk-resp-1"}))["error"].is_null());
         let r = ask(json!({"op": "providers"}));
-        assert_eq!((find_in(&r, "custom-responses")["has_key"].clone(), find_in(&r, "custom")["has_key"].clone()), (json!(true), json!(false)));
-        // selecting each keeps its own address
-        for (id, url) in [("custom", "http://127.0.0.1:1001/v1"), ("custom-responses", "http://127.0.0.1:1002/v1"), ("custom-claude", "http://127.0.0.1:1003/v1")] {
-            let r = ask(json!({"op": "select", "provider": id, "model": "m", "base_url": url}));
-            assert_eq!((r["provider"].clone(), r["base_url"].clone()), (json!(id), json!(url)), "{r}");
+        assert_eq!((find_in(&r, &ids[1])["has_key"].clone(), find_in(&r, &ids[0])["has_key"].clone()), (json!(true), json!(false)));
+        // each keeps its own address, and the current one is the chosen one
+        assert_eq!((find_in(&r, &ids[0])["base_url"].clone(), find_in(&r, &ids[2])["base_url"].clone()), (json!("http://127.0.0.1:1001/v1"), json!("http://127.0.0.1:1003/v1")));
+        assert_eq!(r["current"], json!(ids[1]));
+        // the list op, update (a rename changes the name and not the id), the format and the address
+        let r = ask(json!({"op": "custom_provider_update", "id": ids[0], "name": "Fast router", "format": "responses"}));
+        assert_eq!((r["id"].clone(), r["custom_provider"]["name"].clone(), r["custom_provider"]["format"].clone()), (json!(ids[0]), json!("Fast router"), json!("responses")), "{r}");
+        let l = ask(json!({"op": "custom_provider_list"}));
+        assert_eq!(l["custom_providers"].as_array().unwrap().len(), 3);
+        // the name rules: unique (also in another case), 1..40 characters, no control characters
+        for bad in ["", "   ", "x".repeat(41).as_str(), "bad\nname", "work GATEWAY", "fast router"] {
+            let r = ask(json!({"op": "custom_provider_add", "name": bad, "base_url": "http://127.0.0.1:1009/v1"}));
+            assert!(r["error"].is_string(), "{bad:?}: {r}");
         }
+        assert!(ask(json!({"op": "custom_provider_add", "name": "x".repeat(40), "base_url": "http://127.0.0.1:1009/v1"}))["error"].is_null());
+        assert!(ask(json!({"op": "custom_provider_add", "name": "Mine", "format": "grpc", "base_url": "http://127.0.0.1:1009/v1"}))["error"].as_str().unwrap().contains("chat, responses, claude"));
+        // two names that make the same slug get two ids, never one shared key
+        let a = ask(json!({"op": "custom_provider_add", "name": "A/B", "base_url": "http://127.0.0.1:1010/v1", "key": "ka"}))["id"].as_str().unwrap().to_string();
+        let b = ask(json!({"op": "custom_provider_add", "name": "A B", "base_url": "http://127.0.0.1:1011/v1", "key": "kb"}))["id"].as_str().unwrap().to_string();
+        assert_ne!(a, b);
+        crate::tenant::scope(&admin, || assert_eq!((crate::ai::keys::get(&a).as_deref(), crate::ai::keys::get(&b).as_deref()), (Some("ka"), Some("kb"))));
+        // a changed address drops the key typed for the old one
+        let r = ask(json!({"op": "custom_provider_update", "id": a, "base_url": "http://127.0.0.1:1012/v1"}));
+        assert!(r["error"].is_null(), "{r}");
+        crate::tenant::scope(&admin, || assert_eq!(crate::ai::keys::get(&a), None));
+        // delete needs a confirm; then the key, the profiles of it and the choice are gone
+        let id = ask(json!({"op": "profile_create", "name": "On B"}))["id"].as_str().unwrap().to_string();
+        assert!(ask(json!({"op": "custom_provider_remove", "id": ids[1]}))["error"].as_str().unwrap().contains("Confirm"));
+        let r = ask(json!({"op": "custom_provider_remove", "id": ids[1], "confirm": true}));
+        assert!(r["error"].is_null(), "{r}");
+        crate::tenant::scope(&admin, || assert_eq!(crate::ai::keys::get(&ids[1]), None));
         let r = ask(json!({"op": "providers"}));
-        assert_eq!((find_in(&r, "custom")["base_url"].clone(), find_in(&r, "custom-claude")["base_url"].clone()), (json!("http://127.0.0.1:1001/v1"), json!("http://127.0.0.1:1003/v1")));
+        assert!(r["providers"].as_array().unwrap().iter().all(|p| p["id"] != json!(ids[1])) && r["current"] == "");
+        let profs = ask(json!({"op": "profiles"}));
+        assert!(profs["profiles"].as_array().unwrap().iter().all(|p| p["provider"] != json!(ids[1])) || id.is_empty(), "{profs}");
+        assert!(ask(json!({"op": "custom_provider_remove", "id": ids[1], "confirm": true}))["error"].is_string());
     }
 
     #[test]
@@ -2111,9 +2319,10 @@ mod tenant_tests {
         assert!(ask(json!({"op": "select", "api_format": "grpc"}))["error"].as_str().unwrap().contains("chat, responses, claude"));
         assert_eq!(ask(json!({"op": "select", "api_format": ""}))["api_format"], Value::Null);
         assert_eq!(find_in(&ask(json!({"op": "providers"})), "openai")["api_format"], Value::Null);
-        // the API format of a custom endpoint is the endpoint itself
-        let r = ask(json!({"op": "select", "provider": "custom", "api_format": "responses"}));
-        assert!(r["error"].as_str().unwrap().contains("Custom endpoint"), "{r}");
+        // the API format of a custom provider is part of it: it is changed in the provider's settings
+        let cid = ask(json!({"op": "custom_provider_add", "name": "Mine", "base_url": "http://127.0.0.1:1/v1"}))["id"].as_str().unwrap().to_string();
+        let r = ask(json!({"op": "select", "provider": cid, "api_format": "responses"}));
+        assert!(r["error"].as_str().unwrap().contains("custom provider"), "{r}");
         // the key still goes only to the provider's own address, whatever the format
         let r = ask(json!({"op": "select", "provider": "openai", "api_format": "responses", "base_url": "https://evil.example/v1"}));
         assert!(r["error"].as_str().unwrap().contains("own address"), "{r}");
@@ -2130,12 +2339,19 @@ mod tenant_tests {
             ("GET", "/v1/models") => Answer::json(200, json!({"data": [{"id": "r1"}, {"id": "r2"}]})),
             _ => Answer::json(404, json!({"error": {"message": "Not Found"}})),
         });
-        let r = ask(json!({"op": "model_test", "provider": "custom", "base_url": m.url, "model": "r1"}));
+        // a provider saved with the wrong format: Test says which format the server speaks
+        let chat = ask(json!({"op": "custom_provider_add", "name": "Router", "format": "chat", "base_url": m.url}))["id"].as_str().unwrap().to_string();
+        let r = ask(json!({"op": "custom_provider_test", "id": chat, "model": "r1"}));
         assert_eq!(r["works"], false, "{r}");
         assert!(r["message"].as_str().unwrap().contains("This server speaks the OpenAI Responses format"), "{r}");
-        let r = ask(json!({"op": "model_test", "provider": "custom-responses", "base_url": m.url, "model": "r1"}));
+        // the same test of a provider still being typed, in the right format
+        let r = ask(json!({"op": "custom_provider_test", "format": "responses", "base_url": m.url, "model": "r1"}));
         assert_eq!(r["works"], true, "{r}");
-        let r = ask(json!({"op": "models", "provider": "custom-responses", "base_url": m.url}));
+        // after changing its API format the saved provider works and lists the models
+        assert!(ask(json!({"op": "custom_provider_update", "id": chat, "format": "responses"}))["error"].is_null());
+        let r = ask(json!({"op": "model_test", "provider": chat, "model": "r1"}));
+        assert_eq!(r["works"], true, "{r}");
+        let r = ask(json!({"op": "models", "provider": chat}));
         assert_eq!(r["models"], json!(["r1", "r2"]), "{r}");
         // a hosted provider tried with an API format, not saved
         let r = ask(json!({"op": "model_test", "provider": "openai", "api_format": "responses", "base_url": "http://127.0.0.1:1/v1", "model": "m"}));
@@ -2144,22 +2360,23 @@ mod tenant_tests {
     }
 
     #[test]
-    fn a_restricted_account_gets_the_same_address_rules_for_all_three_custom_endpoints() {
+    fn a_restricted_account_gets_the_same_address_rules_for_all_three_formats_of_a_custom_provider() {
         let _g = lock();
         let t = fresh(true);
         let ask = |v: Value| talk(with_tenant(v, &t), true).remove(0);
-        for id in ["custom", "custom-responses", "custom-claude"] {
+        for fmt in ["chat", "responses", "claude"] {
             for bad in ["http://127.0.0.1:8000/v1", "https://10.0.0.5/v1", "http://api.example.com/v1", "https://localhost/v1"] {
-                let r = ask(json!({"op": "select", "provider": id, "base_url": bad}));
-                assert!(r["error"].as_str().unwrap().contains("public https"), "{id} {bad}: {r}");
-                let r = ask(json!({"op": "models", "provider": id, "base_url": bad}));
-                assert!(r["error"].as_str().unwrap().contains("public https"), "{id} {bad}: {r}");
-                let r = ask(json!({"op": "model_test", "provider": id, "base_url": bad, "model": "m"}));
-                assert_eq!(r["works"], false, "{id} {bad}: {r}");
-                assert!(r["message"].as_str().unwrap().contains("public https"), "{id} {bad}: {r}");
+                let r = ask(json!({"op": "custom_provider_add", "name": format!("P {fmt}"), "format": fmt, "base_url": bad}));
+                assert!(r["error"].as_str().unwrap().contains("public https"), "{fmt} {bad}: {r}");
+                let r = ask(json!({"op": "custom_provider_test", "format": fmt, "base_url": bad, "model": "m"}));
+                assert!(r["error"].as_str().unwrap().contains("public https"), "{fmt} {bad}: {r}");
             }
-            assert_eq!(ask(json!({"op": "select", "provider": id, "base_url": "https://8.8.8.8/v1"}))["base_url"], "https://8.8.8.8/v1", "{id}");
+            let r = ask(json!({"op": "custom_provider_add", "name": format!("P {fmt}"), "format": fmt, "base_url": "https://8.8.8.8/v1"}));
+            assert!(r["error"].is_null(), "{fmt}: {r}");
         }
+        // an account of the restricted person keeps its own key and the same address rule
+        let r = ask(json!({"op": "account_add", "provider": "openai", "name": "Work", "key": "sk-w", "base_url": "http://127.0.0.1:8000/v1"}));
+        assert!(r["error"].is_string(), "{r}");
         // the API format hint of a hosted provider does not open a private address either
         let r = ask(json!({"op": "select", "provider": "openai", "api_format": "responses", "base_url": "http://127.0.0.1:8000/v1"}));
         assert!(r["error"].is_string(), "{r}");

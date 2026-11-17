@@ -173,19 +173,22 @@ class ZoApi(
   // ------------------------------------------------------------ 4.2 models, keys, profiles
 
   suspend fun providers(): ProvidersResp = opAs("providers", true)
-  suspend fun models(provider: String? = null, baseUrl: String? = null, apiFormat: String? = null): ModelsResp = opAs("models") {
+  suspend fun models(provider: String? = null, baseUrl: String? = null, apiFormat: String? = null, account: String? = null): ModelsResp = opAs("models") {
+    if (account != null) put("account", account)
     if (provider != null) put("provider", provider)
     if (baseUrl != null) put("base_url", baseUrl)
     if (apiFormat != null) put("api_format", apiFormat)
   }
-  suspend fun modelTest(provider: String? = null, model: String? = null, baseUrl: String? = null, apiFormat: String? = null): ModelTestResp = opAs("model_test") {
+  suspend fun modelTest(provider: String? = null, model: String? = null, baseUrl: String? = null, apiFormat: String? = null, account: String? = null): ModelTestResp = opAs("model_test") {
+    if (account != null) put("account", account)
     if (provider != null) put("provider", provider)
     if (model != null) put("model", model)
     if (baseUrl != null) put("base_url", baseUrl)
     if (apiFormat != null) put("api_format", apiFormat)
   }
   /** [apiFormat]: chat, responses or claude for a hosted OpenAI-compatible provider; "" goes back to its normal format. */
-  suspend fun select(provider: String? = null, model: String? = null, effort: String? = null, baseUrl: String? = null, apiFormat: String? = null): SelectResp = opAs("select") {
+  suspend fun select(provider: String? = null, model: String? = null, effort: String? = null, baseUrl: String? = null, apiFormat: String? = null, account: String? = null): SelectResp = opAs("select") {
+    if (account != null) put("account", account)
     if (apiFormat != null) put("api_format", apiFormat)
     if (provider != null) put("provider", provider)
     if (model != null) put("model", model)
@@ -193,7 +196,42 @@ class ZoApi(
     if (baseUrl != null) put("base_url", baseUrl)
   }
   /** The key is sent once and never logged or kept. */
-  suspend fun setKey(provider: String, key: String) { op("set_key") { put("provider", provider); put("key", key) } }
+  suspend fun setKey(provider: String, key: String, account: String? = null) { op("set_key") { put("provider", provider); put("key", key); if (account != null) put("account", account) } }
+
+  // named custom providers: [format] is chat, responses or claude; an empty [key] keeps the saved one
+  suspend fun customProviderAdd(name: String, format: String, baseUrl: String, key: String = "", defaultModel: String = ""): CustomProviderResp = opAs("custom_provider_add") {
+    put("name", name); put("format", format); put("base_url", baseUrl); put("key", key); put("default_model", defaultModel)
+  }
+  suspend fun customProviderUpdate(id: String, name: String? = null, format: String? = null, baseUrl: String? = null, key: String? = null, defaultModel: String? = null): CustomProviderResp = opAs("custom_provider_update") {
+    put("id", id)
+    if (name != null) put("name", name)
+    if (format != null) put("format", format)
+    if (baseUrl != null) put("base_url", baseUrl)
+    if (key != null) put("key", key)
+    if (defaultModel != null) put("default_model", defaultModel)
+  }
+  /** Tests a saved provider ([id]) or one still being typed ([format] and [baseUrl]); the typed [key] goes only to that address. */
+  suspend fun customProviderTest(id: String? = null, format: String? = null, baseUrl: String? = null, key: String? = null, model: String? = null): ModelTestResp = opAs("custom_provider_test") {
+    if (id != null) put("id", id)
+    if (format != null) put("format", format)
+    if (baseUrl != null) put("base_url", baseUrl)
+    if (key != null) put("key", key)
+    if (model != null) put("model", model)
+  }
+  suspend fun customProviderRemove(id: String) { op("custom_provider_remove") { put("id", id); put("confirm", true) } }
+
+  // several API key accounts per provider
+  suspend fun accountAdd(provider: String, name: String, key: String, baseUrl: String? = null): AccountsResp = opAs("account_add") {
+    put("provider", provider); put("name", name); put("key", key); if (baseUrl != null) put("base_url", baseUrl)
+  }
+  suspend fun accountRename(provider: String, id: String, name: String, key: String? = null, baseUrl: String? = null): AccountsResp = opAs("account_rename") {
+    put("provider", provider); put("id", id); put("name", name); if (key != null) put("key", key); if (baseUrl != null) put("base_url", baseUrl)
+  }
+  suspend fun accountHide(provider: String, id: String, hidden: Boolean): AccountsResp = opAs("account_hide") { put("provider", provider); put("id", id); put("hidden", hidden) }
+  suspend fun accountRemove(provider: String, id: String): AccountsResp = opAs("account_remove") { put("provider", provider); put("id", id); put("confirm", true) }
+  suspend fun accountTest(provider: String, id: String, model: String? = null): ModelTestResp = opAs("account_test") {
+    put("provider", provider); put("id", id); if (model != null) put("model", model)
+  }
   suspend fun profiles(): ProfilesResp = opAs("profiles", true)
   suspend fun profileCreate(name: String): String = opAs<IdResp>("profile_create") { put("name", name) }.id
   suspend fun profileUse(id: String): ProfileUseResp = opAs("profile_use") { put("id", id) }
@@ -204,7 +242,8 @@ class ZoApi(
   suspend fun profileDelete(id: String) { op("profile_delete") { put("id", id) } }
   suspend fun profilePin(id: String, model: String, on: Boolean) { op("profile_pin") { put("id", id); put("model", model); put("on", on) } }
   suspend fun settingsGet(): SettingsResp = opAs("settings_get", true)
-  suspend fun settingsSet(hiddenProviders: List<String>? = null, providerPrefs: Map<String, ProviderPref>? = null): SettingsResp = opAs("settings_set") {
+  suspend fun settingsSet(hiddenProviders: List<String>? = null, providerPrefs: Map<String, ProviderPref>? = null, rotateOnLimit: Boolean? = null): SettingsResp = opAs("settings_set") {
+    if (rotateOnLimit != null) put("rotate_on_limit", rotateOnLimit)
     if (hiddenProviders != null) putJsonArray("hidden_providers") { hiddenProviders.forEach { add(JsonPrimitive(it)) } }
     if (providerPrefs != null) putJsonObject("provider_prefs") { providerPrefs.forEach { (k, v) -> putJsonObject(k) { if (v.order != null) put("order", v.order) } } }
   }

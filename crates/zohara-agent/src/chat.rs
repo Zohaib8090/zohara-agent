@@ -881,6 +881,10 @@ impl Ctl {
                         }
                     }
                     Ok(Msg::Ev(Event::Usage(u))) => me.last_usage.set(Some(u)),
+                    // a short notice, for example that the next account of the provider took over after a rate limit
+                    Ok(Msg::Ev(Event::Notice(t))) => {
+                        me.add(&format!("ℹ {t}"), "msg-tool-out");
+                    }
                     Ok(Msg::Ev(Event::ToolStart { name, summary })) => {
                         thinking.set_visible(false);
                         let detail = summary.lines().nth(1).unwrap_or("");

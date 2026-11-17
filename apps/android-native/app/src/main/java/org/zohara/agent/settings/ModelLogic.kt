@@ -1,6 +1,7 @@
 package org.zohara.agent.settings
 
 import java.net.URI
+import org.zohara.agent.core.net.AccountInfo
 import org.zohara.agent.core.net.ModelsResp
 import org.zohara.agent.core.net.Profile
 import org.zohara.agent.core.net.ProfilesResp
@@ -11,10 +12,10 @@ object ModelLogic {
   private val LOCAL_IDS = setOf("ollama", "lmstudio", "llamacpp", "vllm", "sglang", "claude-code")
   private val MAJOR_IDS = setOf("anthropic", "openai", "gemini")
 
-  /** The three "Custom endpoint" providers, one per wire format. An older server does not send `custom`, so the ids are known too. */
-  private val CUSTOM_IDS = setOf("custom", "custom-responses", "custom-claude")
+  /** The three fixed "Custom endpoint" providers of an older server (one per wire format; a current server has named ones, `custom:<slug>`). */
+  private val OLD_CUSTOM_IDS = setOf("custom", "custom-responses", "custom-claude")
 
-  fun isCustom(p: ProviderInfo): Boolean = p.custom || p.id in CUSTOM_IDS
+  fun isCustom(p: ProviderInfo): Boolean = p.custom || p.id.startsWith("custom:") || p.id in OLD_CUSTOM_IDS
 
   /** A custom endpoint is nothing without its address, whatever an older server says in `needs_url`. */
   fun needsAddress(p: ProviderInfo): Boolean = p.needsUrl || isCustom(p)
@@ -40,11 +41,11 @@ object ModelLogic {
   fun chosenFormat(p: ProviderInfo): ApiFormat? = if (p.takesFormat) formatById(p.apiFormat) ?: formatOf(p) else null
 
   /**
-   * The format a server answer points to: "This server speaks the OpenAI Responses format: pick "Custom endpoint: OpenAI Responses"". Null when
-   * the message names none or names the one in use ([current]).
+   * The format a server answer points to: "This server speaks the OpenAI Responses format: set the API format of this provider to OpenAI
+   * Responses." (or "...try OpenAI Responses or Claude format as the API format..."). Null when the message names none or names the one in use ([current]).
    */
   fun hintFormat(message: String, current: ApiFormat?): ApiFormat? {
-    val m = Regex("Custom endpoint: (OpenAI Chat|OpenAI Responses|Claude format)").find(message) ?: return null
+    val m = Regex("(?:API format (?:of this provider )?to|try) (OpenAI Chat|OpenAI Responses|Claude format)").find(message) ?: return null
     return FORMATS.firstOrNull { it.name == m.groupValues[1] }?.takeIf { it != current }
   }
 
@@ -75,8 +76,39 @@ object ModelLogic {
     Group("Popular Providers", list.filter { it.id in MAJOR_IDS }),
     Group("Cloud & Open-Weight", list.filter { it.id !in MAJOR_IDS && !isCustom(it) && !isLocal(it) }),
     Group("Local Models (This Computer)", list.filter { it.id !in MAJOR_IDS && !isCustom(it) && isLocal(it) }),
-    Group("Custom Endpoint", list.filter { isCustom(it) }),
+    Group("Custom providers", list.filter { isCustom(it) }),
   ).filter { it.items.isNotEmpty() }
+
+  /** The accounts the pickers offer: the ones that are not hidden, and always the one in use ([keep]). */
+  fun shownAccounts(p: ProviderInfo, keep: String?): List<AccountInfo> = p.accounts.filter { !it.hidden || it.id == keep }
+
+  /** "Groq · Groq 1": a provider with one of its accounts; just the provider's name when it has only one account (or the account is unknown). */
+  fun accountLabel(p: ProviderInfo, accountId: String?): String {
+    val name = p.name.ifBlank { p.id }
+    if (p.accounts.size < 2) return name
+    val a = p.accounts.firstOrNull { it.id == (accountId ?: "default").ifBlank { "default" } } ?: p.accounts.first()
+    return "$name · ${a.name}"
+  }
+
+  /** Does the account have a key? A provider the server sent no accounts for (an older server) falls back to the provider's own flag. */
+  fun accountHasKey(p: ProviderInfo, accountId: String?): Boolean =
+    p.accounts.firstOrNull { it.id == (accountId ?: "default").ifBlank { "default" } }?.hasKey ?: p.hasKey
+
+  /** The account in use for the sheet: [wanted] when the provider has it, else the Default account. */
+  fun accountFor(p: ProviderInfo?, wanted: String?): String =
+    if (p != null && p.takesAccounts && wanted != null && p.accounts.any { it.id == wanted }) wanted else "default"
+
+  /** A name of a custom provider or an account: 1..40 characters, no control characters. "" when fine, else the sentence to show. */
+  fun validateName(name: String, what: String, existing: Collection<String> = emptyList()): String {
+    val n = name.trim()
+    return when {
+      n.isEmpty() -> "Give the $what a name."
+      n.length > 40 -> "The $what name can have at most 40 characters."
+      n.any { it.isISOControl() } -> "The $what name cannot have control characters."
+      existing.any { it.trim().equals(n, ignoreCase = true) } -> "There is already a $what named \"$n\"."
+      else -> ""
+    }
+  }
 
   /** The name of a provider in the picker: a tick after the ones that have a key (or need none). */
   fun providerLabel(p: ProviderInfo): String = p.name.ifBlank { p.id } + if (p.hasKey || isLocal(p)) " ✓" else ""
@@ -85,7 +117,12 @@ object ModelLogic {
 
   /** MODEL-12: the address the person sees prefilled: the saved one, only when it is not the normal one. */
   fun savedAddress(p: ProviderInfo?, currentProvider: String): String =
-    if (p != null && p.id == currentProvider && p.baseUrl.isNotBlank() && p.baseUrl != p.defaultUrl) p.baseUrl else ""
+    when {
+      p == null -> ""
+      isCustom(p) && p.id.startsWith("custom:") -> p.baseUrl
+      p.id == currentProvider && p.baseUrl.isNotBlank() && p.baseUrl != p.defaultUrl -> p.baseUrl
+      else -> ""
+    }
 
   /** MODEL-12: the hint under the address field. */
   fun addressHint(p: ProviderInfo?, restricted: Boolean): String = when {
@@ -121,7 +158,7 @@ object ModelLogic {
     host == "localhost" || host.startsWith("[") || !host.contains('.') || PRIVATE.containsMatchIn(host) ||
       host.endsWith(".local") || host.endsWith(".internal") || host.endsWith(".lan")
 
-  /** MODEL-25 validation of the add-endpoint sheet. */
+  /** MODEL-25 validation of the custom provider sheet. */
   fun validateNewEndpoint(address: String, restricted: Boolean): String {
     val u = address.trim()
     if (u.isEmpty()) return "Type the address first."
@@ -174,8 +211,8 @@ object ModelLogic {
   }
 
   /** MODEL-37: "<provider> · <model or 'no model yet'>[ · N pinned]". */
-  fun profileLine(p: Profile, providerName: String): String {
-    val base = providerName.ifBlank { p.provider } + " · " + p.model.ifBlank { "no model yet" }
+  fun profileLine(p: Profile, providerName: String, accountName: String? = null): String {
+    val base = providerName.ifBlank { p.provider } + (accountName?.let { " · $it" } ?: "") + " · " + p.model.ifBlank { "no model yet" }
     return if (p.pinned.isNotEmpty()) base + " · ${p.pinned.size} pinned" else base
   }
 
@@ -188,6 +225,7 @@ object ModelLogic {
 
   /** MODEL-29: the sub line of a provider switch. */
   fun providerSub(p: ProviderInfo, pins: Int, inUse: Boolean, claudeSignedIn: Boolean = true): String {
+    val extra = if (p.accounts.size > 1) " · ${p.accounts.size} accounts" else ""
     val base = when {
       p.id == "claude-code" -> "Uses your Claude Code sign-in"
       isLocal(p) -> "Runs on this computer, no key"
@@ -196,7 +234,7 @@ object ModelLogic {
       p.hasKey -> "Key saved"
       else -> "No key yet"
     }
-    return base + (if (pins > 0) " · $pins pinned" else "") + (if (inUse) " · in use, always shown" else "")
+    return base + extra + (if (pins > 0) " · $pins pinned" else "") + (if (inUse) " · in use, always shown" else "")
   }
 
   /** The pins of every profile, for MODEL-28. */
@@ -217,7 +255,7 @@ object ModelLogic {
   fun needsInUseNow(groups: List<MenuGroup>, activeProfile: String, currentModel: String): Boolean =
     currentModel.isNotBlank() && groups.none { it.profileId == activeProfile && currentModel in it.models }
 
-  fun cacheKey(provider: String, baseUrl: String) = provider + "|" + baseUrl.trim()
+  fun cacheKey(provider: String, baseUrl: String, account: String = "default") = provider + "|" + baseUrl.trim() + if (account == "default" || account.isBlank()) "" else "|acct:$account"
 
   /** Did the answer of `models` carry a list we can use (an empty list with no error means the provider returned none). */
   fun listMessage(r: ModelsResp): String = when {

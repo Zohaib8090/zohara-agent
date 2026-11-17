@@ -322,14 +322,26 @@ fn checked<'a>(kind: &'a str, id: &str) -> Result<&'a str, String> {
 
 // ---- keys: which API keys can travel, and when each was last changed here ----
 
-/// Only a provider's own key (`openrouter`) or a profile's (`openrouter@p1700000000000`) may travel: never the Claude Code or
-/// SSH entries, the sign-in credential or an MCP token.
+/// Only a provider's own key (`openrouter`), an account's (`groq:groq-2`, `custom:home:work`) or a profile's (`openrouter@p1700000000000`)
+/// may travel: never the Claude Code or SSH entries, the sign-in credential or an MCP token.
 pub fn syncable_key_id(id: &str) -> bool {
     let (prov, prof) = match id.split_once('@') {
         Some((a, b)) => (a, Some(b)),
         None => (id, None),
     };
-    providers::find(prov).is_some_and(|p| p.protocol != providers::Protocol::ClaudeCode) && prof.map_or(true, is_simple_id)
+    prof.map_or(true, is_simple_id) && provider_of_key(prov).is_some_and(|p| p.protocol != providers::Protocol::ClaudeCode)
+}
+
+/// The provider a key id belongs to: the id is a provider (`groq`, `custom:home`), or a provider and an account slug.
+fn provider_of_key(id: &str) -> Option<&'static providers::Provider> {
+    if let Some(p) = providers::find(id) {
+        return Some(p);
+    }
+    let (prov, acct) = id.rsplit_once(':')?;
+    if !crate::ai::custom::is_slug(acct) {
+        return None;
+    }
+    providers::find(prov).filter(|p| p.takes_accounts())
 }
 
 fn key_times_path() -> std::path::PathBuf {
@@ -376,7 +388,13 @@ pub(crate) fn key_touched(id: &str, cleared: bool) {
 
 /// Every id a key could be stored under here: each provider, and each profile's own.
 fn key_candidates() -> Vec<String> {
-    let mut v: Vec<String> = providers::all().iter().filter(|p| p.protocol != providers::Protocol::ClaudeCode).map(|p| p.id.to_string()).collect();
+    let mut v: Vec<String> = Vec::new();
+    for p in providers::listed().into_iter().filter(|p| p.protocol != providers::Protocol::ClaudeCode) {
+        v.push(p.id.to_string());
+        if p.takes_accounts() {
+            v.extend(crate::ai::accounts::extra(p.id).iter().map(|a| crate::ai::accounts::key_id(p.id, Some(&a.id))));
+        }
+    }
     for p in profiles::load() {
         if is_simple_id(&p.id) && providers::find(&p.provider).is_some_and(|pr| pr.protocol != providers::Protocol::ClaudeCode) {
             v.push(format!("{}@{}", p.provider, p.id));
@@ -400,7 +418,16 @@ pub fn get_doc(kind: &str, id: &str) -> Option<Value> {
             serde_json::to_value(p).unwrap_or(Value::Null)
         }),
         "settings" if id == SETTINGS_ID => {
-            let p = ui_prefs::load();
+            let mut p = ui_prefs::load();
+            // an address with a secret inside it stays on this computer, like a profile's
+            p.custom_providers.retain(|c| !address_carries_secret(&c.base_url));
+            for list in p.accounts.values_mut() {
+                for a in list.iter_mut() {
+                    if a.base_url.as_deref().is_some_and(address_carries_secret) {
+                        a.base_url = None;
+                    }
+                }
+            }
             (p.updated > 0).then(|| ui_prefs::doc(&p))
         }
         "mcp" if mcp_here() => mcp_client::load_servers()
@@ -442,7 +469,7 @@ fn check_profile_address(base_url: &str) -> Result<(), String> {
     }
     crate::ai::probe::check_address(base_url)?;
     if crate::tenant::is_restricted() {
-        crate::ai::agent::check_restricted_provider(providers::find("custom").ok_or("no custom provider")?, base_url).map_err(|e| format!("{NOT_FOR_ACCOUNT}{e}"))?;
+        crate::ai::agent::check_restricted_provider(providers::find("openai").ok_or("no provider")?, base_url).map_err(|e| format!("{NOT_FOR_ACCOUNT}{e}"))?;
     }
     if address_carries_secret(base_url) || base_url.split("://").nth(1).unwrap_or("").split(['/', '?', '#']).next().unwrap_or("").contains('@') {
         return Err("An address with a user name, password or key inside it is not synced (it would be stored as plain text). Put the key in the profile's key instead.".into());
@@ -460,6 +487,10 @@ fn check_profile(id: &str, p: &mut profiles::Profile) -> Result<(), String> {
     if p.name.is_empty() || !text_ok(&p.name, 100) || !text_ok(&p.model, 300) || p.effort.as_deref().is_some_and(|e| !text_ok(e, 20)) {
         return Err("The profile has a name, model or effort that is not allowed.".into());
     }
+    if let Some(r) = crate::ai::custom::legacy_instance(&p.provider, p.base_url.as_deref()) {
+        let restricted = crate::tenant::is_restricted();
+        p.provider = r.map_err(|e| if restricted { format!("{NOT_FOR_ACCOUNT}{e}") } else { e })?;
+    }
     let prov = providers::find(&p.provider).ok_or("The profile names a provider this version does not know.")?;
     if prov.protocol == providers::Protocol::ClaudeCode && crate::tenant::is_restricted() {
         return Err(format!("{NOT_FOR_ACCOUNT}Claude Code is not available to this account."));
@@ -470,7 +501,7 @@ fn check_profile(id: &str, p: &mut profiles::Profile) -> Result<(), String> {
     if let Some(u) = p.base_url.as_deref() {
         check_profile_address(u)?;
         if !prov.key_fits(u) {
-            return Err(format!("The profile's address is not {}'s own, so it is not taken in. Use a Custom endpoint for another address.", prov.name));
+            return Err(format!("The profile's address is not {}'s own, so it is not taken in. Add a custom provider for another address.", prov.name));
         }
         p.base_url = Some(u.trim().to_string()).filter(|u| !u.is_empty());
     }
@@ -527,6 +558,10 @@ pub fn put_doc(kind: &str, id: &str, doc: &Value) -> Result<bool, String> {
             }
             let p: ui_prefs::Prefs = serde_json::from_value(doc.clone()).map_err(bad)?;
             let p = ui_prefs::clean(p)?;
+            let secret_addr = |u: &str| address_carries_secret(u) || u.split("://").nth(1).unwrap_or("").split(['/', '?', '#']).next().unwrap_or("").contains('@');
+            if p.custom_providers.iter().any(|c| secret_addr(&c.base_url)) || p.accounts.values().flatten().any(|a| a.base_url.as_deref().is_some_and(secret_addr)) {
+                return Err("An address with a user name, password or key inside it is not synced (it would be stored as plain text).".into());
+            }
             if p.updated == 0 {
                 return Err("The preferences have no time.".into());
             }

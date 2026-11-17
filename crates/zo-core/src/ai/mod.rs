@@ -1,8 +1,10 @@
 //! The model side of Zohara Agent: providers, API keys, the wire formats and the tool-calling loop.
 
+pub mod accounts;
 pub mod agent;
 pub mod claude_code;
 pub mod context;
+pub mod custom;
 pub mod keys;
 pub mod memory_agent;
 #[cfg(test)]
@@ -35,6 +37,9 @@ pub struct Selection {
     /// How hard the model should think (low, medium, high, xhigh, max); none means the program's own default. Used by Claude Code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// The account of the chosen provider that is in use (its id; none = the Default account). See `accounts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     /// The saved profile in use (see `profiles`): it decides which API key is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
@@ -71,7 +76,15 @@ impl Selection {
         p.with_format(self.api_formats.get(p.id).map(String::as_str))
     }
 
+    /// The account in use for `provider_id` (only the chosen provider has one): none means the Default account.
+    pub fn account_for(&self, provider_id: &str) -> Option<&str> {
+        if self.provider == provider_id { self.account.as_deref().filter(|a| *a != accounts::DEFAULT_ID) } else { None }
+    }
+
     pub fn base_url_for(&self, p: &Provider) -> String {
+        if let Some(u) = self.account_for(p.id).and_then(|a| accounts::address_of(p.id, a)) {
+            return u;
+        }
         self.base_urls.get(p.id).filter(|u| !u.trim().is_empty()).cloned().unwrap_or_else(|| p.base_url.to_string())
     }
 }
@@ -82,12 +95,12 @@ mod tests {
 
     #[test]
     fn a_changed_base_url_wins_and_an_empty_one_is_ignored() {
-        let p = providers::find("custom").unwrap();
+        let p = providers::find("custom:t-chat").unwrap();
         let mut s = Selection::default();
         assert_eq!(s.base_url_for(p), p.base_url);
-        s.base_urls.insert("custom".into(), "http://10.0.0.5:9000/v1".into());
+        s.base_urls.insert("custom:t-chat".into(), "http://10.0.0.5:9000/v1".into());
         assert_eq!(s.base_url_for(p), "http://10.0.0.5:9000/v1");
-        s.base_urls.insert("custom".into(), "  ".into());
+        s.base_urls.insert("custom:t-chat".into(), "  ".into());
         assert_eq!(s.base_url_for(p), p.base_url);
     }
 
