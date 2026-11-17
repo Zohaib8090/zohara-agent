@@ -81,6 +81,10 @@ class TranscriptTest {
     assertEquals("Haiku 4.5", Transcript.niceName("claude-haiku-4-5-20251001"))
     assertEquals("Sonnet", Transcript.niceName("sonnet"))
     assertEquals("gpt-4o", Transcript.niceName("gpt-4o"))
+    // the same labels as the desktop catalog, for Claude Code only
+    assertEquals("Default (what Claude Code picks)", Transcript.niceName("default"))
+    assertEquals("Opus plans, Sonnet writes", Transcript.niceName("opusplan"))
+    for (n in listOf("default", "sonnet", "opus", "haiku", "fable", "opusplan")) assertEquals(n, Transcript.niceName(n, "ollama"))
     assertEquals("Choose a model", Transcript.pillText(false, "", ""))
     assertEquals("Claude", Transcript.pillText(true, "", "claude-code"))
     assertEquals("Opus 5.5", Transcript.pillText(true, "claude-opus-5-5", "claude-code"))

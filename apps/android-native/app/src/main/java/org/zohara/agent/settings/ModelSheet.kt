@@ -272,7 +272,11 @@ private fun ModelListSection(s: ModelSheetState, a: ModelSheetActions) {
     val items = ModelLogic.orderModels(split.first, pins, s.filter)
     val older = split.second
     var showOlder by remember(s.providerId) { mutableStateOf(false) }
-    val custom = ModelLogic.customOffer(s.models, s.filter)
+    // Claude Code: the catalog by family (newest first, the newest of a family Recommended), then any id typed by hand
+    val catalogMode = s.providerId == "claude-code" && s.catalog.isNotEmpty()
+    val catalogRows = if (catalogMode) ModelLogic.catalogRows(s.catalog, s.filter) else emptyList()
+    val typedId = if (catalogMode) ModelLogic.typedModelId(s.catalog, s.models, s.filter) else ""
+    val custom = if (catalogMode) "" else ModelLogic.customOffer(s.models, s.filter)
     Spacer(Modifier.size(8.dp))
     if (s.fetching) {
       Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 10.dp)) {
@@ -284,8 +288,19 @@ private fun ModelListSection(s: ModelSheetState, a: ModelSheetActions) {
       LazyColumn(
         Modifier.fillMaxWidth().heightIn(max = 260.dp).clip(ZoTheme.shapes.field).border(1.dp, c.line, ZoTheme.shapes.field),
       ) {
-        items(items, key = { it }) { m -> ModelRow(m, m == s.chosen, m in pins, a) }
-        if (older.isNotEmpty()) {
+        if (catalogMode) {
+          items(catalogRows, key = { r -> when (r) { is ModelLogic.CatalogRow.Header -> "h:${r.title}"; is ModelLogic.CatalogRow.Item -> "m:${r.model.id}" } }) { r ->
+            when (r) {
+              is ModelLogic.CatalogRow.Header -> Text(r.title.uppercase(), style = ZoTheme.type.fieldHint, color = c.dim, modifier = Modifier.fillMaxWidth().background(c.active).padding(horizontal = 14.dp, vertical = 6.dp))
+              is ModelLogic.CatalogRow.Item -> CatalogModelRow(r.model, r.model.id == s.chosen, r.model.id in pins, a)
+            }
+          }
+          item(key = "h:other") { Text("OTHER MODEL ID", style = ZoTheme.type.fieldHint, color = c.dim, modifier = Modifier.fillMaxWidth().background(c.active).padding(horizontal = 14.dp, vertical = 6.dp)) }
+          if (typedId.isNotEmpty()) item(key = "typed:$typedId") { CustomRow(typedId, typedId == s.chosen, a.onChoose, "Use “$typedId” as the model id") }
+          else item(key = "typed-hint") { Text("Type any model id in the box above to use it.", style = ZoTheme.type.cardMeta, color = c.dim, modifier = Modifier.padding(14.dp)) }
+        }
+        if (!catalogMode) items(items, key = { it }) { m -> ModelRow(m, m == s.chosen, m in pins, a) }
+        if (!catalogMode && older.isNotEmpty()) {
           item(key = "more-models") {
             Row(
               Modifier.fillMaxWidth().clickable(role = Role.Button) { showOlder = !showOlder }.padding(horizontal = 14.dp, vertical = 12.dp),
@@ -298,7 +313,7 @@ private fun ModelListSection(s: ModelSheetState, a: ModelSheetActions) {
           if (showOlder) items(older, key = { "older:$it" }) { m -> ModelRow(m, m == s.chosen, m in pins, a) }
         }
         if (custom.isNotEmpty()) item(key = "custom:$custom") { CustomRow(custom, custom == s.chosen, a.onChoose) }
-        if (items.isEmpty() && custom.isEmpty()) item(key = "none") {
+        if (!catalogMode && items.isEmpty() && custom.isEmpty()) item(key = "none") {
           Text(
             if (s.models.isNotEmpty()) "No model matches your search." else "No models yet.",
             style = ZoTheme.type.cardMeta, color = c.dim, modifier = Modifier.padding(14.dp),
@@ -311,6 +326,8 @@ private fun ModelListSection(s: ModelSheetState, a: ModelSheetActions) {
           Spacer(Modifier.width(8.dp))
           PillButton("Retry", a.onFetch)
         }
+      } else if (catalogMode) {
+        Text("${ModelLogic.catalogIds(s.catalog).size} Claude models. Tap the star to pin one to the model menu.", style = ZoTheme.type.fieldHint, color = c.dimmer, modifier = Modifier.padding(top = 6.dp))
       } else if (s.models.isNotEmpty()) {
         Text("${s.models.size} models. Tap the star to pin one to the model menu.", style = ZoTheme.type.fieldHint, color = c.dimmer, modifier = Modifier.padding(top = 6.dp))
       }
@@ -336,10 +353,33 @@ private fun ModelRow(name: String, chosen: Boolean, pinned: Boolean, a: ModelShe
 }
 
 @Composable
-private fun CustomRow(text: String, chosen: Boolean, onChoose: (String) -> Unit) {
+private fun CatalogModelRow(m: org.zohara.agent.core.net.CatalogModel, chosen: Boolean, pinned: Boolean, a: ModelSheetActions) {
+  val c = ZoTheme.colors
+  Row(
+    Modifier.fillMaxWidth().clickable(role = Role.RadioButton) { a.onChoose(m.id) }.semantics { selected = chosen }
+      .background(if (chosen) c.active else androidx.compose.ui.graphics.Color.Transparent).padding(start = 14.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(m.label, style = ZoTheme.type.body, color = c.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+        if (m.recommended) Text("Recommended", style = ZoTheme.type.fieldHint, color = c.accent, modifier = Modifier.padding(start = 8.dp))
+      }
+      ModelLogic.catalogSub(m).takeIf { it.isNotBlank() }?.let { Text(it, style = ZoTheme.type.fieldHint, color = c.dimmer, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+    }
+    if (chosen) ZoIcon(ZoIcons.Check, tint = c.accent, size = 16.dp)
+    ZoIconButton(
+      ZoIcons.Star, if (pinned) "Unpin from the model menu" else "Pin to the model menu", { a.onTogglePin(m.id) },
+      tint = if (pinned) c.gold else c.dimmer, size = 40.dp, iconSize = 18.dp,
+    )
+  }
+}
+
+@Composable
+private fun CustomRow(text: String, chosen: Boolean, onChoose: (String) -> Unit, label: String = "Use “$text” as the model name") {
   val c = ZoTheme.colors
   Row(Modifier.fillMaxWidth().clickable(role = Role.RadioButton) { onChoose(text) }.background(if (chosen) c.active else androidx.compose.ui.graphics.Color.Transparent).padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-    Text("Use “$text” as the model name", style = ZoTheme.type.body, color = c.text, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+    Text(label, style = ZoTheme.type.body, color = c.text, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
     if (chosen) ZoIcon(ZoIcons.Check, tint = c.accent, size = 16.dp)
   }
 }

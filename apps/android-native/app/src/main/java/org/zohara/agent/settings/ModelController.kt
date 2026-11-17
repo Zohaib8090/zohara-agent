@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import org.zohara.agent.core.net.CatalogGroup
 import org.zohara.agent.core.net.ApiException
 import org.zohara.agent.core.net.ErrorKind
 import org.zohara.agent.core.net.ModelsResp
@@ -62,6 +63,8 @@ data class ModelSheetState(
   val address: String = "",
   val addressError: String = "",
   val models: List<String> = emptyList(),
+  /** Claude Code only: the catalog with groups, labels and windows (empty for every other provider) */
+  val catalog: List<CatalogGroup> = emptyList(),
   val chosen: String = "",
   val filter: String = "",
   val fetching: Boolean = false,
@@ -163,7 +166,7 @@ class ModelSheetController(
     _state.update {
       it.copy(
         providerId = id, accountId = if (id == prov.current) ModelLogic.accountFor(p, prov.currentAccount) else "default",
-        address = ModelLogic.savedAddress(p, prov.current), addressError = "", models = emptyList(),
+        address = ModelLogic.savedAddress(p, prov.current), addressError = "", models = emptyList(), catalog = emptyList(),
         chosen = if (id == prov.current) status.model else "", filter = "", fetchError = "", fetching = false,
         efforts = emptyList(), effort = "", testText = "", testOk = null,
         apiFormat = if (p.takesFormat) p.apiFormat.orEmpty() else "",
@@ -264,10 +267,12 @@ class ModelSheetController(
             it.chosen in models -> it.chosen
             it.chosen.isNotEmpty() && models.isEmpty() && sameProvider -> it.chosen
             sameProvider && r.current in models -> r.current
+            // Claude Code takes any id typed by hand: keep the one in use even though the list does not name it
+            sameProvider && p.id == "claude-code" && r.current.isNotBlank() -> r.current
             else -> ""
           }
           it.copy(
-            fetching = false, models = models, fetchError = ModelLogic.listMessage(r), chosen = chosen,
+            fetching = false, models = models, catalog = r.catalog, fetchError = ModelLogic.listMessage(r), chosen = chosen,
             address = if (r.baseUrl.isNotBlank() && !dirty && it.address.isBlank() && ModelLogic.needsAddress(p)) r.baseUrl else it.address,
             efforts = r.efforts, effort = r.effort.orEmpty(),
           )

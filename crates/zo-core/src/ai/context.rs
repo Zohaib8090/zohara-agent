@@ -39,6 +39,11 @@ pub fn window_for(p: &Provider, model: &str) -> u64 {
     if let Some(n) = super::models::claude_models().into_iter().find(|m| m.id == model).and_then(|m| m.max_input_tokens) {
         return n;
     }
+    if p.id == "claude-code" {
+        if let Some(n) = super::models::catalog_context(model) {
+            return n;
+        }
+    }
     let m = model.to_lowercase();
     match p.id {
         "anthropic" | "claude-code" => if m.contains("[1m]") || m.contains("-5") || m.contains("opus-4-6") || m.contains("opus-4-7") || m.contains("opus-4-8") { 1_000_000 } else { 200_000 },
@@ -94,6 +99,15 @@ mod tests {
     use super::*;
     use crate::ai::wire::{ImageRef, ToolCall, ToolResult};
     use serde_json::json;
+
+    #[test]
+    fn claude_code_shortcuts_have_the_window_of_what_they_resolve_to() {
+        let p = super::super::providers::find("claude-code").unwrap();
+        for a in ["default", "sonnet", "opus", "haiku", "fable", "opusplan"] {
+            assert_eq!(window_for(p, a), 1_000_000, "{a}");
+        }
+        assert_eq!(window_for(p, "claude-opus-4-5"), 200_000);
+    }
 
     #[test]
     fn tokens_are_about_a_quarter_of_the_characters_and_pictures_count_more() {

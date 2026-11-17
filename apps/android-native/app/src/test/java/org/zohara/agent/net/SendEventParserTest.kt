@@ -16,6 +16,8 @@ class SendEventParserTest {
     assertEquals(SendEvent.Text("Hi there"), p("""{"event":"text","text":"Hi there"}"""))
     assertEquals(SendEvent.Steps(7), p("""{"event":"steps","n":7}"""))
     assertEquals(SendEvent.Stuck(8, "read_file"), p("""{"event":"stuck","n":8,"tool":"read_file"}"""))
+    assertEquals(SendEvent.Model("claude-opus-5-5", "Opus 5.5", true), p("""{"event":"model","model":"claude-opus-5-5","label":"Opus 5.5","differs":true}"""))
+    assertEquals(SendEvent.Model("", "", false), p("""{"event":"model"}"""))
     assertEquals(SendEvent.Steps(0), p("""{"event":"steps"}"""))
     assertEquals(SendEvent.Notice("Switched to Groq 2 (Groq 1 hit its limit)"), p("""{"event":"notice","text":"Switched to Groq 2 (Groq 1 hit its limit)"}"""))
     assertEquals(SendEvent.Notice(""), p("""{"event":"notice"}"""))

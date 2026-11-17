@@ -209,9 +209,17 @@ fn result_text(content: &Value) -> String {
 }
 
 /// Turn one line of `--output-format stream-json` into events. Returns `Some(error)` when the run itself failed.
-fn handle_line(v: &Value, session: &mut Option<String>, names: &mut Vec<(String, String)>, on_event: &mut dyn FnMut(Event)) -> Option<String> {
+fn handle_line(v: &Value, session: &mut Option<String>, names: &mut Vec<(String, String)>, last_model: &mut Option<String>, on_event: &mut dyn FnMut(Event)) -> Option<String> {
     if let Some(id) = v["session_id"].as_str() {
         *session = Some(id.to_string());
+    }
+    // the model that answers: named by the start of the stream, and by every message
+    let reported = if v["type"] == "system" && v["subtype"] == "init" { v["model"].as_str() } else if v["type"] == "assistant" { v["message"]["model"].as_str() } else { None };
+    if let Some(m) = reported.filter(|m| !m.is_empty() && !m.starts_with('<')) {
+        if last_model.as_deref() != Some(m) {
+            *last_model = Some(m.to_string());
+            on_event(Event::Model(m.to_string()));
+        }
     }
     match v["type"].as_str() {
         // the text as Claude writes it
@@ -315,8 +323,9 @@ fn run_once(mode: Option<crate::policy::Mode>, model: &str, effort: Option<&str>
     cmd.args(["-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--strict-mcp-config", "--mcp-config", &config,
         // Claude's own file and shell tools are off: everything goes through Zohara Agent's tools, so Zohara Agent's permission modes apply
         "--tools", "", "--allowedTools", "mcp__zohara__*", "--append-system-prompt", &system]);
-    if !model.is_empty() {
-        cmd.args(["--model", model]);
+    // "default" (and nothing) is "what Claude Code picks": no --model; any other id, a shortcut or one typed by hand, goes as it is
+    if let Some(m) = super::models::model_argument(model) {
+        cmd.args(["--model", &m]);
     }
     // how hard it thinks: only the levels the program knows
     if let Some(level) = effort.filter(|l| ["low", "medium", "high", "xhigh", "max"].contains(l)) {
@@ -347,6 +356,7 @@ fn run_once(mode: Option<crate::policy::Mode>, model: &str, effort: Option<&str>
     }
     let mut failure = None;
     let mut names = Vec::new();
+    let mut last_model: Option<String> = None;
     // the step counter and the repeat notice: Claude Code runs its own loop, so the summary stands in for the arguments
     let mut watch = super::agent::StepWatch::default();
     let mut counted = |e: Event| {
@@ -358,7 +368,7 @@ fn run_once(mode: Option<crate::policy::Mode>, model: &str, effort: Option<&str>
     };
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
         if let Ok(v) = serde_json::from_str::<Value>(&line) {
-            if let Some(e) = handle_line(&v, session, &mut names, &mut counted) {
+            if let Some(e) = handle_line(&v, session, &mut names, &mut last_model, &mut counted) {
                 failure = Some(e);
             }
         }
@@ -389,8 +399,8 @@ pub fn complete(model: &str, system: &str, prompt: &str, cancel: &Arc<AtomicBool
     let bin = binary().ok_or("Claude Code is not installed.")?;
     let (mut cmd, token) = command(bin)?;
     cmd.args(["-p", prompt, "--output-format", "stream-json", "--verbose", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--tools", "", "--no-session-persistence", "--system-prompt", system]);
-    if !model.is_empty() {
-        cmd.args(["--model", model]);
+    if let Some(m) = super::models::model_argument(model) {
+        cmd.args(["--model", &m]);
     }
     let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("Could not start Claude Code: {e}"))?;
     let stdout = child.stdout.take().ok_or("no output")?;
@@ -413,7 +423,7 @@ pub fn complete(model: &str, system: &str, prompt: &str, cancel: &Arc<AtomicBool
     let (mut text, mut failure, mut session, mut names) = (String::new(), None, None, Vec::new());
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
         if let Ok(v) = serde_json::from_str::<Value>(&line) {
-            if let Some(e) = handle_line(&v, &mut session, &mut names, &mut |ev| if let Event::Text(t) = ev { text.push_str(&t) }) {
+            if let Some(e) = handle_line(&v, &mut session, &mut names, &mut None, &mut |ev| if let Event::Text(t) = ev { text.push_str(&t) }) {
                 failure = Some(e);
             }
         }
@@ -442,13 +452,14 @@ mod tests {
         ];
         let (mut session, mut names, mut out) = (None, Vec::new(), Vec::new());
         for l in &lines {
-            assert!(handle_line(l, &mut session, &mut names, &mut |e| out.push(match e {
+            assert!(handle_line(l, &mut session, &mut names, &mut None, &mut |e| out.push(match e {
                 Event::TextDelta(t) => format!("delta:{t}"),
                 Event::Text(t) => format!("text:{t}"),
                 Event::ToolStart { name, .. } => format!("start:{name}"),
                 Event::ToolDone { name, ok, output } => format!("done:{name}:{ok}:{output}"),
                 Event::Usage(_) => "usage".to_string(),
                 Event::Steps(n) => format!("steps:{n}"),
+                Event::Model(m) => format!("model:{m}"),
                 Event::Stuck { n, .. } => format!("stuck:{n}"),
                 Event::Notice(t) => format!("notice:{t}"),
             })).is_none());
@@ -458,16 +469,31 @@ mod tests {
     }
 
     #[test]
+    fn the_model_that_answers_is_reported_once_and_again_when_it_changes() {
+        let lines = [
+            json!({"type":"system","subtype":"init","session_id":"s","model":"claude-opus-5-5[1m]"}),
+            json!({"type":"assistant","message":{"model":"claude-opus-5-5[1m]","content":[{"type":"text","text":"a"}]}}),
+            json!({"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"b"}]}}),
+            json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[{"type":"text","text":"c"}]}}),
+        ];
+        let (mut session, mut names, mut last, mut out) = (None, Vec::new(), None, Vec::new());
+        for l in &lines {
+            handle_line(l, &mut session, &mut names, &mut last, &mut |e| if let Event::Model(m) = e { out.push(m) });
+        }
+        assert_eq!(out, ["claude-opus-5-5[1m]", "claude-haiku-5-5"]);
+    }
+
+    #[test]
     fn partial_messages_become_text_deltas() {
         let mut out = Vec::new();
         let line = json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}});
-        assert!(handle_line(&line, &mut None, &mut Vec::new(), &mut |e| out.push(match e { Event::TextDelta(t) => t, _ => "other".into() })).is_none());
+        assert!(handle_line(&line, &mut None, &mut Vec::new(), &mut None, &mut |e| out.push(match e { Event::TextDelta(t) => t, _ => "other".into() })).is_none());
         assert_eq!(out, ["Hel"]);
     }
 
     #[test]
     fn an_error_result_is_reported() {
-        let e = handle_line(&json!({"type":"result","is_error":true,"result":"Not logged in"}), &mut None, &mut Vec::new(), &mut |_| {});
+        let e = handle_line(&json!({"type":"result","is_error":true,"result":"Not logged in"}), &mut None, &mut Vec::new(), &mut None, &mut |_| {});
         assert_eq!(e.as_deref(), Some("Not logged in"));
     }
 

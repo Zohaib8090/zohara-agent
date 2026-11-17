@@ -68,10 +68,18 @@ object Transcript {
   fun displayTitle(title: String, hasItems: Boolean): String = title.ifBlank { if (hasItems) "New chat" else "" }
 
   /** Claude model ids shown the way the desktop does ("claude-opus-5-5" -> "Opus 5.5"); other models as they are (COMP-08). */
-  fun niceName(model: String): String {
+  fun niceName(model: String, provider: String = "claude-code"): String {
     val m = model.trim()
+    // Claude Code's shortcuts (named as the desktop's catalog names them) apply to that provider only: a model on another one that
+    // happens to be called "default" or "opus" keeps its own name
+    val shortcuts = provider == "claude-code"
+    if (shortcuts && m.equals("default", ignoreCase = true)) return "Default (what Claude Code picks)"
+    if (shortcuts && m.equals("opusplan", ignoreCase = true)) return "Opus plans, Sonnet writes"
+    // the long-context shortcuts and ids: "sonnet[1m]" -> "Sonnet (1M)"
+    val long = m.endsWith("[1m]")
+    if (long) return niceName(m.removeSuffix("[1m]"), provider) + " (1M)"
     val family = listOf("sonnet", "opus", "haiku", "fable")
-    if (m in family) return m.replaceFirstChar { it.uppercase() }
+    if (shortcuts && m in family) return m.replaceFirstChar { it.uppercase() }
     if (!m.startsWith("claude-")) return m
     val parts = m.removePrefix("claude-").split('-').filter { it.isNotEmpty() }
     val fam = parts.firstOrNull() ?: return m
@@ -82,7 +90,7 @@ object Transcript {
 
   /** The text of the model pill (COMP-08). */
   fun pillText(ready: Boolean, model: String, provider: String, claudeCode: Boolean = provider == "claude-code"): String = when {
-    ready && model.isNotBlank() -> niceName(model)
+    ready && model.isNotBlank() -> niceName(model, provider)
     ready && claudeCode -> "Claude"
     ready && provider.isNotBlank() -> provider
     else -> "Choose a model"

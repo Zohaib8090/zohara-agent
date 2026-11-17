@@ -189,6 +189,8 @@ struct ModelList {
     /// The fill that is adding rows now (a newer fill stops an older one).
     fill_gen: Rc<Cell<u32>>,
     current: Rc<RefCell<String>>,
+    /// The id of the provider whose models are listed (names of Claude Code's shortcuts apply to that one only).
+    provider: Rc<RefCell<String>>,
     on_pick: Rc<RefCell<Option<Rc<dyn Fn(&str)>>>>,
 }
 
@@ -247,6 +249,7 @@ impl ModelList {
             generation: Rc::new(Cell::new(0)),
             fill_gen: Rc::new(Cell::new(0)),
             current: Rc::new(RefCell::new(String::new())),
+            provider: Rc::new(RefCell::new(String::new())),
             on_pick: Rc::new(RefCell::new(None)),
         };
 
@@ -407,7 +410,7 @@ impl ModelList {
             star.set_tooltip_text(Some(if self.pinned.borrow().iter().any(|m| *m == model) { "Unpin from the model menu" } else { "Pin to the model menu" }));
         }
         line.append(&star);
-        let name = lbl(&chat::nice_name(model), "pop-title");
+        let name = lbl(&chat::nice_name(&self.provider.borrow(), model), "pop-title");
         name.set_hexpand(true);
         name.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
         line.append(&name);
@@ -567,6 +570,7 @@ pub fn models_sheet_at(ui: &Rc<Ui>, start: Option<(String, String)>) {
             ml.generation.set(gen);
             let base = url.text().trim().to_string();
             let typed = Some(key.text().to_string()).filter(|k| !k.trim().is_empty());
+            *ml.provider.borrow_mut() = p.id.to_string();
             ml.fill(&[]);
             ml.set_loading("Loading the model list…");
             let ml2 = ml.clone();
@@ -666,7 +670,7 @@ pub fn models_sheet_at(ui: &Rc<Ui>, start: Option<(String, String)>) {
             *ml.pinned.borrow_mut() = pins_of(&s, p);
             ml.search.set_text("");
             status.set_text(if p.protocol == Protocol::ClaudeCode {
-                if zo_core::ai::claude_code::binary().is_some() { "Uses the Claude Code program you installed and signed in to yourself (claude auth login). Zohara Agent never sees your login. Experimental. The full model list is read with an Anthropic API key (add one under the Anthropic provider or in a profile); without one you get Claude Code's own names for the newest models." } else { "Claude Code is not installed. Install it with: npm install -g @anthropic-ai/claude-code, then sign in with: claude auth login" }
+                if zo_core::ai::claude_code::binary().is_some() { "Uses the Claude Code program you installed and signed in to yourself (claude auth login). Zohara Agent never sees your login. Experimental. Every model a subscription can use is listed (Default, the shortcuts, then each family, newest first). Type any other model id in the Model box." } else { "Claude Code is not installed. Install it with: npm install -g @anthropic-ai/claude-code, then sign in with: claude auth login" }
             } else if p.local { "Runs on this computer. No key, and nothing leaves it." } else if keys::available() { "The key is stored in the system keyring." } else { "The keyring tool (secret-tool) is missing, so keys cannot be saved." });
             cc_block.set_visible(p.protocol == Protocol::ClaudeCode);
             if p.protocol == Protocol::ClaudeCode {
@@ -771,6 +775,10 @@ pub fn models_sheet_at(ui: &Rc<Ui>, start: Option<(String, String)>) {
                     status.set_text(&e);
                     return;
                 }
+            }
+            if p.protocol == Protocol::ClaudeCode && !model.text().trim().is_empty() && !zo_core::ai::models::valid_model_id(&model.text()) {
+                status.set_text("That is not a model id: use letters, digits and - . _ : / only, for example claude-opus-5-5.");
+                return;
             }
             sel.model = model.text().trim().to_string();
             let u = url.text().trim().to_string();
@@ -1116,6 +1124,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn claude_code_lists_show_default_the_shortcuts_and_the_recommended_first_and_the_rest_under_more() {
+        let main = chat::cc_main_choices();
+        let ids: Vec<&str> = main.iter().map(|(i, _, _)| i.as_str()).collect();
+        assert_eq!(ids[0], "default");
+        for want in ["sonnet", "opus", "haiku", "claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"] {
+            assert!(ids.contains(&want), "{want} in {ids:?}");
+        }
+        assert!(!ids.contains(&"claude-opus-4-8"));
+        assert!(main.iter().find(|(i, _, _)| i == "claude-opus-5-5").unwrap().1.contains("Recommended"));
+        let more = chat::cc_more_choices();
+        let mids: Vec<&str> = more.iter().map(|(i, _, _)| i.as_str()).collect();
+        assert!(mids.contains(&"claude-opus-4-8") && mids.contains(&"claude-sonnet-4-6") && !mids.contains(&"claude-opus-5-5"));
+        // newest first inside a family
+        assert!(mids.iter().position(|i| *i == "claude-opus-4-8") < mids.iter().position(|i| *i == "claude-opus-4-6"));
+        assert_eq!(chat::nice_name("claude-code", "default"), "Default (what Claude Code picks)");
+        assert_eq!(chat::nice_name("claude-code", "claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(chat::nice_name("openai", "gpt-4o"), "gpt-4o");
+        // a model on another provider that is named like a Claude Code shortcut keeps its own name
+        for n in ["default", "sonnet", "opus", "haiku", "fable", "opusplan"] {
+            assert_eq!(chat::nice_name("ollama", n), n);
+        }
+    }
+
     fn the_three_api_formats_are_offered_with_their_own_lines() {
         let ids: Vec<&str> = FORMATS.iter().map(|f| f.0).collect();
         assert_eq!(ids, ["chat", "responses", "claude"]);

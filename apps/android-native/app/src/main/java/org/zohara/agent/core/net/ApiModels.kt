@@ -75,9 +75,18 @@ val ZoJson: Json = Json {
   val current: String = "", val currentAccount: String = "", val rotateOnLimit: Boolean = false,
   val hiddenProviders: List<String> = emptyList(), val providers: List<ProviderInfo> = emptyList(),
 )
+/** One Claude Code model or shortcut of the catalog the server sends (zo-core `models::CatalogModel`, data/claude-models.json). */
+@Serializable data class CatalogModel(
+  val id: String, val label: String = "", val kind: String = "model", val family: String = "", val version: String = "",
+  val context: Long = 0, val released: String = "", val aliases: List<String> = emptyList(), val note: String = "",
+  val verified: Boolean = false, val recommended: Boolean = false,
+)
+@Serializable data class CatalogGroup(val title: String = "", val models: List<CatalogModel> = emptyList())
 @Serializable data class ModelsResp(
   val provider: String = "", val models: List<String> = emptyList(), val current: String = "", val efforts: List<String> = emptyList(),
   val effort: String? = null, val baseUrl: String = "", val error: String? = null,
+  /** only for Claude Code: the models by group (Shortcuts, Fable, Opus, Sonnet, Haiku), newest first, the newest of a family recommended */
+  val catalog: List<CatalogGroup> = emptyList(),
 )
 @Serializable data class ModelTestResp(val works: Boolean = false, val message: String = "")
 @Serializable data class SelectResp(val provider: String = "", val account: String? = null, val model: String = "", val effort: String? = null, val baseUrl: String = "", val apiFormat: String? = null)

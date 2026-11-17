@@ -89,6 +89,23 @@ class ChatSessionTest {
     assertTrue(s.state.value.items.filterIsInstance<ToolGroupItem>().none { it.active })
   }
 
+  @Test fun theAnsweringModelIsNamedOnlyWhenItIsNotTheOneChosen() = runTest(UnconfinedTestDispatcher()) {
+    val (s, be, _) = make()
+    val ch = be.newStream()
+    s.submit("hi")
+    ch.send(SendEvent.Stream(3)); ch.send(SendEvent.Chat("c1", "hi"))
+    ch.send(SendEvent.Model("claude-opus-5-5", "Opus 5.5", true)); ch.send(SendEvent.Text("ok")); ch.send(SendEvent.Done)
+    assertEquals("Answered by Opus 5.5", s.state.value.items.filterIsInstance<NoticeItem>().last().text)
+    ch.close(); advanceUntilIdle()
+    val (s2, be2, _) = make()
+    val ch2 = be2.newStream()
+    s2.submit("hi")
+    ch2.send(SendEvent.Stream(4)); ch2.send(SendEvent.Chat("c2", "hi"))
+    ch2.send(SendEvent.Model("claude-opus-5-5", "Opus 5.5", false)); ch2.send(SendEvent.Text("ok")); ch2.send(SendEvent.Done)
+    assertTrue(s2.state.value.items.filterIsInstance<NoticeItem>().none { it.text.startsWith("Answered by") })
+    ch2.close(); advanceUntilIdle()
+  }
+
   @Test fun stepsCountUpAndResetAndStuckAsksOnlyOnce() = runTest(UnconfinedTestDispatcher()) {
     val (s, be, _) = make()
     val ch = be.newStream()

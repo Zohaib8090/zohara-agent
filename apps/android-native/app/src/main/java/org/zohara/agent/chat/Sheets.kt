@@ -70,12 +70,12 @@ fun ModelSheetContent(ui: PillsUi, onPickModel: (profileId: String?, model: Stri
     val pinned = ui.profiles.filter { it.pinned.isNotEmpty() }
     for (p in pinned) {
       PopHead("${p.name} · ${p.provider}")
-      for (m in p.pinned) ChoiceRowSheet(Transcript.niceName(m), null, current = ui.activeProfile == p.id && ui.model == m, onClick = { onPickModel(p.id, m) })
+      for (m in p.pinned) ChoiceRowSheet(Transcript.niceName(m, p.provider), null, current = ui.activeProfile == p.id && ui.model == m, onClick = { onPickModel(p.id, m) })
     }
     val inPins = pinned.any { it.id == ui.activeProfile && ui.model in it.pinned }
     if (!inPins && ui.ready && ui.model.isNotBlank()) {
       PopHead(if (pinned.isEmpty()) "In use now" else "In use now")
-      ChoiceRowSheet(Transcript.niceName(ui.model), ui.provider.ifBlank { null }, current = true, onClick = {})
+      ChoiceRowSheet(Transcript.niceName(ui.model, ui.provider), ui.provider.ifBlank { null }, current = true, onClick = {})
     }
     val plain = ui.profiles.filter { it.pinned.isEmpty() && it.id != ui.activeProfile }
     if (plain.isNotEmpty()) {

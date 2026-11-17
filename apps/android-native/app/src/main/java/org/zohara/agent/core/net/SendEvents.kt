@@ -32,6 +32,8 @@ sealed interface SendEvent {
   /** a short notice that is not part of the answer, for example "Switched to Groq 2 (Groq 1 hit its limit)" */
   data class Notice(val text: String) : SendEvent
   data class Usage(val input: Long, val output: Long) : SendEvent
+  /** the model that really answered ([label] is its name); [differs] when it is not the one chosen (a shortcut or Default resolved) */
+  data class Model(val model: String, val label: String, val differs: Boolean) : SendEvent
   /** Test of a scheduled task (docs/SCHEDULED.md): the first line says what is being tested and where it runs */
   data class Test(val title: String, val kind: String, val place: String) : SendEvent
   /** Test: the notification the task would show (a reminder shows it here instead of sending it) */
@@ -75,6 +77,7 @@ object SendEventParser {
       "steps" -> SendEvent.Steps((obj.long("n") ?: 0).coerceIn(0, Int.MAX_VALUE.toLong()).toInt())
       "stuck" -> SendEvent.Stuck((obj.long("n") ?: 0).coerceIn(0, Int.MAX_VALUE.toLong()).toInt(), obj.str("tool").orEmpty())
       "notice" -> SendEvent.Notice(obj.str("text").orEmpty().take(300))
+      "model" -> SendEvent.Model(obj.str("model").orEmpty(), obj.str("label").orEmpty(), obj.bool("differs") ?: false)
       "usage" -> SendEvent.Usage(obj.long("input") ?: 0, obj.long("output") ?: 0)
       "test" -> SendEvent.Test(obj.str("title").orEmpty(), obj.str("kind").orEmpty(), obj.str("place").orEmpty())
       "notify" -> SendEvent.Notify(obj.str("title").orEmpty(), obj.str("body").orEmpty(), obj.str("kind").orEmpty(), obj.bool("ok") ?: true)

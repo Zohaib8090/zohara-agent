@@ -393,7 +393,7 @@ select optgroup{background:var(--card);color:var(--accent);font-size:11px;font-w
 .btn.mini{padding:3px 10px;font-size:12px;margin-left:8px}
 .mlist{margin-top:8px;max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:10px;background:var(--input)}
 .mrow{display:flex;align-items:center;gap:8px;padding:8px 10px 8px 12px;cursor:pointer;border-bottom:1px solid var(--line);font-size:13px}.mrow:last-child{border-bottom:none}.mrow:hover{background:var(--hov)}.mrow.sel{background:var(--hov);box-shadow:inset 3px 0 0 var(--accent)}
-.mname{flex:1;min-width:0;overflow-wrap:anywhere}.mnone{padding:14px;font-size:13px;color:var(--dim)}
+.mname{flex:1;min-width:0;overflow-wrap:anywhere}.mgrp{padding:6px 12px;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--dim);background:var(--hov);border-bottom:1px solid var(--line);position:sticky;top:0}.msub{display:block;font-size:11px;color:var(--dim);font-weight:400}.mrec{font-size:10px;font-weight:600;padding:1px 6px;border-radius:8px;background:var(--accent);color:#fff;margin-left:6px;white-space:nowrap}.mnone{padding:14px;font-size:13px;color:var(--dim)}
 .star{color:var(--dimmer);padding:4px;border-radius:6px;display:flex}.star:hover{color:var(--accent);background:var(--raise)}.star.on{color:var(--accent)}.star.on svg,.chip.pin svg{fill:currentColor}
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.chip.pin{margin:0;padding:3px 4px 3px 8px;color:var(--text2)}.chip.pin svg{width:12px;height:12px;color:var(--accent)}.chip.pin button{color:var(--dim);padding:0 5px;font-size:14px;line-height:1}.chip.pin button:hover{color:var(--danger)}
 .acts{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
@@ -791,18 +791,38 @@ function stuckNotice() {
   x.onclick = () => d.remove();
   document.body.appendChild(d);
 }
+/* a window size as people say it: 200000 -> "200K window", 1000000 -> "1M window" */
+/* the same rule as the server (zo-core models::valid_model_id): letters, digits and . _ - : / with an optional [1m], at most 100 characters */
+const ccValidId = t => { const c = t.endsWith("[1m]") ? t.slice(0, -4) : t; return c.length > 0 && t.length <= 100 && /^[A-Za-z0-9._:\/-]+$/.test(c); };
+const ccWin = n => n >= 1e6 ? (n / 1e6) + "M window" : Math.round(n / 1e3) + "K window";
+/* which model really answered, under the answer, when it is not the one chosen ("sonnet" or Default resolve to a real model) */
+function answeredNote(label) {
+  const m = document.createElement("div"); m.className = "pc-meta"; m.textContent = "Answered by " + String(label).slice(0, 60);
+  if ($("pModelT")) $("pModelT").title = "Last answer: " + String(label).slice(0, 60);
+  return m;
+}
 function setBusy(b) { if (b !== busy) { stepsN = 0; stuckClear(); } busy = b; stepsPaint(); if ($("send")) { $("send").classList.toggle("hide", b); $("stop").classList.toggle("hide", !b); $("text").disabled = b; voiceMicPaint(); } }
+/* the names of the Claude Code models (id -> label) from the catalog the server sends; fetched once, then the pill shows "Opus 5.5" instead of "claude-opus-5-5" */
+let ccNames = null, ccNamesBusy = false;
+const ccNameOf = (provider, id) => provider === "claude-code" && ccNames && ccNames[id] ? ccNames[id] : id;
+function ccNamesFill(cat) { ccNames = {}; (cat || []).forEach(g => (g.models || []).forEach(m => { ccNames[String(m.id)] = String(m.label); })); }
+async function ccNamesLoad() {
+  if (ccNames || ccNamesBusy) return; ccNamesBusy = true;
+  try { const r = await mop("models", { provider: "claude-code" }); if (Array.isArray(r.catalog)) { ccNamesFill(r.catalog); refreshModel(); } } catch {} finally { ccNamesBusy = false; }
+}
 async function refreshModel() {
   if (onDesktop()) {
     const id = runOn; let ok = true;
     try { const r = await dop("status"); if (id === runOn) dstat = r || {}; } catch { ok = false; if (id === runOn) dstat = {}; }
     if (id !== runOn) return;
-    if ($("pModelT")) $("pModelT").textContent = !ok ? "Computer not reachable" : dstat.ready ? (dstat.model || dstat.provider) : "Choose a model";
+    if ($("pModelT")) $("pModelT").textContent = !ok ? "Computer not reachable" : dstat.ready ? (ccNameOf(dstat.provider, dstat.model) || dstat.provider) : "Choose a model";
+    if (dstat.ready && dstat.provider === "claude-code") ccNamesLoad();
     if ($("pMode")) $("pMode").textContent = curMode();
     return;
   }
   try { status = await op("status"); mode = status.mode || mode; } catch {}
-  if ($("pModelT")) $("pModelT").textContent = status.ready ? (status.model || status.provider) : "Choose a model";
+  if ($("pModelT")) $("pModelT").textContent = status.ready ? (ccNameOf(status.provider, status.model) || status.provider) : "Choose a model";
+  if (status.ready && status.provider === "claude-code") ccNamesLoad();
   if ($("pMode")) $("pMode").textContent = mode;
   ccBanner();
 }
@@ -1190,7 +1210,7 @@ async function send(opts) {
   if (!dsk) memStart();
   if (!re) { t.value = ""; t.style.height = "auto"; }
   const bubble = re ? re.reuse : addUser(text, taken.meta); setBusy(true);
-  let ai = null, acc = "", group = null, began = false, gotDone = false;
+  let ai = null, acc = "", group = null, began = false, gotDone = false, answeredLabel = "";
   try {
     const r = await fetch("/api/send", { method: "POST", headers: { "Content-Type": "application/json", "X-ZO-Local": "1", Authorization: "Bearer " + await token() }, body: JSON.stringify({ text, chat: chatId, can_ask: true, ...(dsk ? { target: "desktop", device: runOn } : {}), ...(taken.attachments.length ? { attachments: taken.attachments } : {}), ...(re ? { edit: re.edit } : {}), ...noteSendExtra() }) });
     if (r.status === 429) { const m = limitMsg(r); toast(m); throw new Error(m); }
@@ -1213,6 +1233,7 @@ async function send(opts) {
           case "steps": if (Number.isSafeInteger(ev.n) && ev.n > 0) { stepsN = ev.n; stepsPaint(group); } break;
           case "stuck": stuckNotice(); break;
           case "notice": if (ev.text) { const m = document.createElement("div"); m.className = "pc-meta"; m.textContent = "\u2139 " + String(ev.text).slice(0, 300); thread().appendChild(m); scrollEnd(); } break;
+          case "model": if (ev.differs && typeof ev.label === "string") answeredLabel = ev.label; break;
           case "tool_done": clearWait(); if (ev.name === "zohara_ask_user") closeQuestionCards(); if (group && ev.output) groupOut(group, ev.output); break;
           case "approval": if (dsk && !dcaps(curDev()).approvals_from_web) waitApproval(ev.summary || ev.tool); else ask(ev); break;
           case "approval_wait": case "waiting_approval": if (dsk) waitApproval(ev.summary); break;
@@ -1228,6 +1249,7 @@ async function send(opts) {
     if (!began && !re) { bubble.remove(); /* before the chat began: */ aRestore(taken); if ($("text") && !$("text").value) $("text").value = text0; }
     addError(e.message);
   }
+  if (answeredLabel && thread()) { thread().appendChild(answeredNote(answeredLabel)); scrollEnd(); }
   closeQuestionCards(); clearWait(); endGroup(group); stream = 0; setBusy(false); $("text")?.focus(); refreshChats(); noteAnswer(chatId, $("title") ? $("title").textContent : "", !!ai);
   if (!dsk) memWatch();
   if (dsk) setTimeout(refreshChats, 6000); /* the computer syncs the chat to the server after the turn */
@@ -1889,10 +1911,11 @@ async function modelPopover(a) {
   const p = popover(a, `<div class="pop-head">Pinned models</div>${skel(3)}`);
   let prof = { profiles: [] };
   try { prof = await getProfiles(); } catch {}
+  if (prof.profiles.some(x => x.provider === "claude-code")) await ccNamesLoad();
   if (!p.isConnected) return;
   const groups = prof.profiles.map(x => {
     const ms = (x.pinned && x.pinned.length) ? x.pinned : (x.model ? [x.model] : []);
-    return `<div class="pop-group">${esc(x.name)}</div>` + ms.map(m => `<button class="pop-row" data-p="${esc(x.id)}" data-m="${esc(m)}"><div class="c"><div class="pop-title">${esc(m)}</div><div class="pop-sub">${esc((x.provider_name || x.provider) + (x.account_name ? " · " + x.account_name : ""))}</div></div><span class="pop-check">${prof.active === x.id && status.model === m ? icon("check") : ""}</span></button>`).join("");
+    return `<div class="pop-group">${esc(x.name)}</div>` + ms.map(m => `<button class="pop-row" data-p="${esc(x.id)}" data-m="${esc(m)}"><div class="c"><div class="pop-title">${esc(ccNameOf(x.provider, m))}</div><div class="pop-sub">${esc((x.provider_name || x.provider) + (x.account_name ? " · " + x.account_name : ""))}</div></div><span class="pop-check">${prof.active === x.id && status.model === m ? icon("check") : ""}</span></button>`).join("");
   }).join("");
   p.innerHTML = (groups || '<div class="pop-empty">Nothing pinned yet. Open the full list and tap the star next to a model.</div>') + `<button class="pop-row pop-more" data-more><div class="c"><div class="pop-title">More…</div><div class="pop-sub">All models, API key, address</div></div></button>`;
   paint(p);
@@ -2023,7 +2046,7 @@ async function modelSheet() {
   const groups = [["Your subscription", p => p.id === "claude-code"], ["Popular Providers", p => majorIds.has(p.id)], ["Cloud & Open-Weight", p => !majorIds.has(p.id) && !isCustomProv(p) && !isLocalProv(p)], ["Local Models (This Computer)", p => !isCustomProv(p) && p.id !== "claude-code" && !majorIds.has(p.id) && isLocalProv(p)], ["Custom providers", isCustomProv]];
   if (!prov.current) sp.insertAdjacentHTML("afterbegin", '<option value="" selected>Choose…</option>');
   groups.forEach(([lbl, f]) => { const g = list.filter(f); if (g.length) sp.insertAdjacentHTML("beforeend", `<optgroup label="${lbl}">${g.map(opt).join("")}</optgroup>`); });
-  let models = [], chosen = st.model || "", effort = "", loading = false, error = "", seq = 0, dirty = false, filter = "";
+  let models = [], catalog = null, chosen = st.model || "", effort = "", loading = false, error = "", seq = 0, dirty = false, filter = "";
   const cur = () => prov.providers.find(p => p.id === sp.value);
   /* the account of the provider: the one in use for the provider in use, else the Default one */
   let acct = prov.current_account || "default";
@@ -2056,21 +2079,36 @@ async function modelSheet() {
   function renderList() {
     const box = $$("mList"), q = filter.trim().toLowerCase(), pins = pinned();
     if (loading) { box.innerHTML = skel(4); $$("mState").innerHTML = '<span class="spin"></span> Fetching the models list…'; return; }
+    const cp = cur(), grouped = !!(cp && cp.id === "claude-code" && Array.isArray(catalog) && catalog.length);
     let items = models.filter(m => !q || m.toLowerCase().includes(q));
     items = [...items.filter(m => pins.has(m)), ...items.filter(m => !pins.has(m))];
     const custom = q && !models.some(m => m.toLowerCase() === q) ? filter.trim() : "";
+    if (grouped) {
+      /* Claude Code: the list from the catalog, by family, newest first; the newest of each family is Recommended */
+      const row = m => { const id = String(m.id); const win = m.context ? ccWin(m.context) : ""; const sub = [m.note, win].filter(Boolean).join(" \u00b7 ");
+        return `<div class="mrow${id === chosen ? " sel" : ""}" role="option" aria-selected="${id === chosen}" data-m="${esc(id)}"><span class="mname">${esc(m.label)}${m.recommended ? '<span class="mrec">Recommended</span>' : ""}<span class="msub">${esc(id === "default" ? sub : id + (sub ? " \u00b7 " + sub : ""))}</span></span>${dsk ? "" : `<button class="star${pins.has(id) ? " on" : ""}" data-s="${esc(id)}" title="${pins.has(id) ? "Unpin" : "Pin to the quick list"}" aria-label="Pin ${esc(m.label)}">${icon("star")}</button>`}</div>`; };
+      const hit = m => !q || (m.label + " " + m.id + " " + (m.aliases || []).join(" ")).toLowerCase().includes(q);
+      let html = catalog.map(g => { const ms = (g.models || []).filter(hit); return ms.length ? `<div class="mgrp">${esc(g.title)}</div>` + ms.map(row).join("") : ""; }).join("");
+      const known = new Set(catalog.flatMap(g => (g.models || []).map(m => String(m.id))));
+      const rest = items.filter(m => !known.has(m));
+      if (rest.length) html += '<div class="mgrp">Other models found</div>' + rest.map(m => `<div class="mrow${m === chosen ? " sel" : ""}" role="option" aria-selected="${m === chosen}" data-m="${esc(m)}"><span class="mname">${esc(m)}</span></div>`).join("");
+      const typed = q && ccValidId(filter.trim()) && !known.has(filter.trim()) && !models.includes(filter.trim()) ? filter.trim() : "";
+      html += `<div class="mgrp">Other model id</div>` + (typed ? `<div class="mrow${typed === chosen ? " sel" : ""}" data-m="${esc(typed)}"><span class="mname">Use \u201c${esc(typed)}\u201d as the model id</span></div>` : '<div class="mnone">Type any model id in the search box above to use it.</div>');
+      box.innerHTML = html;
+    } else
     box.innerHTML = items.map(m => `<div class="mrow${m === chosen ? " sel" : ""}" role="option" aria-selected="${m === chosen}" data-m="${esc(m)}"><span class="mname">${esc(m)}</span>${dsk ? "" : `<button class="star${pins.has(m) ? " on" : ""}" data-s="${esc(m)}" title="${pins.has(m) ? "Unpin" : "Pin to the quick list"}" aria-label="Pin ${esc(m)}">${icon("star")}</button>`}</div>`).join("")
       + (custom ? `<div class="mrow${custom === chosen ? " sel" : ""}" data-m="${esc(custom)}"><span class="mname">Use “${esc(custom)}” as the model name</span></div>` : "");
-    if (!items.length && !custom) box.innerHTML = '<div class="mnone">' + (models.length ? "No model matches your search." : "No models yet.") + "</div>";
+    if (!grouped && !items.length && !custom) box.innerHTML = '<div class="mnone">' + (models.length ? "No model matches your search." : "No models yet.") + "</div>";
     box.querySelectorAll("[data-m]").forEach(r => r.onclick = e => { if (e.target.closest("[data-s]")) return; chosen = r.dataset.m; renderList(); });
     box.querySelectorAll("[data-s]").forEach(b => b.onclick = e => { e.stopPropagation(); togglePin(b.dataset.s); });
     const s = $$("mState"); s.className = "field-hint";
     if (error) { s.innerHTML = `<span class="bad">${esc(error)}</span> <button class="btn mini" id="mRetry">Try again</button>`; $$("mRetry").onclick = fetchModels; }
+    else if (grouped) s.textContent = catalog.reduce((a, g) => a + (g.models || []).length, 0) + " Claude models. Tap the star to pin one to the quick list.";
     else s.textContent = models.length ? `${models.length} models. Tap the star to pin one to the quick list.` : "";
     useBtn.disabled = !chosen || !sp.value || !!(cur() && cur().synthetic && !(cc && cc.present));
   }
   async function fetchModels() {
-    const p = cur(); if (!p) { models = []; renderList(); return; }
+    const p = cur(); catalog = null; if (!p) { models = []; renderList(); return; }
     // Claude Code before the login: there is nothing to ask yet (the Log in button is under the provider)
     if (p.synthetic && !(cc && cc.present)) { models = []; error = ""; loading = false; renderList(); $$("mState").textContent = "Log in to Claude Code first, then choose a model."; return; }
     const my = ++seq, bad = (dsk ? () => "" : validAddr)(url.value, p.needs_url);
@@ -2079,7 +2117,7 @@ async function modelSheet() {
     try {
       const r = await mop("models", dsk ? { provider: p.id } : { provider: p.id, base_url: url.value.trim(), ...fmtBody(p), ...acctBody() });
       if (my !== seq) return;
-      models = r.models || []; error = r.error || "";
+      models = r.models || []; error = r.error || ""; catalog = Array.isArray(r.catalog) ? r.catalog : null; if (catalog) ccNamesFill(catalog);
       if (r.base_url && !dirty && !url.value.trim() && p.needs_url) url.value = r.base_url;
       if (!models.includes(chosen) && !(chosen && !models.length && p.id === prov.current)) chosen = models.includes(r.current) && p.id === prov.current ? r.current : "";
       effort = r.effort || ""; const eb = $$("mEffBox");
@@ -2956,7 +2994,7 @@ async function pageModel(b) {
     const pins = p.pinned || [];
     if (pins.length) {
       const d = document.createElement("div"); d.className = "chips";
-      d.innerHTML = pins.map(m => `<span class="chip pin">${icon("star")}<span>${esc(m)}</span><button data-u="${esc(m)}" aria-label="Unpin ${esc(m)}" title="Unpin">×</button></span>`).join("");
+      d.innerHTML = pins.map(m => `<span class="chip pin">${icon("star")}<span>${esc(ccNameOf(p.provider, m))}</span><button data-u="${esc(m)}" aria-label="Unpin ${esc(m)}" title="Unpin">×</button></span>`).join("");
       d.querySelectorAll("[data-u]").forEach(x => x.onclick = async () => { try { await op("profile_pin", { id: p.id, model: x.dataset.u, on: false }); refresh(); } catch (e) { toast(e.message); } });
       r.querySelector(".col").appendChild(d);
     }

@@ -307,4 +307,42 @@ class ModelLogicTest {
     assertEquals("Key saved · in use", ModelLogic.accountLine(acct("a", "A", active = true)))
     assertEquals("No key · https://g.example/v1 · hidden", ModelLogic.accountLine(acct("a", "A", key = false, hidden = true, url = "https://g.example/v1")))
   }
+
+  // ---- Claude Code catalog (the list the server sends from data/claude-models.json)
+  private fun cm(id: String, label: String, kind: String = "model", family: String = "", context: Long = 0, rec: Boolean = false, aliases: List<String> = emptyList(), note: String = "") =
+    org.zohara.agent.core.net.CatalogModel(id = id, label = label, kind = kind, family = family, context = context, recommended = rec, aliases = aliases, note = note)
+  private val catalog = listOf(
+    org.zohara.agent.core.net.CatalogGroup("Shortcuts", listOf(cm("default", "Default (what Claude Code picks)", "default", note = "Claude Code chooses the model for your plan"), cm("opus", "Opus (latest)", "alias", "opus", note = "Newest Opus"))),
+    org.zohara.agent.core.net.CatalogGroup("Opus", listOf(cm("claude-opus-5-5", "Opus 5.5", family = "opus", context = 1_000_000, rec = true), cm("claude-opus-4-5", "Opus 4.5", family = "opus", context = 200_000))),
+    org.zohara.agent.core.net.CatalogGroup("Haiku", listOf(cm("claude-haiku-5-5", "Haiku 5.5", family = "haiku", context = 1_000_000, rec = true))),
+  )
+
+  @Test fun theCatalogRowsKeepGroupsAndDropEmptyOnesWhenSearching() {
+    val all = ModelLogic.catalogRows(catalog, "")
+    assertEquals(listOf("Shortcuts", "Opus", "Haiku"), all.filterIsInstance<ModelLogic.CatalogRow.Header>().map { it.title })
+    assertEquals(5, all.filterIsInstance<ModelLogic.CatalogRow.Item>().size)
+    val hit = ModelLogic.catalogRows(catalog, " 4.5 ")
+    assertEquals(listOf("Opus"), hit.filterIsInstance<ModelLogic.CatalogRow.Header>().map { it.title })
+    assertEquals(listOf("claude-opus-4-5"), hit.filterIsInstance<ModelLogic.CatalogRow.Item>().map { it.model.id })
+    assertTrue(ModelLogic.catalogRows(catalog, "nothing like this").isEmpty())
+  }
+
+  @Test fun windowsAreSaidTheWayPeopleSayThem() {
+    assertEquals("", ModelLogic.windowLabel(0))
+    assertEquals("200K window", ModelLogic.windowLabel(200_000))
+    assertEquals("1M window", ModelLogic.windowLabel(1_000_000))
+    assertEquals("claude-opus-5-5 · 1M window", ModelLogic.catalogSub(catalog[1].models[0]))
+    assertEquals("Claude Code chooses the model for your plan", ModelLogic.catalogSub(catalog[0].models[0]))
+  }
+
+  @Test fun aModelIdTypedByHandIsOfferedOnlyWhenItLooksLikeOneAndIsNew() {
+    assertEquals("claude-opus-9-9", ModelLogic.typedModelId(catalog, listOf("default"), " claude-opus-9-9 "))
+    assertEquals("opus[1m]", ModelLogic.typedModelId(catalog, emptyList(), "opus[1m]"))
+    assertEquals("", ModelLogic.typedModelId(catalog, emptyList(), "claude-opus-5-5"))
+    assertEquals("", ModelLogic.typedModelId(catalog, listOf("my-model"), "MY-MODEL"))
+    assertEquals("", ModelLogic.typedModelId(catalog, emptyList(), "opus 4.8"))
+    assertEquals("", ModelLogic.typedModelId(catalog, emptyList(), ""))
+    assertFalse(ModelLogic.validModelId("a;b") || ModelLogic.validModelId("x".repeat(101)) || ModelLogic.validModelId("é"))
+    assertTrue(ModelLogic.validModelId("vendor/model:tag") && ModelLogic.validModelId("sonnet[1m]"))
+  }
 }

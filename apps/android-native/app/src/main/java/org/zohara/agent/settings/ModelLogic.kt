@@ -2,6 +2,8 @@ package org.zohara.agent.settings
 
 import java.net.URI
 import org.zohara.agent.core.net.AccountInfo
+import org.zohara.agent.core.net.CatalogGroup
+import org.zohara.agent.core.net.CatalogModel
 import org.zohara.agent.core.net.ModelsResp
 import org.zohara.agent.core.net.Profile
 import org.zohara.agent.core.net.ProfilesResp
@@ -206,6 +208,51 @@ object ModelLogic {
     val main = mutableListOf<String>(); val more = mutableListOf<String>()
     for (m in models) if (seen.add(family(m))) main += m else more += m
     return main to more
+  }
+
+  // ---- Claude Code catalog (the list comes from the server: zo-core data/claude-models.json) ----
+
+  /** A row of the grouped Claude Code list: a group title or one model. */
+  sealed interface CatalogRow {
+    data class Header(val title: String) : CatalogRow
+    data class Item(val model: CatalogModel) : CatalogRow
+  }
+
+  /** The window as people say it: 200000 -> "200K window", 1000000 -> "1M window"; "" when not known. */
+  fun windowLabel(tokens: Long): String = when {
+    tokens <= 0 -> ""
+    tokens >= 1_000_000 -> "${tokens / 1_000_000}M window"
+    else -> "${tokens / 1000}K window"
+  }
+
+  /** The grey line under a model name: its id (not for Default), its note and its window. */
+  fun catalogSub(m: CatalogModel): String =
+    listOf(if (m.kind == "default") "" else m.id, m.note, windowLabel(m.context)).filter { it.isNotBlank() }.joinToString(" · ")
+
+  /** The rows of the grouped list for a search: groups with no match are left out; the search looks at the label, the id and the aliases. */
+  fun catalogRows(catalog: List<CatalogGroup>, filter: String): List<CatalogRow> {
+    val q = filter.trim().lowercase()
+    return catalog.flatMap { g ->
+      val hit = g.models.filter { q.isEmpty() || (it.label + " " + it.id + " " + it.aliases.joinToString(" ")).lowercase().contains(q) }
+      if (hit.isEmpty()) emptyList() else listOf<CatalogRow>(CatalogRow.Header(g.title)) + hit.map { CatalogRow.Item(it) }
+    }
+  }
+
+  /** Every id of the catalog. */
+  fun catalogIds(catalog: List<CatalogGroup>): Set<String> = catalog.flatMap { g -> g.models.map { it.id } }.toSet()
+
+  /** The id typed by hand ("Other model id…"): offered when it is not one of the catalog's or the list's, and looks like an id. */
+  fun typedModelId(catalog: List<CatalogGroup>, models: List<String>, filter: String): String {
+    val q = filter.trim()
+    if (q.isEmpty() || !validModelId(q)) return ""
+    return if (q in catalogIds(catalog) || models.any { it.equals(q, ignoreCase = true) }) "" else q
+  }
+
+  /** The same rule as the server (zo-core `models::valid_model_id`): letters, digits and `. _ - : /`, an optional `[1m]`, at most 100 characters. */
+  fun validModelId(id: String): Boolean {
+    val t = id.trim()
+    val core = t.removeSuffix("[1m]")
+    return core.isNotEmpty() && t.length <= 100 && core.all { it.isLetterOrDigit() && it.code < 128 || it in "._-:/" }
   }
 
   /** MODEL-14/17: typed text that is not in the list is offered as "Use “x” as the model name". */

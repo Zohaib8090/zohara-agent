@@ -50,6 +50,8 @@ class ChatSession(
   @Volatile private var checking = false
   /** the stream ended with `done` (an answer finished: NOTIF-01) */
   private var answered = false
+  /** the name of the model that answered, when it was not the one chosen: shown under the answer */
+  private var answeredBy: String? = null
   /** the time of the newest memory change this session has seen (null: not asked yet) */
   private var memorySince: Long? = null
   private var memoryJob: Job? = null
@@ -206,7 +208,7 @@ class ChatSession(
     val runOn = env.runOn()
     val before = _state.value
     stepHasDeltas = false
-    answered = false
+    answered = false; answeredBy = null
     chatBegan = before.chatId != null
     activeGroup = null
     _state.update { st ->
@@ -326,6 +328,7 @@ class ChatSession(
         add(StuckItem(key(), ev.n, ev.tool))
       }
       is SendEvent.Notice -> if (ev.text.isNotBlank()) mutate { dropTransient(); finalizeLive(); add(NoticeItem(key(), ev.text)) }
+      is SendEvent.Model -> answeredBy = ev.label.takeIf { ev.differs && it.isNotBlank() }
       is SendEvent.Usage -> _state.update { it.copy(usage = Usage(ev.input, ev.output)) }
       is SendEvent.Error -> {
         mutate {
@@ -340,7 +343,11 @@ class ChatSession(
         return true
       }
       is SendEvent.MemoryUpdated -> showMemory(ev.summary, ev.time)
-      SendEvent.Done -> answered = true
+      SendEvent.Done -> {
+        answered = true
+        answeredBy?.let { name -> mutate { dropTransient(); finalizeLive(); endGroup(); add(NoticeItem(key(), "Answered by $name")) } }
+        answeredBy = null
+      }
       SendEvent.Ping, is SendEvent.Unknown, is SendEvent.Test, is SendEvent.Notify, is SendEvent.Result -> Unit // the last three belong to the Test of a scheduled task (ScheduledScreen)
     }
     return false
