@@ -357,19 +357,180 @@ pub fn legacy_instance(old: &str, address: Option<&str>) -> Option<Result<String
 }
 
 #[cfg(test)]
-pub(crate) mod testing {
+mod tests {
     use super::*;
+    use crate::store::TEST_ENV_LOCK;
+    use crate::tenant::testkit::*;
 
-    /// A custom provider for tests, without a check of the address being run twice: returns its id.
-    pub fn add(name: &str, format: &str, url: &str) -> String {
-        add_with_key(name, format, url, None)
+    #[test]
+    fn slugs_are_safe_unique_and_never_the_name() {
+        assert_eq!(slug("My router"), "my-router");
+        assert_eq!(slug("  Work   Gateway!! "), "work-gateway");
+        assert_eq!(slug("../../etc/passwd"), "etc-passwd");
+        assert_eq!(slug("Ünïcode ok"), "n-code-ok");
+        assert_eq!(slug("!!!"), "item");
+        assert_eq!(slug(&"a".repeat(80)).len(), 30);
+        assert!(!slug(&format!("{} b", "a".repeat(29))).ends_with('-'));
+        for name in ["My router", "a/b", "x:y", "..", "Ünï", "&&&", "default"] {
+            assert!(is_slug(&slug(name)), "{name}");
+        }
+        assert!(is_slug("groq-2") && !is_slug("") && !is_slug("-a") && !is_slug("a-") && !is_slug("A") && !is_slug("a:b") && !is_slug("a/b") && !is_slug("a b"));
+        let taken = ["pool", "pool-2"];
+        assert_eq!(unique_slug("Pool", |s| taken.contains(&s)), "pool-3");
+        assert_eq!(unique_slug("Other", |s| taken.contains(&s)), "other");
     }
 
-    pub fn add_with_key(name: &str, format: &str, url: &str, key: Option<&str>) -> String {
-        let c = super::add(name, format, url, None).unwrap();
-        if let Some(k) = key {
-            keys::set(&c.id, k).unwrap();
+    #[test]
+    fn names_are_one_to_forty_characters_without_control_characters() {
+        assert_eq!(clean_name("  My router  ", "provider").unwrap(), "My router");
+        assert!(clean_name(&"x".repeat(40), "provider").is_ok());
+        for bad in ["", "   ", &"x".repeat(41), "a\nb", "a\u{7}b", "a\u{0}b"] {
+            assert!(clean_name(bad, "provider").is_err(), "{bad:?}");
         }
-        c.id
+        assert!(clean_name("Ünï Ñame 名前", "account").is_ok());
+        assert_eq!(clean_name("", "account").unwrap_err(), "Give the account a name.");
+    }
+
+    fn entry(id: &str, name: &str, format: &str, url: &str) -> CustomProvider {
+        CustomProvider { id: id.into(), name: name.into(), format: format.into(), base_url: url.into(), default_model: None }
+    }
+
+    #[test]
+    fn a_list_of_custom_providers_is_checked_as_a_whole() {
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let ok = vec![entry("custom:a", "A", "chat", "http://127.0.0.1:1/v1"), entry("custom:b", "B", "claude", "https://example.com/v1")];
+        assert!(check_all(&ok).is_ok());
+        let mut dup_id = ok.clone();
+        dup_id[1].id = "custom:a".into();
+        assert!(check_all(&dup_id).unwrap_err().contains("same id"));
+        let mut dup_name = ok.clone();
+        dup_name[1].name = " a ".into();
+        assert!(check_all(&dup_name).unwrap_err().contains("already a custom provider named"));
+        for bad_id in ["custom:", "custom:A", "custom:a/b", "custom:../x", "openai", "custom:a:b", "custom:-a"] {
+            let mut l = ok.clone();
+            l[0].id = bad_id.into();
+            assert!(check_all(&l).is_err(), "{bad_id}");
+        }
+        let mut l = ok.clone();
+        l[0].format = "grpc".into();
+        assert!(check_all(&l).is_err());
+        for bad_url in ["", "ftp://x/v1", "not a url", "http://"] {
+            let mut l = ok.clone();
+            l[0].base_url = bad_url.into();
+            assert!(check_all(&l).is_err(), "{bad_url:?}");
+        }
+        let many: Vec<CustomProvider> = (0..=MAX).map(|i| entry(&format!("custom:p{i}"), &format!("P{i}"), "chat", "http://127.0.0.1:1/v1")).collect();
+        assert!(check_all(&many).unwrap_err().contains("At most"));
+    }
+
+    #[test]
+    fn the_config_of_the_list_is_read_back_and_a_key_is_never_part_of_it() {
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let t = fresh(false);
+        crate::tenant::scope(&t, || {
+            let c = add("My router", "responses", " http://127.0.0.1:5/v1 ", Some(" gpt-5 ")).unwrap();
+            assert_eq!((c.id.as_str(), c.name.as_str(), c.format.as_str(), c.base_url.as_str(), c.default_model.as_deref()), ("custom:my-router", "My router", "responses", "http://127.0.0.1:5/v1", Some("gpt-5")));
+            keys::set(&c.id, "sk-secret-123").unwrap();
+            let raw = std::fs::read_to_string(crate::audit::config_dir().join("ui-prefs.json")).unwrap_or_default();
+            assert!(raw.contains("my-router") && !raw.contains("sk-secret-123"), "{raw}");
+            // the provider as the agent sees it: format, address, default model
+            let p = resolve("custom:my-router").unwrap();
+            assert_eq!((p.protocol, p.base_url, p.models, p.name), (Protocol::OpenAiResponses, "http://127.0.0.1:5/v1", &["gpt-5"][..], "My router"));
+            assert!(providers::find("custom:my-router").is_some() && providers::listed().iter().any(|p| p.id == "custom:my-router"));
+            // a rename keeps the id, the key and the address
+            let r = update("custom:my-router", Some("Renamed"), None, None, None).unwrap();
+            assert_eq!((r.id.as_str(), r.name.as_str()), ("custom:my-router", "Renamed"));
+            assert_eq!(keys::get("custom:my-router").as_deref(), Some("sk-secret-123"));
+            // a new address drops the key typed for the old one; the same address (with a slash) keeps it
+            update("custom:my-router", None, None, Some("http://127.0.0.1:5/v1/"), None).unwrap();
+            assert_eq!(keys::get("custom:my-router").as_deref(), Some("sk-secret-123"));
+            update("custom:my-router", None, None, Some("http://127.0.0.1:6/v1"), None).unwrap();
+            assert_eq!(keys::get("custom:my-router"), None);
+            // the same name makes a second provider with a different id... only when the names differ; the same name is refused
+            assert!(add("renamed", "chat", "http://127.0.0.1:7/v1", None).is_err());
+            let b = add("Renamed 2", "chat", "http://127.0.0.1:7/v1", None).unwrap();
+            assert_eq!(b.id, "custom:renamed-2");
+            assert!(draft("chat", "http://127.0.0.1:7/v1").is_ok() && draft("grpc", "http://127.0.0.1:7/v1").is_err() && draft("chat", "").is_err());
+            remove("custom:my-router").unwrap();
+            assert!(remove("custom:my-router").is_err());
+            assert_eq!(list().len(), 1);
+        });
+    }
+
+    fn profile(id: &str, provider: &str) -> profiles::Profile {
+        profiles::Profile { id: id.into(), name: format!("Profile {id}"), provider: provider.into(), model: "m".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn the_old_single_custom_provider_becomes_one_named_instance_with_nothing_lost() {
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let t = fresh(false);
+        crate::tenant::scope(&t, || {
+            let mut sel = Selection { provider: "custom".into(), model: "mm".into(), effort: Some("high".into()), ..Default::default() };
+            sel.base_urls.insert("custom".into(), "http://127.0.0.1:7001/v1".into());
+            sel.save();
+            keys::set("custom", "k-old").unwrap();
+            keys::set("custom@p1", "k-profile").unwrap();
+            profiles::save(&[profile("p1", "custom"), profile("p2", "openai")]);
+            ui_prefs::set_hidden(vec!["custom".into(), "ollama".into()]).unwrap();
+            ui_prefs::set_provider_pref("custom", serde_json::json!({"pinned": ["mm"]})).unwrap();
+            let l = list();
+            assert_eq!(l.len(), 1, "{l:?}");
+            let c = &l[0];
+            assert_eq!((c.id.as_str(), c.name.as_str(), c.format.as_str(), c.base_url.as_str()), ("custom:custom-endpoint", "Custom endpoint", "chat", "http://127.0.0.1:7001/v1"));
+            // the choice, the key, the profile (and its key), the hidden state and the pins moved over; the old ids are gone
+            let sel = Selection::load();
+            assert_eq!((sel.provider.as_str(), sel.model.as_str(), sel.effort.as_deref()), ("custom:custom-endpoint", "mm", Some("high")));
+            assert!(!sel.base_urls.contains_key("custom"));
+            assert_eq!((keys::get("custom:custom-endpoint").as_deref(), keys::get("custom")), (Some("k-old"), None));
+            assert_eq!((keys::get("custom:custom-endpoint@p1").as_deref(), keys::get("custom@p1")), (Some("k-profile"), None));
+            let all = profiles::load();
+            assert_eq!((all[0].provider.as_str(), all[1].provider.as_str()), ("custom:custom-endpoint", "openai"));
+            let prefs = ui_prefs::load();
+            assert_eq!(prefs.hidden_providers, ["custom:custom-endpoint", "ollama"]);
+            assert_eq!(prefs.provider_prefs.get("custom:custom-endpoint").unwrap()["pinned"][0], "mm");
+            assert!(!prefs.provider_prefs.contains_key("custom"));
+            // it does not run twice, and an old id typed again later is not turned into a second instance
+            assert_eq!(list().len(), 1);
+            keys::set("custom", "stray").unwrap();
+            assert_eq!(list().len(), 1);
+        });
+        // a person who never used the custom provider gets none
+        let t2 = fresh(false);
+        crate::tenant::scope(&t2, || assert!(list().is_empty()));
+    }
+
+    #[test]
+    fn the_other_two_old_formats_are_migrated_with_their_own_names_and_a_bad_address_falls_back() {
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let t = fresh(false);
+        crate::tenant::scope(&t, || {
+            let mut sel = Selection { provider: "custom-claude".into(), model: "m".into(), ..Default::default() };
+            sel.base_urls.insert("custom-claude".into(), "http://127.0.0.1:7003/v1".into());
+            sel.base_urls.insert("custom-responses".into(), "ftp://not-allowed/v1".into());
+            sel.save();
+            keys::set("custom-responses", "k-r").unwrap();
+            let l = list();
+            let by = |id: &str| l.iter().find(|c| c.id == id).unwrap_or_else(|| panic!("{id} in {l:?}")).clone();
+            assert_eq!(by("custom:custom-endpoint-claude").format, "claude");
+            assert_eq!(by("custom:custom-endpoint-claude").base_url, "http://127.0.0.1:7003/v1");
+            assert_eq!(by("custom:custom-endpoint-responses").format, "responses");
+            assert_eq!(by("custom:custom-endpoint-responses").base_url, DEFAULT_URL);
+            assert_eq!(Selection::load().provider, "custom:custom-endpoint-claude");
+            assert_eq!(keys::get("custom:custom-endpoint-responses").as_deref(), Some("k-r"));
+        });
+    }
+
+    #[test]
+    fn a_synced_profile_from_a_computer_with_the_old_providers_lands_on_the_named_instance() {
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let t = fresh(false);
+        crate::tenant::scope(&t, || {
+            assert!(legacy_instance("openai", None).is_none());
+            let id = legacy_instance("custom-responses", Some("http://127.0.0.1:7010/v1")).unwrap().unwrap();
+            assert_eq!(id, "custom:custom-endpoint-responses");
+            assert_eq!(legacy_instance("custom-responses", None).unwrap().unwrap(), id, "the same one the next time");
+            assert_eq!(list().len(), 1);
+        });
     }
 }

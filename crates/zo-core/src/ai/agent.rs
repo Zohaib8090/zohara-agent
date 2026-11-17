@@ -415,7 +415,14 @@ fn ask(cfg: &Config, turns: &[Turn], specs: &[wire::ToolSpec], cancel: &AtomicBo
     let Some((next, key)) = super::accounts::next_after(cfg.provider.id, cfg.key.as_deref()) else { return first };
     let current = super::accounts::name_for_key(cfg.provider.id, cfg.key.as_deref());
     on_event(Event::Notice(format!("Switched to {} ({current} hit its limit)", next.name)));
-    let base_url = super::accounts::address_of(cfg.provider.id, &next.id).unwrap_or_else(|| Selection::load().base_urls.get(cfg.provider.id).filter(|u| !u.trim().is_empty()).cloned().unwrap_or_else(|| cfg.provider.base_url.to_string()));
+    // the next account's own address, else the one in use unless that was the previous account's own (then the provider's)
+    let base_url = super::accounts::address_of(cfg.provider.id, &next.id).unwrap_or_else(|| {
+        if super::accounts::list(cfg.provider.id).iter().any(|a| a.base_url.as_deref() == Some(cfg.base_url.as_str()) && a.name == current) {
+            Selection::load().base_urls.get(cfg.provider.id).filter(|u| !u.trim().is_empty()).cloned().unwrap_or_else(|| cfg.provider.base_url.to_string())
+        } else {
+            cfg.base_url.clone()
+        }
+    });
     let retry = Config { provider: cfg.provider, base_url, model: cfg.model.clone(), key: Some(key), system: cfg.system.clone(), vision: cfg.vision };
     ask_once(&retry, turns, specs, cancel, on_event)
 }

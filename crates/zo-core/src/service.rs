@@ -897,7 +897,9 @@ fn custom_json(c: &crate::ai::custom::CustomProvider) -> Value {
 fn accounts_json(provider_id: &str) -> Value {
     let sel = Selection::load();
     let active = if sel.provider == provider_id { sel.account.clone().unwrap_or_else(|| accounts::DEFAULT_ID.to_string()) } else { String::new() };
-    json!(accounts::list(provider_id).iter().map(|a| json!({"id": a.id, "name": a.name, "default": a.is_default, "hidden": a.hidden, "base_url": a.base_url, "has_key": a.has_key, "active": a.id == active})).collect::<Vec<_>>())
+    let pname = providers::find(provider_id).map(|p| p.name).unwrap_or("");
+    // `label` is how a picker names it: "Groq · Groq 1"
+    json!(accounts::list(provider_id).iter().map(|a| json!({"id": a.id, "name": a.name, "label": format!("{pname} · {}", a.name), "default": a.is_default, "hidden": a.hidden, "base_url": a.base_url, "has_key": a.has_key, "active": a.id == active})).collect::<Vec<_>>())
 }
 
 fn provider_json(sel: &Selection, p: &providers::Provider, hidden: &[String]) -> Value {
@@ -2621,6 +2623,178 @@ mod tenant_tests {
             assert_eq!(c.project, pa);
             assert!(chats::load().iter().filter(|c| c.project.is_empty()).count() == 1);
         });
+    }
+
+    fn key_of(t: &crate::tenant::Tenant, id: &str) -> Option<String> {
+        crate::tenant::scope(t, || crate::ai::keys::get(id))
+    }
+
+    #[test]
+    fn several_accounts_per_provider_each_with_its_own_key() {
+        let _g = lock();
+        let t = fresh(false);
+        let ask = |v: Value| talk(with_tenant(v, &t), true).remove(0);
+        // the single key a provider had is the account "Default"
+        assert!(ask(json!({"op": "set_key", "provider": "groq", "key": "gk-default"}))["error"].is_null());
+        let r = ask(json!({"op": "account_list", "provider": "groq"}));
+        let l = r["accounts"].as_array().unwrap();
+        assert_eq!((l.len(), l[0]["id"].clone(), l[0]["name"].clone(), l[0]["default"].clone(), l[0]["has_key"].clone()), (1, json!("default"), json!("Default"), json!(true), json!(true)), "{r}");
+        // add two, each with a key of its own
+        let a1 = ask(json!({"op": "account_add", "provider": "groq", "name": "Groq 1", "key": "gk-one"}));
+        let a2 = ask(json!({"op": "account_add", "provider": "groq", "name": "Groq 2", "key": "gk-two"}));
+        assert_eq!((a1["id"].clone(), a2["id"].clone()), (json!("groq-1"), json!("groq-2")), "{a1} {a2}");
+        assert_eq!(a2["accounts"].as_array().unwrap().len(), 3);
+        assert_eq!(a2["accounts"][2]["label"], "Groq · Groq 2");
+        // the key store ids are isolated: groq, groq:groq-1, groq:groq-2
+        assert_eq!((key_of(&t, "groq").as_deref(), key_of(&t, "groq:groq-1").as_deref(), key_of(&t, "groq:groq-2").as_deref()), (Some("gk-default"), Some("gk-one"), Some("gk-two")));
+        // a name is unique per provider (any case) and has the usual rules; the same name on another provider is fine
+        for bad in ["groq 1", "Default", "", "x".repeat(41).as_str(), "bad\tname"] {
+            assert!(ask(json!({"op": "account_add", "provider": "groq", "name": bad}))["error"].is_string(), "{bad:?}");
+        }
+        assert!(ask(json!({"op": "account_add", "provider": "openai", "name": "Groq 1", "key": "ok-1"}))["error"].is_null());
+        assert_eq!(key_of(&t, "openai:groq-1").as_deref(), Some("ok-1"));
+        assert_eq!(key_of(&t, "groq:groq-1").as_deref(), Some("gk-one"));
+        // no account for a provider without a key
+        assert!(ask(json!({"op": "account_add", "provider": "ollama", "name": "Two"}))["error"].as_str().unwrap().contains("no API key"));
+        assert!(ask(json!({"op": "account_add", "provider": "claude-code", "name": "Two"}))["error"].is_string());
+        // choosing an account: the providers op says which is in use, and the key used is that account's
+        let r = ask(json!({"op": "select", "provider": "groq", "account": "groq-2", "model": "llama"}));
+        assert_eq!((r["provider"].clone(), r["account"].clone()), (json!("groq"), json!("groq-2")), "{r}");
+        let r = ask(json!({"op": "providers"}));
+        assert_eq!((r["current"].clone(), r["current_account"].clone()), (json!("groq"), json!("groq-2")));
+        assert_eq!(find_in(&r, "groq")["accounts"].as_array().unwrap().iter().filter(|a| a["active"] == true).count(), 1);
+        crate::tenant::scope(&t, || {
+            let sel = Selection::load();
+            assert_eq!(crate::ai::profiles::get_key(&sel, "groq").as_deref(), Some("gk-two"));
+            assert_eq!(crate::ai::profiles::get_key(&sel, "openai"), None, "another provider never borrows the key of the account");
+        });
+        // a profile made now remembers the account, and its own key is a copy
+        let pid = ask(json!({"op": "profile_create", "name": "Fast"}))["id"].as_str().unwrap().to_string();
+        let profs = ask(json!({"op": "profiles"}));
+        let pr = profs["profiles"].as_array().unwrap().iter().find(|p| p["id"] == json!(pid)).unwrap().clone();
+        assert_eq!((pr["provider"].clone(), pr["account"].clone()), (json!("groq"), json!("groq-2")), "{pr}");
+        assert_eq!(key_of(&t, &format!("groq@{pid}")).as_deref(), Some("gk-two"));
+        // select Default again
+        let r = ask(json!({"op": "select", "provider": "groq", "account": "default", "model": "llama"}));
+        assert!(r["account"].is_null() || r["account"] == "default", "{r}");
+        // rename (also the Default one) and hide
+        assert!(ask(json!({"op": "account_rename", "provider": "groq", "id": "groq-1", "name": "Work"}))["error"].is_null());
+        assert!(ask(json!({"op": "account_rename", "provider": "groq", "id": "default", "name": "Main"}))["error"].is_null());
+        assert!(ask(json!({"op": "account_rename", "provider": "groq", "id": "groq-1", "name": "main"}))["error"].is_string(), "a name already used");
+        let l = ask(json!({"op": "account_hide", "provider": "groq", "id": "groq-2", "hidden": true}));
+        let names: Vec<(String, bool)> = l["accounts"].as_array().unwrap().iter().map(|a| (a["name"].as_str().unwrap().to_string(), a["hidden"].as_bool().unwrap())).collect();
+        assert_eq!(names, [("Main".to_string(), false), ("Work".to_string(), false), ("Groq 2".to_string(), true)]);
+        assert_eq!(key_of(&t, "groq:groq-1").as_deref(), Some("gk-one"), "a rename moves no key");
+        // delete: needs a confirm, removes the key (and the account in profiles and the choice falls back to Default); Default stays
+        assert!(ask(json!({"op": "account_remove", "provider": "groq", "id": "groq-2"}))["error"].as_str().unwrap().contains("Confirm"));
+        ask(json!({"op": "select", "provider": "groq", "account": "groq-2", "model": "llama"}));
+        let r = ask(json!({"op": "account_remove", "provider": "groq", "id": "groq-2", "confirm": true}));
+        assert!(r["error"].is_null(), "{r}");
+        assert_eq!(key_of(&t, "groq:groq-2"), None);
+        assert_eq!(key_of(&t, "groq:groq-1").as_deref(), Some("gk-one"));
+        assert_eq!(ask(json!({"op": "providers"}))["current_account"], "default");
+        let profs = ask(json!({"op": "profiles"}));
+        assert!(profs["profiles"].as_array().unwrap().iter().all(|p| p["account"].is_null()), "{profs}");
+        assert!(ask(json!({"op": "account_remove", "provider": "groq", "id": "default", "confirm": true}))["error"].is_string());
+        assert!(ask(json!({"op": "account_remove", "provider": "groq", "id": "nope", "confirm": true}))["error"].is_string());
+        assert_eq!(key_of(&t, "groq").as_deref(), Some("gk-default"));
+        // another person has none of it
+        let other = fresh(false);
+        let r = talk(with_tenant(json!({"op": "account_list", "provider": "groq"}), &other), true).remove(0);
+        assert_eq!((r["accounts"].as_array().unwrap().len(), key_of(&other, "groq:groq-1")), (1, None));
+    }
+
+    #[test]
+    fn an_account_is_tested_with_its_own_key_and_the_address_of_its_own() {
+        let _g = lock();
+        let t = fresh(false);
+        let ask = |v: Value| talk(with_tenant(v, &t), true).remove(0);
+        use crate::ai::mock::{Answer, Mock};
+        let m = Mock::start(|_, path, _| if path.ends_with("/models") { Answer::json(200, json!({"data": [{"id": "m1"}]})) } else { Answer::json(200, json!({"choices": [{"message": {"content": "ok"}}]})) });
+        // an account of a custom provider: the key is typed for that address
+        let cid = ask(json!({"op": "custom_provider_add", "name": "Router", "base_url": m.url, "key": "k-default"}))["id"].as_str().unwrap().to_string();
+        assert_eq!(cid, "custom:router");
+        let r = ask(json!({"op": "account_add", "provider": cid, "name": "Second", "key": "k-second"}));
+        assert_eq!(r["id"], "second", "{r}");
+        assert_eq!(key_of(&t, "custom:router:second").as_deref(), Some("k-second"));
+        let r = ask(json!({"op": "account_test", "provider": cid, "id": "second", "model": "m1"}));
+        assert_eq!(r["works"], true, "{r}");
+        let r = ask(json!({"op": "account_test", "provider": cid, "id": "default", "model": "m1"}));
+        assert_eq!(r["works"], true, "{r}");
+        let auth: Vec<String> = m.seen.lock().unwrap().iter().map(|s| s.3.clone()).collect();
+        assert!(auth.contains(&"Bearer k-second".to_string()) && auth.contains(&"Bearer k-default".to_string()), "{auth:?}");
+        assert!(ask(json!({"op": "account_test", "provider": cid, "id": "gone"}))["error"].is_string());
+        // a built-in provider's account may have an address of its own only if it is the provider's own host
+        let r = ask(json!({"op": "account_add", "provider": "openai", "name": "Proxy", "key": "k", "base_url": "https://evil.example/v1"}));
+        assert!(r["error"].as_str().unwrap().contains("own address"), "{r}");
+        assert_eq!(key_of(&t, "openai:proxy"), None, "a refused account leaves no key behind");
+        // deleting a custom provider takes its accounts and their keys along
+        assert!(ask(json!({"op": "custom_provider_remove", "id": cid, "confirm": true}))["error"].is_null());
+        assert_eq!((key_of(&t, "custom:router"), key_of(&t, "custom:router:second")), (None, None));
+        assert_eq!(ask(json!({"op": "account_list", "provider": cid}))["error"], "unknown provider");
+    }
+
+    fn rotation_events(t: &crate::tenant::Tenant, provider: &str, url: &str) -> (Result<(), String>, Vec<String>) {
+        use crate::ai::agent::{Config, Event};
+        let mut events = Vec::new();
+        let r = crate::tenant::scope(t, || {
+            let p = providers::find(provider).unwrap();
+            let cfg = Config { provider: p, base_url: url.to_string(), model: "m".into(), key: crate::ai::keys::get(provider), system: "sys".into(), vision: false };
+            let mut history = Vec::new();
+            crate::ai::agent::run(&cfg, &mut history, "hi", Mode::Auto, &crate::approval::Deny, &crate::approval::NoQuestions, &std::sync::atomic::AtomicBool::new(false), &mut |e| match e {
+                Event::Text(t) => events.push(format!("text:{t}")),
+                Event::Notice(n) => events.push(format!("notice:{n}")),
+                _ => {}
+            })
+        });
+        (r, events)
+    }
+
+    #[test]
+    fn at_a_rate_limit_the_next_account_of_the_same_provider_takes_over_once_when_the_setting_is_on() {
+        let _g = lock();
+        use crate::ai::mock::{Answer, Mock};
+        let limited = || Answer::json(429, json!({"error": {"message": "Rate limit reached"}}));
+        let t = fresh(false);
+        let ask = |v: Value| talk(with_tenant(v, &t), true).remove(0);
+        // groq's host is fixed, so a custom provider stands in (accounts work the same for it)
+        ask(json!({"op": "custom_provider_add", "name": "Pool", "base_url": "http://127.0.0.1:9/v1", "key": "ka"}));
+        ask(json!({"op": "account_add", "provider": "custom:pool", "name": "Pool 2", "key": "kb"}));
+        ask(json!({"op": "custom_provider_add", "name": "Other", "base_url": "http://127.0.0.1:9/v1", "key": "kz"}));
+        assert_eq!(ask(json!({"op": "providers"}))["rotate_on_limit"], false, "off unless the person turns it on");
+        // OFF: the limit is the answer
+        let m = Mock::start(move |_, _, _| limited());
+        let (r, ev) = rotation_events(&t, "custom:pool", &m.url);
+        assert!(r.unwrap_err().contains("429"), "{ev:?}");
+        assert_eq!(m.paths().len(), 1, "no retry when the setting is off");
+        // ON: the second account answers, with a notice, and exactly one retry
+        assert_eq!(ask(json!({"op": "settings_set", "rotate_on_limit": true}))["error"], Value::Null);
+        assert_eq!(ask(json!({"op": "providers"}))["rotate_on_limit"], true);
+        let n = std::sync::atomic::AtomicUsize::new(0);
+        let m = Mock::start(move |_, _, _| if n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 { limited() } else { Answer::json(200, json!({"choices": [{"message": {"content": "fine"}}]})) });
+        let (r, ev) = rotation_events(&t, "custom:pool", &m.url);
+        assert!(r.is_ok(), "{r:?} {ev:?}");
+        assert!(ev.contains(&"notice:Switched to Pool 2 (Default hit its limit)".to_string()) && ev.contains(&"text:fine".to_string()), "{ev:?}");
+        let auth: Vec<String> = m.seen.lock().unwrap().iter().map(|s| s.3.clone()).collect();
+        assert_eq!(auth, ["Bearer ka", "Bearer kb"]);
+        // both limited: one retry only, then the error
+        let m = Mock::start(move |_, _, _| limited());
+        let (r, _) = rotation_events(&t, "custom:pool", &m.url);
+        assert!(r.is_err());
+        assert_eq!(m.paths().len(), 2, "tried the second account once, no more");
+        // a provider with one account has nobody to switch to, and a provider never borrows another provider's accounts
+        let m = Mock::start(move |_, _, _| limited());
+        let (r, ev) = rotation_events(&t, "custom:other", &m.url);
+        assert!(r.is_err() && !ev.iter().any(|e| e.starts_with("notice:")), "{ev:?}");
+        assert_eq!(m.paths().len(), 1);
+        // an error that is not a limit is not retried, and a hidden or key-less account is skipped
+        let m = Mock::start(move |_, _, _| Answer::json(401, json!({"error": {"message": "bad key"}})));
+        assert!(rotation_events(&t, "custom:pool", &m.url).0.is_err());
+        assert_eq!(m.paths().len(), 1);
+        ask(json!({"op": "account_hide", "provider": "custom:pool", "id": "pool-2", "hidden": true}));
+        let m = Mock::start(move |_, _, _| limited());
+        assert!(rotation_events(&t, "custom:pool", &m.url).0.is_err());
+        assert_eq!(m.paths().len(), 1, "a hidden account is not used");
     }
 }
 

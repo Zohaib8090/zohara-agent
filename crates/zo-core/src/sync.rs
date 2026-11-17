@@ -1883,6 +1883,79 @@ mod tests {
     }
 
     #[test]
+    fn named_custom_providers_and_accounts_travel_with_the_settings_and_their_keys_only_with_key_sync() {
+        let _g = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let a = crate::tenant::testkit::fresh(false);
+        let b = crate::tenant::testkit::fresh(false);
+        let restricted = crate::tenant::testkit::fresh(true);
+        // which key ids may travel: a provider, an account of one, a profile; never another account name that is not a slug
+        for ok in ["groq", "groq:groq-2", "openai@p1700000000000"] {
+            assert!(syncable_key_id(ok), "{ok}");
+        }
+        for bad in ["claude-code", "claude-code:x", "groq:Bad Name", "groq:../x", "groq:", "ollama:x", "nonsense:x", "custom", "custom-responses", "sync-token", "mcp-github"] {
+            assert!(!syncable_key_id(bad), "{bad}");
+        }
+        let doc = crate::tenant::scope(&a, || {
+            let c = crate::ai::custom::add("Home Ollama", "chat", "https://router.example/v1", None).unwrap();
+            crate::ai::keys::set(&c.id, "k-home").unwrap();
+            crate::ai::accounts::add("groq", "Groq 1", None).unwrap();
+            crate::ai::keys::set("groq:groq-1", "k-g1").unwrap();
+            crate::ai::accounts::add(&c.id, "Work", None).unwrap();
+            for ok in ["custom:home-ollama", "custom:home-ollama:work", "custom:home-ollama@p17"] {
+                assert!(syncable_key_id(ok), "{ok}");
+            }
+            assert!(!syncable_key_id("custom:not-added") && !syncable_key_id("custom:not-added:work"), "an instance that is not here has no key to sync");
+            let d = get_doc("settings", SETTINGS_ID).unwrap();
+            assert!(!d.to_string().contains("k-home") && !d.to_string().contains("k-g1"), "a key never sits in the settings document");
+            // the keys are offered by the key sync (which only runs when key sync is on)
+            assert!(key_candidates().iter().any(|k| k == "groq:groq-1") && key_candidates().iter().any(|k| k == "custom:home-ollama:work") && key_candidates().iter().any(|k| k == "custom:home-ollama"));
+            d
+        });
+        // the other computer takes the names, the address and the accounts; it has no key until its key sync brings them
+        crate::tenant::scope(&b, || {
+            assert!(put_doc("settings", SETTINGS_ID, &doc).unwrap());
+            let l = crate::ai::custom::list();
+            assert_eq!((l.len(), l[0].id.as_str(), l[0].name.as_str(), l[0].base_url.as_str()), (1, "custom:home-ollama", "Home Ollama", "https://router.example/v1"));
+            assert_eq!(crate::ai::accounts::list("groq").iter().map(|a| a.name.clone()).collect::<Vec<_>>(), ["Default", "Groq 1"]);
+            assert_eq!((crate::ai::keys::get("custom:home-ollama"), crate::ai::keys::get("groq:groq-1")), (None, None));
+            assert!(put_doc("keys", "groq:groq-1", &json!({"key": "k-g1", "updated": 9})).unwrap());
+            assert_eq!(crate::ai::keys::get("groq:groq-1").as_deref(), Some("k-g1"));
+            assert!(put_doc("keys", "groq:never-added", &json!({"key": "x", "updated": 9})).is_ok(), "a key of an account that is not here yet is held until the settings arrive");
+        });
+        // an address with a secret in it stays on the computer
+        crate::tenant::scope(&a, || {
+            crate::ai::custom::add("Secret", "chat", "https://router.example/v1?api_key=abcdef", None).unwrap();
+            let d = get_doc("settings", SETTINGS_ID).unwrap();
+            assert!(!d.to_string().contains("abcdef") && !d.to_string().contains("secret"), "{d}");
+        });
+        let mut bad = doc.clone();
+        bad["custom_providers"][0]["base_url"] = json!("https://user:pw@router.example/v1");
+        crate::tenant::scope(&b, || assert!(put_doc("settings", SETTINGS_ID, &bad).is_err()));
+        // a restricted account takes no private address in an instance or in an account
+        let mut private = doc.clone();
+        private["custom_providers"][0]["base_url"] = json!("http://127.0.0.1:8000/v1");
+        let mut private_acct = doc.clone();
+        private_acct["accounts"]["groq"][0]["base_url"] = json!("http://10.0.0.5/v1");
+        crate::tenant::scope(&restricted, || {
+            for d in [&private, &private_acct] {
+                let e = put_doc("settings", SETTINGS_ID, d).unwrap_err();
+                assert!(e.contains("public https"), "{e}");
+            }
+            assert!(put_doc("settings", SETTINGS_ID, &doc).unwrap());
+        });
+        // a profile from a computer that still has the single "custom" provider lands on the named instance made for it
+        crate::tenant::scope(&b, || {
+            let p = json!({"id": "pz", "name": "Old", "provider": "custom", "model": "m", "base_url": "https://router.example/v2", "updated": 5});
+            assert!(put_doc("profiles", "pz", &p).unwrap());
+            let got = get_doc("profiles", "pz").unwrap();
+            assert_eq!(got["provider"], "custom:custom-endpoint", "{got}");
+            // a profile of a named instance this computer has, and one it does not have yet
+            assert!(put_doc("profiles", "py", &json!({"id": "py", "name": "New", "provider": "custom:home-ollama", "model": "m", "updated": 5})).unwrap());
+            assert!(put_doc("profiles", "px", &json!({"id": "px", "name": "New", "provider": "custom:nobody", "model": "m", "updated": 5})).is_err());
+        });
+    }
+
+    #[test]
     fn a_restricted_account_takes_no_mcp_server_no_private_address_and_nothing_big() {
         let _g = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let t = crate::tenant::testkit::fresh(true);
