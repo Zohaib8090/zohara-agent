@@ -12,11 +12,13 @@ The same brain as the desktop app, on a server that is always on, behind a Fireb
   (Firestore `users/<tenant>/meta/devices` and the index `deviceidx/<sha256>`). Kind `desktop` gets scope `sync`, which may call only `/api/sync/*`; kind `cli`
   gets `full`, which also allows `/api/op`, `/api/send`, `/api/reply` (the `zo` client). A credential is tied to its own tenant, can be revoked
   (Account > signed-in devices, or `/api/auth/signout`), and is never logged. `/api/account/device_create` is gone. At most 10 per person.
+`GET /api/connectors` (any sign-in, 30 a minute per person) is the connectors directory, read from the public MCP registry and cached an hour; see `MCP.md` "Browse connectors".
 * **Login**: every call needs a Firebase ID token or a device credential (`Authorization: Bearer ...`). The Firebase token is checked against
   Google's keys, must be for this Firebase project and a verified account: Google, or e-mail and password with a **verified e-mail** (anonymous, custom, phone and unverified sign-ins are refused). Any such account may register, except addresses in
   `ZO_BLOCKED_EMAILS` and once `ZO_MAX_USERS` (200) is reached. Addresses in `ZO_ADMIN_EMAILS` are **admins** (all tools, Claude Code, SSH
   machines, Bypass); everybody else is **restricted** (web search, page fetch and memory tools only, no MCP servers, provider addresses must be public https, quotas).
 * **Tenant**: first 32 hex characters of `sha256("zo-tenant:" + uid)`. Disk `$ZO_TENANT_ROOT/<tenant>/{config,data}`; no raw uid or e-mail in any path.
+* **Scheduled tasks on the server** (`cloudrun.rs`, SCHEDULED.md): `ZO_CLOUD_TASKS` = `all` (default: everybody signed in; restricted people have reminders and web search tasks with limits) | `admins` | `off`. The runner wakes every 10 seconds; its index of who is due is the Firestore collection `sched_index`. `POST /api/schedule/test` streams the Test of a task.
 * **Limits**: 60 requests/minute and 2 concurrent `/api/send` per user, `ZO_MAX_RUNS` (8) answers at once, bodies 1 MB (`/api/op`, `/api/reply`), 14 MB (`/api/send`, it may carry attachments: see PUBLIC.md) and 20 MB (`/api/sync/*`); over the limit: 429 with `Retry-After`.
 * **Firestore**: Render's disk is lost on every redeploy, so at start everything is fetched from Firestore and every change is
   sent back within about 3 seconds. One sync manager per tenant (pulled on its first request, idle ones are evicted from disk after 30 minutes with nothing unsynced). Layout under `users/<tenant>`: `chats/{id}`, `memory/{id}`, `files/{name}` (model choice,

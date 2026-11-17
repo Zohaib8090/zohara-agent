@@ -79,6 +79,8 @@ fn zo_mcp_path() -> String {
 thread_local! {
     /// Which Settings page is open: "" is the list of pages.
     static PAGE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    /// What the memory page lists: "all", "global" or a project id.
+    static MEM_SCOPE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
 pub fn home(ui: &Rc<Ui>) {
@@ -426,6 +428,28 @@ pub fn show(ui: &Rc<Ui>) {
 
     // ---- MCP servers Zohara Agent can use ----
     let (sec, card) = section("MCP servers Zohara Agent can use");
+    // once per run: ask the directory whether the address of a connector from it changed (a changed one is held until decided)
+    static CHECKED: std::sync::Once = std::sync::Once::new();
+    if mcp_client::load_servers().iter().any(|s| s.registry.is_some()) {
+        CHECKED.call_once(|| {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let n = zo_core::connectors::check_changes(&zo_core::connectors::Source::from_env(), &zo_core::connectors::CACHE, zo_core::connectors::now_secs()).len();
+                let _ = tx.send(n);
+            });
+            let ui2 = ui.clone();
+            gtk::glib::timeout_add_local(std::time::Duration::from_millis(500), move || match rx.try_recv() {
+                Ok(n) => {
+                    if n > 0 {
+                        show(&ui2);
+                    }
+                    gtk::glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+                Err(_) => gtk::glib::ControlFlow::Break,
+            });
+        });
+    }
     let servers = mcp_client::load_servers();
     let add = secondary("Add server");
     let ui2 = ui.clone();
@@ -433,7 +457,14 @@ pub fn show(ui: &Rc<Ui>) {
     let import = secondary("Paste a config");
     let ui2 = ui.clone();
     import.connect_clicked(move |_| import_servers_sheet(&ui2));
+    let browse = crate::primary("Browse connectors");
+    let ui2 = ui.clone();
+    browse.connect_clicked(move |_| {
+        let ui3 = ui2.clone();
+        crate::connectors_ui::browse_sheet(&ui2, Rc::new(move || show(&ui3)));
+    });
     let both = hbox(8);
+    both.append(&browse);
     both.append(&import);
     both.append(&add);
     card.append(&row("Add tools from other programs", "Add an MCP server (a program, or a remote one by its address) and the chat can use its tools. Tools that only read run on their own; the rest ask first, unless the mode is Bypass.", Some(&both)));
@@ -453,6 +484,19 @@ pub fn show(ui: &Rc<Ui>) {
         let cmdl = lbl(&s.command, "pc-meta");
         cmdl.set_ellipsize(gtk::pango::EllipsizeMode::End);
         col.append(&cmdl);
+        if let Some(new) = &s.address_changed {
+            let n = lbl(&format!("Address changed: the directory now lists {new}. It is held until you decide."), "field-hint");
+            n.set_wrap(true);
+            n.set_xalign(0.0);
+            col.append(&n);
+            let accept = secondary("Use the new address");
+            let (ui2, name) = (ui.clone(), s.name.clone());
+            accept.connect_clicked(move |_| {
+                let _ = zo_core::connectors::accept_change(&name);
+                show(&ui2);
+            });
+            col.append(&accept);
+        }
         r.append(&col);
         let sw = gtk::Switch::new();
         sw.set_active(s.enabled && !s.held);
@@ -463,6 +507,9 @@ pub fn show(ui: &Rc<Ui>) {
             if let Some(x) = all.iter_mut().find(|x| x.name == name) {
                 x.enabled = on;
                 x.held = false;
+                if on {
+                    x.address_changed = None; // switched on as it is: the old address is kept
+                }
             }
             mcp_client::save_servers(&all);
             gtk::glib::Propagation::Proceed
@@ -474,9 +521,13 @@ pub fn show(ui: &Rc<Ui>) {
             let (ui3, name3) = (ui2.clone(), name.clone());
             crate::confirm_delete(&ui2, &format!("Remove \"{name}\"?"), "Zohara Agent stops using this server and forgets its sign-in.", move || {
                 let mut all = mcp_client::load_servers();
+                let gone: Vec<_> = all.iter().filter(|x| x.name == name3).cloned().collect();
                 all.retain(|x| x.name != name3);
                 mcp_client::save_servers(&all);
                 zo_core::ai::keys::clear(&mcp_client::token_id(&name3));
+                for g in &gone {
+                    mcp_client::clear_secrets(g);
+                }
                 show(&ui3);
             });
         });
@@ -663,7 +714,62 @@ pub fn show(ui: &Rc<Ui>) {
             talk.connect_clicked(move |_| memory_chat_sheet(&ui2));
         }
         card.append(&row("Edit by talking", "Tell Zohara Agent what to change, in your own words: \"join my preferences into one note\", \"forget the old laptop\", \"my name is spelled Zohaib\". This chat only edits the notes.", Some(&talk)));
-        let mut items = st.items.clone();
+
+        // the memory feed: the chip above the message box and how often the agent reads
+        let upd = gtk::Switch::new();
+        upd.set_active(st.show_updates);
+        upd.connect_state_set(|_, on| {
+            mem::set_show_updates(on);
+            gtk::glib::Propagation::Proceed
+        });
+        card.append(&row("Show memory updates", "When Zohara Agent changes the memory, a small \"Memory updated · View\" note shows above the message box. View lists what changed and lets you undo it.", Some(&upd)));
+        let every = gtk::SpinButton::with_range(mem::MIN_EVERY as f64, 20.0, 1.0);
+        every.set_value(st.every as f64);
+        every.connect_value_changed(|s| {
+            mem::set_every(s.value() as usize);
+        });
+        card.append(&row("How often it reads your chats", &format!("After this many messages of yours in a chat (at least {}, normally 3). Fewer is more up to date, more is cheaper.", mem::MIN_EVERY), Some(&every)));
+        let changes = secondary("View changes");
+        {
+            let ui2 = ui.clone();
+            changes.connect_clicked(move |_| crate::memfeed::changes_sheet(&ui2, false));
+        }
+        card.append(&row("Recent changes", "What the memory agent added, updated or removed lately, with Undo for each.", Some(&changes)));
+
+        // which notes this page lists: all of them, the ones for every chat, or one project's
+        let projects: Vec<(String, String)> = zo_core::store::projects::Store::load().projects.into_iter().map(|p| (p.id, p.name)).collect();
+        let mut scope = MEM_SCOPE.with(|m| m.borrow().clone());
+        if scope.is_empty() || (scope != "all" && scope != "global" && !projects.iter().any(|(id, _)| *id == scope)) {
+            scope = "all".into();
+        }
+        if !projects.is_empty() {
+            let mut names = vec!["All notes".to_string(), "Every chat (global)".to_string()];
+            names.extend(projects.iter().map(|(_, n)| format!("Project: {n}")));
+            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            let dd = gtk::DropDown::from_strings(&refs);
+            dd.set_selected(match scope.as_str() {
+                "all" => 0,
+                "global" => 1,
+                id => 2 + projects.iter().position(|(p, _)| p == id).unwrap_or(0) as u32,
+            });
+            let (ui2, ids) = (ui.clone(), projects.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>());
+            dd.connect_selected_notify(move |d| {
+                let v = match d.selected() {
+                    0 => "all".to_string(),
+                    1 => "global".to_string(),
+                    n => ids.get(n as usize - 2).cloned().unwrap_or_else(|| "all".into()),
+                };
+                MEM_SCOPE.with(|m| *m.borrow_mut() = v);
+                show(&ui2);
+            });
+            card.append(&row("Show", "Notes for every chat, and the notes Zohara Agent keeps for one project (only chats in that project are told them).", Some(&dd)));
+        }
+        let scope_name = |id: &str| projects.iter().find(|(p, _)| p == id).map(|(_, n)| n.clone());
+        let mut items: Vec<_> = st.items.iter().filter(|i| match scope.as_str() {
+            "all" => true,
+            "global" => i.scope.is_empty(),
+            p => i.scope == p,
+        }).cloned().collect();
         items.sort_by(|a, b| (b.pinned, b.updated).cmp(&(a.pinned, a.updated)));
         let groups = [("person", "About you"), ("preference", "Preferences"), ("project", "Projects"), ("fact", "Facts"), ("episode", "Chat summaries")];
         for (kind, label) in groups {
@@ -710,7 +816,13 @@ pub fn show(ui: &Rc<Ui>) {
                 }
                 controls.append(&del);
                 let title = if kind == "episode" { it.title.clone() } else { String::new() };
-                card.append(&row(&title, &it.text, Some(&controls)));
+                // a note of a project says so (only chats of that project are told it)
+                let sub = match (it.scope.is_empty(), scope_name(&it.scope)) {
+                    (true, _) => it.text.clone(),
+                    (false, Some(n)) => format!("{}\nProject: {n}", it.text),
+                    (false, None) => format!("{}\nProject (gone)", it.text),
+                };
+                card.append(&row(&title, &sub, Some(&controls)));
             }
         }
         if items.len() > 80 {
@@ -721,8 +833,11 @@ pub fn show(ui: &Rc<Ui>) {
             let ui2 = ui.clone();
             add.connect_clicked(move |_| {
                 let ui3 = ui2.clone();
-                text_sheet(&ui2, "Add a note", "", "What should Zohara Agent remember?", "I prefer short answers", "Add", false, |t| {
-                    mem::remember(&t, "fact", "").map(|_| "Remembered".to_string()).ok_or_else(|| "That note is too short.".to_string())
+                // on a project's list the note belongs to that project
+                let target = MEM_SCOPE.with(|m| m.borrow().clone());
+                let target = if target == "all" || target == "global" { String::new() } else { target };
+                text_sheet(&ui2, "Add a note", "", "What should Zohara Agent remember?", "I prefer short answers", "Add", false, move |t| {
+                    mem::remember_in(&t, "fact", "", &target).map(|_| "Remembered".to_string()).ok_or_else(|| "That note is too short.".to_string())
                 }, move || show(&ui3));
             });
         }
@@ -742,6 +857,44 @@ pub fn show(ui: &Rc<Ui>) {
         both.append(&add);
         both.append(&forget);
         card.append(&row("Your notes", "Pin a note to make sure the AI always knows it. Delete one that is wrong. You can also just tell Zohara Agent: \"remember that ...\" or \"forget that ...\".", Some(&both)));
+        let export = secondary("Export…");
+        let import = secondary("Import…");
+        {
+            let ui2 = ui.clone();
+            export.connect_clicked(move |_| {
+                let dialog = gtk::FileDialog::builder().title("Export the memory").initial_name("zohara-memory.json").build();
+                dialog.save(Some(&ui2.window), gtk::gio::Cancellable::NONE, move |res| {
+                    let Ok(file) = res else { return };
+                    let Some(path) = file.path() else { return };
+                    // every note, with the project each belongs to (what the page lists does not matter)
+                    let text = serde_json::to_string_pretty(&zo_core::store::memory_io::export("all")).unwrap_or_default();
+                    let _ = std::fs::write(path, text);
+                });
+            });
+        }
+        {
+            let ui2 = ui.clone();
+            import.connect_clicked(move |_| {
+                let dialog = gtk::FileDialog::builder().title("Import notes").build();
+                let ui3 = ui2.clone();
+                dialog.open(Some(&ui2.window), gtk::gio::Cancellable::NONE, move |res| {
+                    let Ok(file) = res else { return };
+                    let Some(path) = file.path() else { return };
+                    let msg = match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).map_err(|_| "That file is not a memory export.".to_string())).and_then(|v| zo_core::store::memory_io::import(&v)) {
+                        Ok((a, same, skipped)) => format!("Imported {a} note{}. {same} were already here, {skipped} were left out (a project that is not on this computer, or too short).", if a == 1 { "" } else { "s" }),
+                        Err(e) => e,
+                    };
+                    let dialog = adw::AlertDialog::new(Some("Import notes"), Some(&msg));
+                    dialog.add_response("ok", "OK");
+                    dialog.present(Some(&ui3.window));
+                    show(&ui3);
+                });
+            });
+        }
+        let io = hbox(6);
+        io.append(&export);
+        io.append(&import);
+        card.append(&row("Export and import", "A file with all your notes, including each project's. Importing adds what is not there yet; a project's notes go to the project with the same name, or are left out.", Some(&io)));
         content.append(&sec);
     }
 
@@ -1438,6 +1591,7 @@ fn add_server_sheet(ui: &Rc<Ui>) {
                 scope: nonempty(&scopes.text()),
                 held: false,
                 updated: 0,
+                ..Default::default()
             };
             let typed_token = token.text().to_string();
             if cfg.name.is_empty() || cfg.command.is_empty() {
@@ -1587,7 +1741,7 @@ fn import_servers_sheet(ui: &Rc<Ui>) {
 }
 
 /// A row that shows the sign-in link a server gave, with Copy and Open, so it can go to any browser or profile. Hidden until a link arrives.
-fn link_row() -> (gtk::Box, Rc<dyn Fn(&str)>) {
+pub(crate) fn link_row() -> (gtk::Box, Rc<dyn Fn(&str)>) {
     let row = hbox(8);
     row.set_visible(false);
     let label = lbl("", "field-hint");

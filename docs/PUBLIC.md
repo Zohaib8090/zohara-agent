@@ -32,7 +32,8 @@ the vendors' pages read on 2026-11-12 (sources at the end); the per-user usage n
 | use Claude Code mode | it runs a program with the owner's login on the server (no operator switch gives it to others; they use their own computer through the desktop link, `LINK.md`) |
 | load MCP servers (stdio or remote) | stdio means running programs; remote means arbitrary outbound calls |
 | use custom or local provider addresses unless they are public `https` hosts | SSRF: `localhost`, private networks and the cloud metadata address must be unreachable (same host check as the fetch tool) |
-| add machines, schedules, projects with paths, or pick Bypass mode | server-side execution, background work and unattended approval |
+| add machines, projects with paths, or pick Bypass mode | server-side execution and unattended approval |
+| have scheduled tasks beyond **reminders and web search tasks** (5 tasks, at most hourly, 24 runs a day; every approval on the server is answered no; `ZO_CLOUD_TASKS=admins\|off` narrows it, see SCHEDULED.md) | background work on shared infrastructure |
 
 Quotas: message text up to 20,000 characters, tenant data folder up to 25 MB (writes beyond it are refused with a clear message),
 8 tool steps per answer, 120 seconds per answer.

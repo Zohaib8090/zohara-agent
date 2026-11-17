@@ -15,6 +15,8 @@ Written 2026-11-12 for the web version of Zohara Agent (`crates/zo-server`). Thr
 | FCM (Android app) | `fcm.googleapis.com/v1/projects/<project>/messages:send` with the Firebase service account the server already has (scope `firebase.messaging`) | notification "Zohara Agent: Your answer is ready", data `chat` (and `title` under the same rule). FCM is not end-to-end encrypted |
 | Registration | this server | the browser's push address and two keys (needed to encrypt for it), a label such as "Chrome on Linux", the title choice. Kept in Firestore `users/<tenant>/meta/push`, deleted with the account (`delete` wipes the whole `users/<tenant>` tree) |
 
+Scheduled tasks (SCHEDULED.md) use the same channel with `"type":"task"` (`chat` when the run left one, `ok`, `reminder`); the task's name and a one-line result (`title`, `body`, cut to 60 and 140 characters) are included only for a device whose owner switched the title on. FCM data carries the same fields (`ok` and `reminder` as the texts "true" and "false").
+
 Never sent: the question, the answer, tool output, the API key, the e-mail address. The chat id is a random-looking number (`c<time>`), not content.
 
 The browser stores its choices in `localStorage["zo-notify"]` (which toggles are on, the id of its registration on the server, and which account it belongs to). A browser that was registered for one account and is used by another is cut loose (its push subscription is dropped) so one person's notices never reach the next person's session.

@@ -5,6 +5,8 @@ pub mod artifacts;
 pub mod chats;
 pub mod machines;
 pub mod memory;
+pub mod memory_io;
+pub mod memory_log;
 pub mod personality;
 pub mod projects;
 pub mod schedules;

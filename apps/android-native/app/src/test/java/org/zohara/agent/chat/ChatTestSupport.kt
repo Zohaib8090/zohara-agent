@@ -45,6 +45,14 @@ class FakeBackend : ChatBackend, PillsBackend {
   val calls = mutableListOf<String>()
   var computerStatusError: ApiException? = null
 
+  /** the answers `memory_changes` gives, one per ask (an empty queue answers nothing, like a backend without a log); [memoryAsks] are the `since` values asked */
+  val memoryResults = ArrayDeque<org.zohara.agent.core.net.MemoryChangesResp>()
+  val memoryAsks = mutableListOf<Long>()
+  override suspend fun memoryChanges(since: Long, limit: Int): org.zohara.agent.core.net.MemoryChangesResp? {
+    memoryAsks += since
+    return memoryResults.removeFirstOrNull()
+  }
+
   /** the events of the next send; the stream ends when [Channel.close] is called */
   fun newStream(): Channel<SendEvent> { stream = Channel(Channel.UNLIMITED); return stream }
 

@@ -34,7 +34,10 @@ fun ProjectsScreen() {
   val state by holder.state.collectAsState()
   val toast = rememberToastLambda()
   RefreshWhileVisible(null) { holder.refresh() }
-  ProjectsContent(state, onRefresh = holder::refresh, onCreate = { n, g -> holder.create(n, g).also { if (it == null) toast("Project created") } })
+  ProjectsContent(
+    state, onRefresh = holder::refresh, onCreate = { n, g -> holder.create(n, g).also { if (it == null) toast("Project created") } },
+    onDelete = { id -> holder.delete(id).also { if (it == null) toast("Project deleted") } },
+  )
 }
 
 @Composable
@@ -44,8 +47,13 @@ fun ProjectsContent(
   onCreate: suspend (name: String, goal: String) -> String?,
   startWithSheet: Boolean = false,
   startWithProject: PagesFormat.Project? = null,
+  /** Deletes a project and the memory notes kept for it; returns an error sentence or null. Null = no Delete button. */
+  onDelete: (suspend (id: String) -> String?)? = null,
 ) {
   var creating by remember { mutableStateOf(startWithSheet) }
+  var deleting by remember { mutableStateOf<PagesFormat.Project?>(null) }
+  val deleteScope = rememberCoroutineScope()
+  val askDelete: ((PagesFormat.Project) -> Unit)? = if (onDelete == null) null else { p -> deleting = p }
   var shown by remember { mutableStateOf(startWithProject) }
   var query by remember { mutableStateOf("") }
   val all = state.value
@@ -71,10 +79,17 @@ fun ProjectsContent(
   ) { p -> PageCard(ZoIcons.Folder, p.name, meta = p.meta, onClick = { shown = p }, selected = wide && shown?.id == p.id) } }
   if (wide) {
     // NAV-23: the opened project is shown beside the list instead of in a sheet
-    org.zohara.agent.nav.TwoPane(list, detail = { shown?.let { ProjectDetail(it, Modifier.padding(16.dp)) } ?: PickAnItem("Pick a project to see it here") })
+    org.zohara.agent.nav.TwoPane(list, detail = { shown?.let { p -> ProjectDetail(p, Modifier.padding(16.dp), onDelete = askDelete?.let { f -> { f(p) } }) } ?: PickAnItem("Pick a project to see it here") })
   } else {
     list()
-    shown?.let { ProjectSheet(it) { shown = null } }
+    shown?.let { p -> ProjectSheet(p, onDelete = askDelete?.let { f -> { f(p) } }) { shown = null } }
+  }
+  deleting?.let { p ->
+    org.zohara.agent.settings.ConfirmSheet(
+      "Delete this project?", ProjectsLogic.deleteText(p.name), "Delete",
+      onConfirm = { deleteScope.launch { onDelete?.invoke(p.id); if (shown?.id == p.id) shown = null } },
+      onDismiss = { deleting = null },
+    )
   }
   if (creating) NewProjectSheet(onCreate = onCreate, onDismiss = { creating = false })
 }
@@ -113,16 +128,29 @@ fun NewProjectSheet(onCreate: suspend (String, String) -> String?, onDismiss: ()
  * the service has no op for them, so on the phone a card opens what the list knows, and says where the rest is.
  */
 @Composable
-fun ProjectSheet(p: PagesFormat.Project, onDismiss: () -> Unit) {
-  ZoBottomSheet(title = p.name, onDismiss = onDismiss, footer = { SecondaryButton("Close", onDismiss) }) { ProjectDetailBody(p) }
+fun ProjectSheet(p: PagesFormat.Project, onDelete: (() -> Unit)? = null, onDismiss: () -> Unit) {
+  ZoBottomSheet(
+    title = p.name, onDismiss = onDismiss,
+    footer = {
+      if (onDelete != null) org.zohara.agent.core.design.DangerButton("Delete project", onDelete, outlined = true)
+      SecondaryButton("Close", onDismiss)
+    },
+  ) { ProjectDetailBody(p) }
+}
+
+/** The words of the pages about deleting a project. */
+object ProjectsLogic {
+  /** The notes the memory agent kept for a project go with it; the chats stay. */
+  fun deleteText(name: String) = "\"$name\" is deleted with its instructions and the memory notes Zohara Agent kept for it. Chats you had in it stay. This cannot be undone."
 }
 
 /** The opened project in the right pane of the two-pane layout (NAV-23). */
 @Composable
-fun ProjectDetail(p: PagesFormat.Project, modifier: Modifier = Modifier) {
+fun ProjectDetail(p: PagesFormat.Project, modifier: Modifier = Modifier, onDelete: (() -> Unit)? = null) {
   Column(modifier) {
     Text(p.name, style = ZoTheme.type.sheetTitle, color = ZoTheme.colors.text, modifier = Modifier.padding(bottom = 10.dp))
     ProjectDetailBody(p)
+    if (onDelete != null) org.zohara.agent.core.design.DangerButton("Delete project", onDelete, Modifier.padding(top = 14.dp), outlined = true)
   }
 }
 

@@ -300,6 +300,101 @@ class PagesInteractionTest {
     rule.onNodeWithText("Desk").assertExists()
     rule.onNodeWithText("Run").assertIsEnabled()
   }
+
+  // ------------------------------------------------------------ scheduled v2 (docs/SCHEDULED.md)
+  private val stretch = ScheduledTask(
+    "t1", "Stretch", "Stand up and stretch", 1_794_555_600_000L, "weekdays", true, kind = "reminder", place = "the cloud server",
+    lastRun = 1_794_509_000_000L, lastStatus = "ok", lastOutput = "Stand up and stretch",
+  )
+
+  @Test fun theCardShowsKindPlaceAndTheLastResultAndTheSwitchTurnsItOff() {
+    var switched: Pair<String, Boolean>? = null
+    themed { ScheduledContent(Loadable(listOf(stretch)), clock, {}, {}, { null }, actions = ScheduleActions(onEnable = { t, on -> switched = t.id to on })) }
+    assertTrue(rule.onAllNodesWithText("Every weekday · Reminder · the cloud server", substring = true).fetchSemanticsNodes().isNotEmpty())
+    assertTrue(rule.onAllNodesWithText("Last run: ok", substring = true).fetchSemanticsNodes().isNotEmpty())
+    rule.onNodeWithContentDescription("On or off: Stretch").performClick()
+    assertEquals("t1" to false, switched)
+  }
+
+  @Test fun tappingATaskOffersTestRunNowHistoryAndEdit() {
+    var ran: String? = null
+    themed { ScheduledContent(Loadable(listOf(stretch)), clock, {}, {}, { null }, actions = ScheduleActions(onRunNow = { ran = it.id })) }
+    rule.onNodeWithText("Stretch").performClick()
+    rule.onNodeWithText("Test").assertExists(); rule.onNodeWithText("History").assertExists(); rule.onNodeWithText("Edit").assertExists()
+    rule.onNodeWithText("Run now").performClick()
+    assertEquals("t1", ran)
+  }
+
+  @Test fun testStreamsAndEndsWithAResultCardAndAReminderShowsItsNotification() {
+    val events = listOf(
+      org.zohara.agent.core.net.SendEvent.Stream(5), org.zohara.agent.core.net.SendEvent.Test("Stretch", "reminder", "the cloud server"),
+      org.zohara.agent.core.net.SendEvent.Notify("Test: Stretch", "Stand up and stretch", "reminder", true),
+      org.zohara.agent.core.net.SendEvent.Result(true, "ok", "Stand up and stretch", emptyList(), 1500, "c9"), org.zohara.agent.core.net.SendEvent.Done,
+    )
+    var asked: String? = null
+    themed { ScheduledContent(Loadable(listOf(stretch)), clock, {}, {}, { null }, actions = ScheduleActions(onTest = { id, _ -> asked = id; kotlinx.coroutines.flow.flowOf(*events.toTypedArray()) })) }
+    rule.onNodeWithText("Stretch").performClick()
+    rule.onNodeWithText("Test").performClick()
+    rule.waitForIdle()
+    assertEquals("t1", asked)
+    rule.onNodeWithText("The notification:").assertExists()
+    assertTrue(rule.onAllNodesWithText("Success · 1.5 s · no tools used").fetchSemanticsNodes().isNotEmpty())
+    rule.onNodeWithText("Open the test chat").assertExists()
+    rule.onNodeWithText("Close").assertExists()
+  }
+
+  @Test fun testAsksBeforeAChangeAndTheAnswerGoesBack() {
+    val answers = ArrayList<Triple<Long, Long, Boolean>>()
+    val events = listOf(org.zohara.agent.core.net.SendEvent.Stream(7), org.zohara.agent.core.net.SendEvent.Approval(3, "zohara_fs_write", "write /tmp/x"))
+    themed {
+      ScheduledContent(
+        Loadable(listOf(stretch.copy(kind = "task"))), clock, {}, {}, { null },
+        actions = ScheduleActions(onTest = { _, _ -> kotlinx.coroutines.flow.flow { events.forEach { emit(it) }; kotlinx.coroutines.awaitCancellation() } }, onApprove = { s, i, y -> answers += Triple(s, i, y) }),
+      )
+    }
+    rule.onNodeWithText("Stretch").performClick()
+    rule.onNodeWithText("Test").performClick()
+    rule.waitForIdle()
+    rule.onNodeWithText("Zohara Agent wants to: write /tmp/x").assertExists()
+    rule.onNodeWithText("Deny").performClick()
+    rule.waitForIdle()
+    assertEquals(listOf(Triple(7L, 3L, false)), answers)
+    rule.onNodeWithText("Denied").assertExists()
+  }
+
+  @Test fun historyListsTheRunsWithTheirResultAndWhatWasMissed() {
+    val runs = listOf(
+      org.zohara.agent.core.net.ScheduleRun(time = 1_794_509_000_000L, status = "failed", summary = "No model is chosen.", ms = 1000, missed = 1_794_400_000_000L, how = "scheduled"),
+      org.zohara.agent.core.net.ScheduleRun(time = 1_794_500_000_000L, status = "ok", summary = "Done.", chat = "c1", ms = 4000, how = "manual"),
+    )
+    var opened: String? = null
+    themed { ScheduledContent(Loadable(listOf(stretch)), clock, {}, {}, { null }, actions = ScheduleActions(onHistory = { Result.success(runs) }, onOpenChat = { opened = it })) }
+    rule.onNodeWithText("Stretch").performClick()
+    rule.onNodeWithText("History").performClick()
+    rule.waitForIdle()
+    rule.onNodeWithText("No model is chosen.").assertExists()
+    assertTrue(rule.onAllNodesWithText("missed ", substring = true).fetchSemanticsNodes().isNotEmpty())
+    rule.onNodeWithText("Open chat").performClick()
+    assertEquals("c1", opened)
+  }
+
+  @Test fun theFormShowsTheNextRunsAndSavesKindAndPlace() {
+    var form: TaskForm? = null
+    val info = org.zohara.agent.core.net.ScheduledResp(
+      host = "cloud", kinds = listOf("reminder", "task"),
+      runOn = listOf(org.zohara.agent.core.net.ScheduleRunOn("cloud", "Cloud server", "Runs on the server."), org.zohara.agent.core.net.ScheduleRunOn("machine:vm", "vm (added machine)", "")),
+    )
+    themed { ScheduledContent(Loadable(emptyList()), clock, {}, {}, { form = it; null }, startWithSheet = true, info = info, actions = ScheduleActions(onPreview = { Result.success("next runs: Mon 16 Nov, 09:00") })) }
+    field(0).performTextInput("Stand up")
+    field(1).performTextInput("every weekday at 9")
+    rule.mainClock.advanceTimeBy(1_000)
+    rule.waitForIdle()
+    rule.onNodeWithText("next runs: Mon 16 Nov, 09:00").assertExists()
+    rule.onNodeWithText("Reminder").performClick()
+    rule.onNodeWithText("Create task").assertIsEnabled().performClick()
+    rule.waitForIdle()
+    assertEquals(TaskForm("Stand up", "every weekday at 9", "once", "", kind = "reminder", runOn = "cloud"), form)
+  }
 }
 
 /** The refresh rules of the lists (LIST-04): on entry, every period while visible, and by pulling down. */

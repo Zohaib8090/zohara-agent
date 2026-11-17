@@ -30,8 +30,16 @@ sealed interface SendEvent {
   /** the agent repeats the same call ([n] times, tool [tool]); the person may stop it, nothing stops by itself */
   data class Stuck(val n: Int, val tool: String) : SendEvent
   data class Usage(val input: Long, val output: Long) : SendEvent
+  /** Test of a scheduled task (docs/SCHEDULED.md): the first line says what is being tested and where it runs */
+  data class Test(val title: String, val kind: String, val place: String) : SendEvent
+  /** Test: the notification the task would show (a reminder shows it here instead of sending it) */
+  data class Notify(val title: String, val body: String, val kind: String, val ok: Boolean) : SendEvent
+  /** Test: the result card; [status] is ok, failed or skipped */
+  data class Result(val ok: Boolean, val status: String, val summary: String, val tools: List<String>, val ms: Long, val chat: String?) : SendEvent
   /** [code] is the raw `error` field (for example `desktop_offline`), [message] what to show */
   data class Error(val code: String, val message: String) : SendEvent
+  /** the memory agent changed notes (docs/MEMORY.md): [summary] such as "Added 2 notes", [time] of the newest change */
+  data class MemoryUpdated(val summary: String, val time: Long) : SendEvent
   data object Stopped : SendEvent
   data object Ping : SendEvent
   data object Done : SendEvent
@@ -65,11 +73,21 @@ object SendEventParser {
       "steps" -> SendEvent.Steps((obj.long("n") ?: 0).coerceIn(0, Int.MAX_VALUE.toLong()).toInt())
       "stuck" -> SendEvent.Stuck((obj.long("n") ?: 0).coerceIn(0, Int.MAX_VALUE.toLong()).toInt(), obj.str("tool").orEmpty())
       "usage" -> SendEvent.Usage(obj.long("input") ?: 0, obj.long("output") ?: 0)
+      "test" -> SendEvent.Test(obj.str("title").orEmpty(), obj.str("kind").orEmpty(), obj.str("place").orEmpty())
+      "notify" -> SendEvent.Notify(obj.str("title").orEmpty(), obj.str("body").orEmpty(), obj.str("kind").orEmpty(), obj.bool("ok") ?: true)
+      "result" -> {
+        val r = obj["result"] as? JsonObject
+        SendEvent.Result(
+          r?.bool("ok") ?: false, r?.str("status").orEmpty(), r?.str("summary").orEmpty(),
+          (r?.get("tools") as? JsonArray)?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }.orEmpty(), r?.long("ms") ?: 0, r?.str("chat"),
+        )
+      }
       "error" -> {
         val code = obj.str("error").orEmpty()
         val msg = obj.str("message")?.takeIf { it.isNotBlank() } ?: friendlyCode(code)
         SendEvent.Error(code, msg)
       }
+      "memory_updated" -> SendEvent.MemoryUpdated(obj.str("summary").orEmpty(), obj.long("time") ?: 0)
       "stopped" -> SendEvent.Stopped
       "ping" -> SendEvent.Ping
       "done" -> SendEvent.Done

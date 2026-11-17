@@ -92,21 +92,69 @@ val ZoJson: Json = Json {
 @Serializable data class SettingsResp(val hiddenProviders: List<String> = emptyList(), val rotateOnLimit: Boolean = false, val providerPrefs: Map<String, ProviderPref> = emptyMap(), val updated: Long = 0)
 
 // ---- memory, personalities ----
-@Serializable data class MemoryItem(val id: String, val kind: String = "fact", val text: String = "", val title: String = "", val chat: String = "", val pinned: Boolean = false, val updated: Long = 0)
-@Serializable data class MemoryResp(val enabled: Boolean = true, val every: Int = 3, val items: List<MemoryItem> = emptyList())
+@Serializable data class MemoryItem(val id: String, val kind: String = "fact", val text: String = "", val title: String = "", val chat: String = "", val pinned: Boolean = false, val updated: Long = 0, val scope: String = "", val scopeName: String = "")
+@Serializable data class MemoryProject(val id: String, val name: String = "")
+@Serializable data class MemoryResp(
+  val enabled: Boolean = true, val every: Int = 3, val items: List<MemoryItem> = emptyList(),
+  val minEvery: Int = 2, val showUpdates: Boolean = true, val projects: List<MemoryProject> = emptyList(),
+)
+/** One entry of the memory change log (`memory_changes`): [action] is added, updated or deleted; [scope] is "" for the whole memory, else a project id. */
+@Serializable data class MemoryChange(
+  val id: String, val time: Long = 0, val batch: String = "", val source: String = "", val chat: String = "", val title: String = "",
+  val scope: String = "", val scopeName: String = "", val action: String = "", val note: String = "", val kind: String = "",
+  val before: String = "", val after: String = "", val undone: Boolean = false,
+)
+@Serializable data class MemoryChangesResp(
+  val changes: List<MemoryChange> = emptyList(), val latest: Long = 0, val running: Boolean = false, val showUpdates: Boolean = true, val summary: String = "",
+)
+@Serializable data class MemorySettingsResp(val every: Int = 3, val minEvery: Int = 2, val showUpdates: Boolean = true)
+@Serializable data class MemoryImportResp(val added: Int = 0, val alreadyThere: Int = 0, val skipped: Int = 0)
 @Serializable data class Personality(val id: String, val name: String = "", val prompt: String = "", val generated: Boolean = false, val builtin: Boolean = false)
 @Serializable data class PersonalitiesResp(val active: String = "", val items: List<Personality> = emptyList())
 @Serializable data class PersonalityGenerated(val id: String = "", val name: String = "", val prompt: String = "")
 
 // ---- projects, artifacts, schedules, machines, MCP ----
 @Serializable data class ProjectsResp(val text: String = "")
+@Serializable data class ProjectDeleteResp(val notesRemoved: Int = 0)
 @Serializable data class ArtifactItem(val id: String = "", val kind: String = "", val title: String = "", val path: String = "", val text: String? = null, val chat: String = "", val created: Long = 0)
 @Serializable data class ArtifactsResp(val items: List<ArtifactItem> = emptyList())
-@Serializable data class ScheduledTask(val id: String, val title: String = "", val prompt: String = "", val nextRun: Long = 0, val repeat: String = "once", val enabled: Boolean = true)
-@Serializable data class ScheduledResp(val tasks: List<ScheduledTask> = emptyList())
+/**
+ * A scheduled task (docs/SCHEDULED.md). [kind] is task, reminder or browser; [runOn] is "this", "cloud" or "machine:<name>"; [lastStatus] is ok, failed or
+ * skipped. Every field after [enabled] is new and optional, so an older server still gives a task that shows.
+ */
+@Serializable data class ScheduledTask(
+  val id: String, val title: String = "", val prompt: String = "", val nextRun: Long = 0, val repeat: String = "once", val enabled: Boolean = true,
+  val kind: String = "task", val runOn: String = "", val tz: String? = null, val lastRun: Long? = null, val lastChat: String? = null,
+  val lastStatus: String? = null, val lastOutput: String? = null, val historyCount: Int = 0, val running: Boolean = false, val place: String = "",
+)
+@Serializable data class ScheduleRunOn(val id: String = "", val label: String = "", val note: String = "")
+@Serializable data class ScheduleLimits(val maxTasks: Int = 0, val minRepeatMinutes: Int = 0, val runsPerDay: Int? = null, val runsToday: Int = 0)
+@Serializable data class ScheduledResp(
+  val tasks: List<ScheduledTask> = emptyList(), val host: String = "", val runOn: List<ScheduleRunOn> = emptyList(),
+  val kinds: List<String> = emptyList(), val limits: ScheduleLimits = ScheduleLimits(), val now: Long = 0,
+)
+@Serializable data class ScheduledOne(val task: ScheduledTask? = null, val message: String = "", val started: Boolean = false)
+/** one run in a task's history: [how] is "scheduled" or "manual"; [missed] is the time it should have run when the computer was off */
+@Serializable data class ScheduleRun(val time: Long = 0, val status: String = "", val summary: String = "", val chat: String? = null, val ms: Long = 0, val missed: Long? = null, val how: String = "")
+@Serializable data class ScheduleHistoryResp(val task: ScheduledTask? = null, val history: List<ScheduleRun> = emptyList())
+@Serializable data class SchedulePreviewRun(val at: Long = 0, val label: String = "")
+@Serializable data class SchedulePreview(val repeat: String = "", val runs: List<SchedulePreviewRun> = emptyList(), val text: String = "")
 @Serializable data class Machine(val name: String, val host: String = "", val user: String = "", val port: Int = 22, val note: String = "", val hasKey: Boolean = false)
 @Serializable data class MachinesResp(val machines: List<Machine> = emptyList())
-@Serializable data class McpServer(val name: String, val command: String = "", val enabled: Boolean = true)
+@Serializable data class McpServer(val name: String, val command: String = "", val enabled: Boolean = true, val held: Boolean = false, val registry: String? = null, val addressChanged: String? = null)
+// ---- connectors directory (docs/MCP.md "Browse connectors"): `connectors` op and the connector_* ops ----
+@Serializable data class ConnectorHeader(val name: String, val description: String = "", val secret: Boolean = false, val required: Boolean = false, val value: String? = null)
+@Serializable data class ConnectorRemote(val url: String, val headers: List<ConnectorHeader> = emptyList())
+@Serializable data class ConnectorEntry(
+  val id: String, val title: String = "", val description: String = "", val version: String = "", val website: String? = null,
+  val publisher: String = "", val category: String = "other", val featured: Boolean = false, val trust: String = "", val kind: String = "remote",
+  val remotes: List<ConnectorRemote> = emptyList(),
+)
+@Serializable data class ConnectorsResp(
+  val restricted: Boolean = false, val message: String = "", val entries: List<ConnectorEntry> = emptyList(), val featured: List<ConnectorEntry> = emptyList(),
+  val next: String? = null, val stale: Boolean = false, val error: String? = null,
+)
+@Serializable data class ConnectorPreview(val id: String = "", val name: String, val kind: String = "remote", val target: String = "", val tools: List<String> = emptyList(), val publisher: String = "", val trust: String = "", val notice: String = "")
 @Serializable data class McpResp(val servers: List<McpServer> = emptyList())
 
 // ---- account ----

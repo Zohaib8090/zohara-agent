@@ -38,6 +38,8 @@ const MAX_MCP: usize = 50;
 pub const UNKNOWN_TIME: u64 = 1;
 /// The memory's small state (on/off, how often) travels as a note with this id.
 pub const STATE_ID: &str = "_state";
+/// The memory change log ("Memory updated" feed) travels as one more item of the memory kind with this id.
+pub const LOG_ID: &str = "_changes";
 /// Tombstones are forgotten after this long (a computer that was off for longer may bring a deleted item back).
 const TOMB_KEEP_MS: u64 = 90 * 86_400_000;
 /// A change or deletion stamped further ahead than this is refused (a clock that is wrong, or a bad caller): it would block every
@@ -223,6 +225,10 @@ fn local_side_of(kinds: &[&str]) -> Side {
         }
         if m.state_updated > 0 {
             items.insert(key("memory", STATE_ID), m.state_updated);
+        }
+        let log = crate::store::memory_log::updated();
+        if log > 0 {
+            items.insert(key("memory", LOG_ID), log);
         }
     }
     if want("personalities") {
@@ -411,6 +417,7 @@ pub fn get_doc(kind: &str, id: &str) -> Option<Value> {
             let m = memory::load();
             (m.state_updated > 0).then(|| json!({"enabled": m.enabled, "every": m.every, "updated": m.state_updated}))
         }
+        "memory" if id == LOG_ID => (crate::store::memory_log::updated() > 0).then(crate::store::memory_log::sync_doc),
         "memory" => memory::load().items.into_iter().find(|i| i.id == id).and_then(|i| serde_json::to_value(i).ok()),
         "personalities" => personality::load().items.into_iter().find(|p| p.id == id).map(|p| json!({"id": p.id, "name": p.name, "prompt": p.prompt, "generated": p.generated})),
         "profiles" => profiles::load().into_iter().find(|p| p.id == id && !p.base_url.as_deref().is_some_and(address_carries_secret)).map(|mut p| {
@@ -519,6 +526,7 @@ pub fn put_doc(kind: &str, id: &str, doc: &Value) -> Result<bool, String> {
     enum Parsed {
         Chat(chats::Chat),
         State(bool, usize),
+        Log(Value),
         Note(memory::Item),
         Person(personality::Personality),
         Profile(profiles::Profile),
@@ -542,6 +550,10 @@ pub fn put_doc(kind: &str, id: &str, doc: &Value) -> Result<bool, String> {
             let enabled = doc.get("enabled").and_then(Value::as_bool).ok_or("The memory state is not valid.")?;
             let every = doc.get("every").and_then(Value::as_u64).unwrap_or(3).clamp(1, 1000) as usize;
             (up, Parsed::State(enabled, every))
+        }
+        "memory" if id == LOG_ID => {
+            let up = doc.get("updated").and_then(Value::as_u64).filter(|u| *u > 0).ok_or("The memory log has no time.")?;
+            (up, Parsed::Log(doc.clone()))
         }
         "memory" => {
             let i: memory::Item = serde_json::from_value(doc.clone()).map_err(bad)?;
@@ -604,7 +616,7 @@ pub fn put_doc(kind: &str, id: &str, doc: &Value) -> Result<bool, String> {
         Parsed::Note(i) => i.id.as_str(),
         Parsed::Person(p) => p.id.as_str(),
         Parsed::Profile(p) => p.id.as_str(),
-        Parsed::State(..) | Parsed::Settings(_) | Parsed::Mcp(_) | Parsed::Key(_) => id,
+        Parsed::State(..) | Parsed::Log(_) | Parsed::Settings(_) | Parsed::Mcp(_) | Parsed::Key(_) => id,
     };
     if id_in_doc != id {
         return Err("The document's id is not the one asked for.".into());
@@ -625,10 +637,11 @@ pub fn put_doc(kind: &str, id: &str, doc: &Value) -> Result<bool, String> {
                 return false;
             }
             s.enabled = enabled;
-            s.every = every;
+            s.every = every.clamp(memory::MIN_EVERY, memory::MAX_EVERY);
             s.state_updated = up;
             true
         }),
+        Parsed::Log(d) => crate::store::memory_log::sync_import(&d)?,
         Parsed::Note(i) => memory::change(|s| {
             if s.items.iter().any(|x| x.id == i.id && x.updated >= i.updated) {
                 return false;
@@ -677,7 +690,8 @@ pub fn put_doc(kind: &str, id: &str, doc: &Value) -> Result<bool, String> {
                     // address, so none of them may go to the new one. It comes in without them and held until the person
                     // turns it on (and signs in again) on this computer.
                     let name = keep.name.clone();
-                    applying(|| crate::ai::keys::clear(&mcp_client::token_id(&name)));
+                    // (also the header keys typed into a connector form: they are forgotten, and the directory link is dropped)
+                    applying(|| mcp_client::clear_secrets(&keep));
                     s = mcp_client::ServerConfig { name, command: s.command, enabled: s.enabled, held: true, updated: s.updated, ..Default::default() };
                 }
                 all.retain(|x| mcp_id(&x.name) != id);
@@ -710,7 +724,7 @@ pub fn put_doc(kind: &str, id: &str, doc: &Value) -> Result<bool, String> {
 /// Returns whether an item was removed.
 pub fn apply_delete(kind: &str, id: &str, at: u64) -> Result<bool, String> {
     checked(kind, id)?;
-    if kind == "memory" && id == STATE_ID {
+    if kind == "memory" && (id == STATE_ID || id == LOG_ID) {
         return Err("The memory state cannot be deleted.".into());
     }
     if kind == "settings" {
