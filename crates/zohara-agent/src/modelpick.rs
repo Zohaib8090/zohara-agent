@@ -13,7 +13,7 @@ use std::rc::Rc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use zo_core::ai::providers::{Protocol, Provider};
-use zo_core::ai::{agent, keys, profiles, providers, Selection};
+use zo_core::ai::{accounts, agent, custom, keys, profiles, providers, Selection};
 use zo_core::ai::ui_prefs as uiprefs;
 
 // ---------------------------------------------------------------- the model lists, fetched off the window thread
@@ -21,18 +21,36 @@ use zo_core::ai::ui_prefs as uiprefs;
 static CACHE: Mutex<Option<HashMap<String, (Instant, Vec<String>)>>> = Mutex::new(None);
 const CACHE_FOR: Duration = Duration::from_secs(60);
 
-fn cache_key(p: &Provider, base: &str) -> String {
-    format!("{}|{}", p.id, base.trim().trim_end_matches('/'))
+/// One list per provider, address and account (another account has another key, so maybe another list).
+pub(crate) fn cache_key(p: &Provider, base: &str, account: &str) -> String {
+    format!("{}|{}|{}", p.id, base.trim().trim_end_matches('/'), account)
 }
 
-fn cached(p: &Provider, base: &str) -> Option<Vec<String>> {
+fn cached(p: &Provider, base: &str, account: &str) -> Option<Vec<String>> {
     let g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    g.as_ref()?.get(&cache_key(p, base)).filter(|(t, _)| t.elapsed() < CACHE_FOR).map(|(_, v)| v.clone())
+    g.as_ref()?.get(&cache_key(p, base, account)).filter(|(t, _)| t.elapsed() < CACHE_FOR).map(|(_, v)| v.clone())
 }
 
-fn remember(p: &Provider, base: &str, list: &[String]) {
+fn remember(p: &Provider, base: &str, account: &str, list: &[String]) {
     let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    g.get_or_insert_with(HashMap::new).insert(cache_key(p, base), (Instant::now(), list.to_vec()));
+    g.get_or_insert_with(HashMap::new).insert(cache_key(p, base, account), (Instant::now(), list.to_vec()));
+}
+
+/// The key to use for `p` and the account the sheet shows: the typed one, else the saved one of that account (the active profile's own
+/// key only when the profile is for exactly this provider and account).
+pub(crate) fn key_for(p: &Provider, account: &str, typed: Option<String>) -> Option<String> {
+    typed.filter(|k| !k.trim().is_empty()).or_else(|| {
+        let acct = (account != accounts::DEFAULT_ID && !account.is_empty()).then(|| account.to_string());
+        let mut s = Selection::load();
+        if let Some(id) = s.profile.clone() {
+            if !profiles::load().iter().any(|x| x.id == id && x.provider == p.id && x.account == acct) {
+                s.profile = None;
+            }
+        }
+        s.provider = p.id.to_string();
+        s.account = acct;
+        profiles::get_key(&s, p.id)
+    })
 }
 
 /// What went wrong, in words a person can act on.
@@ -60,46 +78,47 @@ pub(crate) fn friendly_error(e: &str) -> String {
 }
 
 /// Fetches the model list in a worker thread and hands the result to `done` on the window's thread. A list fetched in the last
-/// minute for the same provider and address is used as it is, unless `force`.
-pub(crate) fn fetch_models(p: &'static Provider, base: String, typed_key: Option<String>, force: bool, done: impl FnOnce(Result<Vec<String>, String>) + 'static) {
+/// minute for the same provider, address and account is used as it is, unless `force`. `account` is the account (API key) of the provider
+/// the sheet shows ("default" for the one every provider has).
+pub(crate) fn fetch_models(p: &'static Provider, base: String, typed_key: Option<String>, account: String, force: bool, done: impl FnOnce(Result<Vec<String>, String>) + 'static) {
     if !force {
-        if let Some(list) = cached(p, &base) {
+        if let Some(list) = cached(p, &base, &account) {
             glib::idle_add_local_once(move || done(Ok(list)));
             return;
         }
     }
     glib::spawn_future_local(async move {
-        let b2 = base.clone();
+        let (b2, a2) = (base.clone(), account.clone());
         let r = gtk::gio::spawn_blocking(move || {
-            let key = typed_key.filter(|k| !k.trim().is_empty()).or_else(|| profiles::get_key(&Selection::load(), p.id));
+            let key = key_for(p, &account, typed_key);
             if !p.local && !p.is_custom() && p.protocol != Protocol::ClaudeCode && key.is_none() {
                 return Err("No API key yet. Paste it above, then press Retry.".to_string());
             }
             let b = if base.trim().is_empty() { p.base_url.to_string() } else { base };
-            // probe::list checks the address and words the failure, including "this server speaks another format: pick ..."
+            // probe::list checks the address and words the failure, including "this server speaks another format: set the API format ..."
             zo_core::ai::probe::list(p, &b, key.as_deref()).map_err(|e| friendly_error(&e))
         })
         .await
         .unwrap_or_else(|_| Err("The check stopped unexpectedly.".to_string()));
         if let Ok(list) = &r {
-            remember(p, &b2, list);
+            remember(p, &b2, &a2, list);
         }
         done(r);
     });
 }
 
 /// "Test connection". With a model name it asks one tiny question in the provider's wire format and, when the server speaks another
-/// one, says which provider to pick; without a model it is the list call, reported as one friendly line.
-pub(crate) fn test_connection(p: &'static Provider, base: String, typed_key: Option<String>, model: String, done: impl FnOnce(Result<String, String>) + 'static) {
+/// one, says which API format to use; without a model it is the list call, reported as one friendly line.
+pub(crate) fn test_connection(p: &'static Provider, base: String, typed_key: Option<String>, account: String, model: String, done: impl FnOnce(Result<String, String>) + 'static) {
     if model.trim().is_empty() {
-        fetch_models(p, base, typed_key, true, move |r| {
+        fetch_models(p, base, typed_key, account, true, move |r| {
             done(r.map(|l| if l.is_empty() { "Connected, but it listed no models.".to_string() } else { format!("Connected. {} models available.", l.len()) }));
         });
         return;
     }
     glib::spawn_future_local(async move {
         let r = gtk::gio::spawn_blocking(move || {
-            let key = typed_key.filter(|k| !k.trim().is_empty()).or_else(|| profiles::get_key(&Selection::load(), p.id));
+            let key = key_for(p, &account, typed_key);
             if !p.local && !p.is_custom() && p.protocol != Protocol::ClaudeCode && key.is_none() {
                 return Err("No API key yet. Paste it above, then press Test.".to_string());
             }
@@ -112,24 +131,32 @@ pub(crate) fn test_connection(p: &'static Provider, base: String, typed_key: Opt
     });
 }
 
-/// The line under the address of a custom endpoint: which wire format it speaks and what an address looks like.
-fn endpoint_hint(p: &Provider) -> &'static str {
-    match p.protocol {
-        Protocol::OpenAiResponses => "Any server that speaks the OpenAI Responses API (it answers at /v1/responses), for example an agent router: https://my-host.example/v1.",
-        Protocol::Anthropic => "Any server that speaks the Claude format (it answers at /v1/messages): https://my-host.example/v1.",
+/// The line under the address of a custom provider: which wire format it speaks and what an address looks like.
+pub(crate) fn endpoint_hint(format: &str) -> &'static str {
+    match format {
+        "responses" => "Any server that speaks the OpenAI Responses API (it answers at /v1/responses), for example an agent router: https://my-host.example/v1.",
+        "claude" => "Any server that speaks the Claude format (it answers at /v1/messages): https://my-host.example/v1.",
         _ => "The address of any OpenAI-compatible server (it answers at /v1/chat/completions), for example http://192.168.1.20:8000/v1 or https://my-host.example/v1.",
     }
 }
 
-/// The three custom endpoint providers, in the order they are offered.
-fn endpoint_providers() -> Vec<&'static Provider> {
-    providers::all().iter().filter(|p| p.is_custom()).collect()
+/// The three API formats a custom provider can speak: (id the service takes, what the person reads).
+pub(crate) const FORMATS: [(&str, &str); 3] = [("chat", "OpenAI Chat (/v1/chat/completions)"), ("responses", "OpenAI Responses (/v1/responses)"), ("claude", "Claude format (/v1/messages)")];
+
+/// The wire format of a provider as the picker words it (`chat`, `responses`, `claude`).
+pub(crate) fn format_id(p: &Provider) -> &'static str {
+    match p.protocol {
+        Protocol::OpenAiResponses => "responses",
+        Protocol::Anthropic => "claude",
+        _ => "chat",
+    }
 }
 
-/// The providers shown in the pickers: the ones that are not hidden, and always the one in use.
+/// The providers shown in the pickers: the ones that are not hidden, and always the one in use. The built-in ones come first, then the
+/// custom providers the person named.
 pub(crate) fn visible_providers(keep: &str) -> Vec<&'static Provider> {
     let hidden = uiprefs::hidden_providers();
-    providers::all().iter().filter(|p| p.id == keep || !hidden.iter().any(|h| h == p.id)).collect()
+    providers::listed().into_iter().filter(|p| p.id == keep || !hidden.iter().any(|h| h == p.id)).collect()
 }
 
 /// A provider where the person types the address: custom endpoints and local servers.
@@ -396,18 +423,34 @@ impl ModelList {
 // ---------------------------------------------------------------- the chooser
 
 pub fn models_sheet(ui: &Rc<Ui>) {
+    models_sheet_at(ui, None);
+}
+
+/// The model chooser, opened on `start` = (provider id, account id) when given (a provider or account that was just added).
+pub fn models_sheet_at(ui: &Rc<Ui>, start: Option<(String, String)>) {
     let (win, body, foot) = sheet(ui, "Model and API key", 620);
     let sel = Selection::load();
-    let shown = Rc::new(RefCell::new(visible_providers(&sel.provider)));
+    let start_provider = start.as_ref().map(|(p, _)| p.clone()).unwrap_or_else(|| sel.provider.clone());
+    let shown = Rc::new(RefCell::new(visible_providers(&start_provider)));
 
     let names: Vec<&str> = shown.borrow().iter().map(|p| p.name).collect();
     let provider_dd = gtk::DropDown::from_strings(&names);
-    provider_dd.set_selected(shown.borrow().iter().position(|p| p.id == sel.provider).unwrap_or(0) as u32);
+    provider_dd.set_selected(shown.borrow().iter().position(|p| p.id == start_provider).unwrap_or(0) as u32);
     body.append(&crate::field("Provider", &provider_dd));
-    let hidden_n = providers::all().len() - shown.borrow().len();
+    let hidden_n = providers::listed().len() - shown.borrow().len();
     if hidden_n > 0 {
         body.append(&lbl(&format!("{hidden_n} providers are hidden. Settings > Model and profiles has a switch for each."), "field-hint"));
     }
+
+    // the account (API key) of the provider: "Groq · Groq 1"; every provider with a key has the Default one
+    let acct_names = gtk::StringList::new(&[]);
+    let acct_dd = gtk::DropDown::new(Some(acct_names.clone()), None::<gtk::Expression>);
+    let acct_ids: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let acct_field = crate::field("Account", &acct_dd);
+    body.append(&acct_field);
+    // the account chosen for the provider shown ("default" = the one every provider has)
+    let filling = Rc::new(Cell::new(false));
+    let acct_now = Rc::new(RefCell::new(start.as_ref().map(|(_, a)| a.clone()).unwrap_or_else(|| sel.account.clone().unwrap_or_else(|| accounts::DEFAULT_ID.to_string()))));
 
     let key = gtk::PasswordEntry::new();
     key.set_show_peek_icon(true);
@@ -470,6 +513,40 @@ pub fn models_sheet(ui: &Rc<Ui>) {
         move |dd: &gtk::DropDown| -> &'static Provider { shown.borrow()[(dd.selected() as usize).min(shown.borrow().len().saturating_sub(1))] }
     };
 
+    // the account shown for the provider on screen
+    let account_id = {
+        let acct_now = acct_now.clone();
+        move || acct_now.borrow().clone()
+    };
+    // fills the account drop-down for the provider on screen and shows it only when the provider takes accounts
+    let fill_accounts = {
+        let (acct_names, acct_ids, acct_field, acct_now, acct_dd, filling) = (acct_names.clone(), acct_ids.clone(), acct_field.clone(), acct_now.clone(), acct_dd.clone(), filling.clone());
+        Rc::new(move |p: &'static Provider| {
+            acct_field.set_visible(p.takes_accounts());
+            if !p.takes_accounts() {
+                return;
+            }
+            let all = accounts::list(p.id);
+            let keep = acct_now.borrow().clone();
+            let shown: Vec<&accounts::View> = all.iter().filter(|a| !a.hidden || a.id == keep).collect();
+            let want = if shown.iter().any(|a| a.id == keep) { keep } else { accounts::DEFAULT_ID.to_string() };
+            *acct_now.borrow_mut() = want.clone();
+            filling.set(true);
+            acct_names.splice(0, acct_names.n_items(), &[]);
+            let mut ids = Vec::new();
+            for a in &shown {
+                acct_names.append(&format!("{} · {}{}", p.name, a.name, if a.has_key { " ✓" } else { "" }));
+                ids.push(a.id.clone());
+            }
+            acct_names.append("Add an account…");
+            ids.push("+".to_string());
+            let at = ids.iter().position(|i| *i == want).unwrap_or(0) as u32;
+            *acct_ids.borrow_mut() = ids;
+            acct_dd.set_selected(at);
+            filling.set(false);
+        })
+    };
+
     // typing a model name moves the tick
     {
         let ml = ml.clone();
@@ -483,7 +560,7 @@ pub fn models_sheet(ui: &Rc<Ui>) {
 
     // (re)load the list for what is on screen now
     let load: Rc<dyn Fn(bool)> = {
-        let (provider_dd, url, key, ml, current) = (provider_dd.clone(), url.clone(), key.clone(), ml.clone(), current.clone());
+        let (provider_dd, url, key, ml, current, account_id) = (provider_dd.clone(), url.clone(), key.clone(), ml.clone(), current.clone(), account_id.clone());
         Rc::new(move |force: bool| {
             let p = current(&provider_dd);
             let gen = ml.generation.get().wrapping_add(1);
@@ -493,7 +570,8 @@ pub fn models_sheet(ui: &Rc<Ui>) {
             ml.fill(&[]);
             ml.set_loading("Loading the model list…");
             let ml2 = ml.clone();
-            fetch_models(p, base, typed, force, move |r| {
+            let acct = if p.takes_accounts() { account_id() } else { accounts::DEFAULT_ID.to_string() };
+            fetch_models(p, base, typed, acct, force, move |r| {
                 if ml2.generation.get() != gen {
                     return;
                 }
@@ -536,15 +614,16 @@ pub fn models_sheet(ui: &Rc<Ui>) {
 
     // test the connection
     {
-        let (provider_dd, url, key, status, current, model) = (provider_dd.clone(), url.clone(), key.clone(), status.clone(), current.clone(), model.clone());
+        let (provider_dd, url, key, status, current, model, account_id) = (provider_dd.clone(), url.clone(), key.clone(), status.clone(), current.clone(), model.clone(), account_id.clone());
         let load = load.clone();
         test.connect_clicked(move |b| {
             let p = current(&provider_dd);
+            let acct = if p.takes_accounts() { account_id() } else { accounts::DEFAULT_ID.to_string() };
             let typed = Some(key.text().to_string()).filter(|k| !k.trim().is_empty());
             status.set_text("Testing the connection…");
             b.set_sensitive(false);
             let (status, b, load) = (status.clone(), b.clone(), load.clone());
-            test_connection(p, url.text().trim().to_string(), typed, model.text().trim().to_string(), move |r| {
+            test_connection(p, url.text().trim().to_string(), typed, acct, model.text().trim().to_string(), move |r| {
                 b.set_sensitive(true);
                 match r {
                     Ok(m) => {
@@ -562,18 +641,28 @@ pub fn models_sheet(ui: &Rc<Ui>) {
         let (key, key_field, url, url_hint, advanced, url_rev, model, status, ml, load) = (key.clone(), key_field.clone(), url.clone(), url_hint.clone(), advanced.clone(), url_rev.clone(), model.clone(), status.clone(), ml.clone(), load.clone());
         let sel = Rc::new(RefCell::new(sel.clone()));
         let current = current.clone();
-        move |dd: &gtk::DropDown| {
+        let (fill_accounts, acct_now) = (fill_accounts.clone(), acct_now.clone());
+        let last_provider = Rc::new(RefCell::new(start_provider.clone()));
+        Rc::new(move |dd: &gtk::DropDown| {
             let p = current(dd);
             let s = sel.borrow();
-            url.set_text(&s.base_url_for(p));
+            // another provider starts on its Default account; the one first shown keeps the account it was opened on
+            if *last_provider.borrow() != p.id {
+                *acct_now.borrow_mut() = accounts::DEFAULT_ID.to_string();
+                *last_provider.borrow_mut() = p.id.to_string();
+            }
+            fill_accounts(p);
+            let acct = acct_now.borrow().clone();
+            let base_pref = if p.takes_accounts() { accounts::address_of(p.id, &acct) } else { None };
+            url.set_text(&base_pref.unwrap_or_else(|| s.base_url_for(p)));
             key_field.set_visible(!p.local);
             url_rev.set_visible(p.protocol != Protocol::ClaudeCode);
             url_rev.set_reveal_child(needs_url(p));
             advanced.set_visible(p.protocol != Protocol::ClaudeCode && !needs_url(p));
-            url_hint.set_text(if p.is_custom() { endpoint_hint(p) } else if needs_url(p) { "Where the server runs. The default is right unless you changed its port." } else { "Only change this for a proxy or a regional endpoint." });
+            url_hint.set_text(if p.is_custom() { endpoint_hint(format_id(p)) } else if needs_url(p) { "Where the server runs. The default is right unless you changed its port." } else { "Only change this for a proxy or a regional endpoint." });
             key.set_text("");
-            key.set_placeholder_text(Some("Paste the key (a saved one is used when this stays empty)"));
-            model.set_text(if s.provider == p.id { &s.model } else { p.models.first().copied().unwrap_or("") });
+            key.set_placeholder_text(Some(if p.takes_accounts() && accounts::get_key(p.id, Some(&acct)).is_some() { "A key is saved for this account. Paste another to replace it" } else { "Paste the key (a saved one is used when this stays empty)" }));
+            model.set_text(if s.provider == p.id && (!p.takes_accounts() || s.account.as_deref().unwrap_or(accounts::DEFAULT_ID) == acct) { &s.model } else { p.models.first().copied().unwrap_or("") });
             *ml.pinned.borrow_mut() = pins_of(&s, p);
             ml.search.set_text("");
             status.set_text(if p.protocol == Protocol::ClaudeCode {
@@ -585,10 +674,41 @@ pub fn models_sheet(ui: &Rc<Ui>) {
             }
             ml.mark_current(&model.text());
             load(false);
-        }
+        })
     };
+    let refresh: Rc<dyn Fn(&gtk::DropDown)> = refresh;
     refresh(&provider_dd);
-    provider_dd.connect_selected_notify(move |dd| refresh(dd));
+    {
+        let refresh = refresh.clone();
+        provider_dd.connect_selected_notify(move |dd| refresh(dd));
+    }
+    // another account of the provider: its own key, its own address; "Add an account…" opens the form
+    {
+        let (refresh, provider_dd, acct_ids, acct_now, ui2, win2, current, filling) = (refresh.clone(), provider_dd.clone(), acct_ids.clone(), acct_now.clone(), ui.clone(), win.clone(), current.clone(), filling.clone());
+        acct_dd.connect_selected_notify(move |dd| {
+            if filling.get() {
+                return;
+            }
+            let Some(id) = acct_ids.borrow().get(dd.selected() as usize).cloned() else { return };
+            if id == acct_now.borrow().as_str() {
+                return;
+            }
+            let p = current(&provider_dd);
+            if id == "+" {
+                // back to the account shown, then the form; the sheet opens again on the new account
+                let back = acct_ids.borrow().iter().position(|i| *i == *acct_now.borrow()).unwrap_or(0) as u32;
+                dd.set_selected(back);
+                let (ui3, win3) = (ui2.clone(), win2.clone());
+                account_sheet(&ui2, p, None, move |new_id| {
+                    win3.close();
+                    models_sheet_at(&ui3, Some((p.id.to_string(), new_id)));
+                });
+                return;
+            }
+            *acct_now.borrow_mut() = id;
+            refresh(&provider_dd);
+        });
+    }
 
     // show which local servers are already running
     {
@@ -604,9 +724,21 @@ pub fn models_sheet(ui: &Rc<Ui>) {
 
     let hint = lbl("Stars are saved with Save.", "field-hint");
     hint.set_hexpand(true);
+    let add_custom = secondary("Add custom provider");
+    {
+        let (ui2, win2) = (ui.clone(), win.clone());
+        add_custom.connect_clicked(move |_| {
+            let (ui3, win3) = (ui2.clone(), win2.clone());
+            custom_provider_sheet(&ui2, None, move |id| {
+                win3.close();
+                models_sheet_at(&ui3, Some((id, accounts::DEFAULT_ID.to_string())));
+            });
+        });
+    }
     let cancel = secondary("Cancel");
     let save = primary("Save");
     foot.append(&hint);
+    foot.append(&add_custom);
     foot.append(&cancel);
     foot.append(&save);
     {
@@ -614,7 +746,7 @@ pub fn models_sheet(ui: &Rc<Ui>) {
         cancel.connect_clicked(move |_| w.close());
     }
     {
-        let (w, ui2, provider_dd, key, url, model, status, ml, vision_dd, current) = (win.clone(), ui.clone(), provider_dd.clone(), key.clone(), url.clone(), model.clone(), status.clone(), ml.clone(), vision_dd.clone(), current.clone());
+        let (w, ui2, provider_dd, key, url, model, status, ml, vision_dd, current, account_id) = (win.clone(), ui.clone(), provider_dd.clone(), key.clone(), url.clone(), model.clone(), status.clone(), ml.clone(), vision_dd.clone(), current.clone(), account_id.clone());
         save.connect_clicked(move |_| {
             let mut sel = Selection::load();
             sel.vision = match vision_dd.selected() {
@@ -623,24 +755,37 @@ pub fn models_sheet(ui: &Rc<Ui>) {
                 _ => None,
             };
             let p = current(&provider_dd);
-            // a profile belongs to one provider: choosing another one leaves the profile as it was
+            let acct = if p.takes_accounts() { Some(account_id()).filter(|a| a != accounts::DEFAULT_ID) } else { None };
+            // a profile belongs to one provider and one account: choosing another one leaves the profile as it was
             if let Some(id) = sel.profile.clone() {
-                if profiles::load().iter().any(|x| x.id == id && x.provider != p.id) {
+                if profiles::load().iter().any(|x| x.id == id && (x.provider != p.id || x.account != acct)) {
                     sel.profile = None;
                 }
             }
+            sel.provider = p.id.to_string();
+            sel.account = acct.clone();
             let typed = key.text().to_string();
             if !typed.trim().is_empty() {
-                // with a profile chosen the key belongs to that profile
+                // with a profile chosen the key belongs to that profile, else to the account in use
                 if let Err(e) = keys::set(&profiles::key_id(&sel, p.id), &typed) {
                     status.set_text(&e);
                     return;
                 }
             }
-            sel.provider = p.id.to_string();
             sel.model = model.text().trim().to_string();
             let u = url.text().trim().to_string();
-            if u == p.base_url || u.is_empty() {
+            let own = acct.as_deref().and_then(|a| accounts::address_of(p.id, a));
+            if own.as_deref() == Some(u.as_str()) {
+                // the address of this account itself: nothing to save about it here
+            } else if p.is_custom() {
+                // a custom provider's address is part of it
+                if !u.is_empty() && u != p.base_url {
+                    if let Err(e) = custom::update(p.id, None, None, Some(&u), None) {
+                        status.set_text(&e);
+                        return;
+                    }
+                }
+            } else if u == p.base_url || u.is_empty() {
                 sel.base_urls.remove(p.id);
             } else {
                 sel.base_urls.insert(p.id.to_string(), u);
@@ -651,7 +796,7 @@ pub fn models_sheet(ui: &Rc<Ui>) {
             let want = ml.pinned.borrow().clone();
             let have = pins_of(&sel, p);
             if !want.is_empty() || !have.is_empty() {
-                let id = if want.is_empty() { sel.profile.clone() } else { profiles::ensure_active(&mut sel, p.name).ok() };
+                let id = if want.is_empty() { sel.profile.clone() } else { profiles::ensure_active(&mut sel, &accounts::label(p, acct.as_deref())).ok() };
                 if let Some(id) = id {
                     sel.save();
                     for m in have.iter().filter(|m| !want.contains(m)) {
@@ -675,52 +820,139 @@ pub fn models_sheet(ui: &Rc<Ui>) {
     win.present();
 }
 
-// ---------------------------------------------------------------- a custom endpoint, as a profile
+// ---------------------------------------------------------------- a custom provider (named), and an account of a provider
 
-/// Name, address, key and model: makes a profile for any OpenAI-compatible server and switches to it. `done` runs afterwards.
-pub fn add_endpoint_sheet(ui: &Rc<Ui>, done: impl Fn() + 'static) {
-    let (win, body, foot) = sheet(ui, "Add a custom endpoint", 520);
-    let name = gtk::Entry::new();
-    let name_focus = name.clone();
-    name.add_css_class("field-input");
-    name.set_placeholder_text(Some("Work server, Home GPU…"));
-    body.append(&crate::field("Name", &name));
-    let url = gtk::Entry::new();
-    url.add_css_class("field-input");
-    url.set_placeholder_text(Some("https://my-host.example/v1"));
-    let kinds = endpoint_providers();
-    let kind_names: Vec<&str> = kinds.iter().map(|p| p.name).collect();
-    let kind_dd = gtk::DropDown::from_strings(&kind_names);
-    body.append(&crate::field("API format", &kind_dd));
-    let kind_hint = lbl("", "field-hint");
-    kind_hint.set_wrap(true);
-    body.append(&kind_hint);
-    {
-        let (kinds, kind_hint) = (kinds.clone(), kind_hint.clone());
-        let set = move |dd: &gtk::DropDown| {
-            if let Some(p) = kinds.get(dd.selected() as usize) {
-                kind_hint.set_text(endpoint_hint(p));
+/// The fields of the "custom provider" form and what Save does with them. Built without a window, so the form can be tested.
+#[derive(Clone)]
+pub(crate) struct CustomForm {
+    pub root: gtk::Box,
+    pub name: gtk::Entry,
+    pub format_dd: gtk::DropDown,
+    pub url: gtk::Entry,
+    pub key: gtk::PasswordEntry,
+    pub model: gtk::Entry,
+    pub status: gtk::Label,
+    /// The provider being edited, none for a new one.
+    pub existing: Option<custom::CustomProvider>,
+}
+
+impl CustomForm {
+    pub(crate) fn new(existing: Option<custom::CustomProvider>) -> CustomForm {
+        let root = vbox(10);
+        let name = gtk::Entry::new();
+        name.add_css_class("field-input");
+        name.set_max_length(custom::MAX_NAME as i32);
+        name.set_placeholder_text(Some("My router, Work gateway, Home Ollama"));
+        root.append(&crate::field("Name", &name));
+        let labels: Vec<&str> = FORMATS.iter().map(|f| f.1).collect();
+        let format_dd = gtk::DropDown::from_strings(&labels);
+        root.append(&crate::field("API format", &format_dd));
+        let hint = lbl("", "field-hint");
+        hint.set_wrap(true);
+        hint.set_xalign(0.0);
+        root.append(&hint);
+        {
+            let hint = hint.clone();
+            let set = move |dd: &gtk::DropDown| hint.set_text(endpoint_hint(FORMATS[(dd.selected() as usize).min(2)].0));
+            set(&format_dd);
+            format_dd.connect_selected_notify(set);
+        }
+        let url = gtk::Entry::new();
+        url.add_css_class("field-input");
+        url.set_placeholder_text(Some("https://my-host.example/v1"));
+        root.append(&crate::field("Address", &url));
+        let key = gtk::PasswordEntry::new();
+        key.set_show_peek_icon(true);
+        key.add_css_class("field-input");
+        let key_note = match &existing {
+            Some(c) if keys::get(&c.id).is_some() => "API key (a key is saved: leave empty to keep it; a new address removes it)",
+            Some(_) => "API key (none saved; leave empty if it needs none)",
+            None => "API key (leave empty if it needs none)",
+        };
+        root.append(&crate::field(key_note, &key));
+        let model = gtk::Entry::new();
+        model.add_css_class("field-input");
+        model.set_placeholder_text(Some("Model to start with (Test connection can list them)"));
+        root.append(&crate::field("Model", &model));
+        let status = lbl("", "field-hint");
+        status.set_wrap(true);
+        status.set_xalign(0.0);
+        root.append(&status);
+        if let Some(c) = &existing {
+            name.set_text(&c.name);
+            url.set_text(&c.base_url);
+            model.set_text(c.default_model.as_deref().unwrap_or(""));
+            format_dd.set_selected(FORMATS.iter().position(|f| f.0 == c.format).unwrap_or(0) as u32);
+        }
+        CustomForm { root, name, format_dd, url, key, model, status, existing }
+    }
+
+    pub(crate) fn format(&self) -> &'static str {
+        FORMATS[(self.format_dd.selected() as usize).min(2)].0
+    }
+
+    /// The key to test with: the typed one, else the saved one when the address is the one it was saved for.
+    fn test_key(&self) -> Option<String> {
+        let typed = Some(self.key.text().to_string()).filter(|k| !k.trim().is_empty());
+        typed.or_else(|| {
+            let c = self.existing.as_ref()?;
+            (c.base_url.trim().trim_end_matches('/') == self.url.text().trim().trim_end_matches('/')).then(|| keys::get(&c.id)).flatten()
+        })
+    }
+
+    /// Tests what is typed, saving nothing.
+    pub(crate) fn test(&self, done: impl FnOnce() + 'static) {
+        let base = self.url.text().trim().to_string();
+        let p = match custom::draft(self.format(), &base) {
+            Ok(p) => p,
+            Err(e) => {
+                self.status.set_text(&e);
+                return;
             }
         };
-        set(&kind_dd);
-        kind_dd.connect_selected_notify(set);
+        self.status.set_text("Testing the connection…");
+        let (status, key) = (self.status.clone(), self.test_key());
+        let model_name = self.model.text().trim().to_string();
+        test_connection(p, base, key, accounts::DEFAULT_ID.to_string(), model_name, move |r| {
+            status.set_text(&r.unwrap_or_else(|e| friendly_error(&e)));
+            done();
+        });
     }
-    body.append(&crate::field("Address", &url));
-    let key = gtk::PasswordEntry::new();
-    key.set_show_peek_icon(true);
-    key.add_css_class("field-input");
-    body.append(&crate::field("API key (leave empty if it needs none)", &key));
-    let model = gtk::Entry::new();
-    model.add_css_class("field-input");
-    model.set_placeholder_text(Some("Model name (Test connection can list them)"));
-    body.append(&crate::field("Model", &model));
-    let status = lbl("", "field-hint");
-    status.set_wrap(true);
-    body.append(&status);
 
+    /// Adds or saves the provider and its key. Returns its id; on a refusal the sentence to show.
+    pub(crate) fn save(&self) -> Result<String, String> {
+        let (name, url, model) = (self.name.text().trim().to_string(), self.url.text().trim().to_string(), self.model.text().trim().to_string());
+        let typed = self.key.text().trim().to_string();
+        match &self.existing {
+            None => {
+                let c = custom::add(&name, self.format(), &url, Some(&model))?;
+                if !typed.is_empty() {
+                    if let Err(e) = keys::set(&c.id, &typed) {
+                        let _ = custom::remove(&c.id);
+                        return Err(e);
+                    }
+                }
+                Ok(c.id)
+            }
+            Some(old) => {
+                let c = custom::update(&old.id, Some(&name), Some(self.format()), Some(&url), Some(&model))?;
+                if !typed.is_empty() {
+                    keys::set(&c.id, &typed)?;
+                }
+                Ok(c.id)
+            }
+        }
+    }
+}
+
+/// Name, API format, address, key and a model: adds (or edits) a custom provider. `done` gets its id.
+pub fn custom_provider_sheet(ui: &Rc<Ui>, existing: Option<custom::CustomProvider>, done: impl Fn(String) + 'static) {
+    let (win, body, foot) = sheet(ui, if existing.is_some() { "Edit custom provider" } else { "Add a custom provider" }, 520);
+    let form = CustomForm::new(existing.clone());
+    body.append(&form.root);
     let test = secondary("Test connection");
     let cancel = secondary("Cancel");
-    let save = primary("Add and use");
+    let save = primary(if existing.is_some() { "Save" } else { "Add provider" });
     foot.append(&test);
     foot.append(&cancel);
     foot.append(&save);
@@ -729,91 +961,149 @@ pub fn add_endpoint_sheet(ui: &Rc<Ui>, done: impl Fn() + 'static) {
         cancel.connect_clicked(move |_| w.close());
     }
     {
-        let (url, key, model, status, kinds, kind_dd) = (url.clone(), key.clone(), model.clone(), status.clone(), kinds.clone(), kind_dd.clone());
+        let form = form.clone();
         test.connect_clicked(move |b| {
-            let Some(&p) = kinds.get(kind_dd.selected() as usize) else { return };
-            if url.text().trim().is_empty() {
-                status.set_text("Type the address first.");
-                return;
-            }
-            status.set_text("Testing the connection…");
             b.set_sensitive(false);
-            let typed = Some(key.text().to_string()).filter(|k| !k.trim().is_empty());
-            let (status, b, model) = (status.clone(), b.clone(), model.clone());
-            // a custom endpoint is asked without a key when none is typed: some servers need none
-            // with a model typed, one tiny question is asked, so a server of another format is named ("pick Custom endpoint: ...")
-            if !model.text().trim().is_empty() {
-                test_connection(p, url.text().trim().to_string(), typed, model.text().trim().to_string(), move |r| {
-                    b.set_sensitive(true);
-                    status.set_text(&match r {
-                        Ok(m) => m,
-                        Err(e) => e,
-                    });
-                });
-                return;
-            }
-            fetch_models(p, url.text().trim().to_string(), typed, true, move |r| {
-                b.set_sensitive(true);
-                match r {
-                    Ok(list) => {
-                        if let Some(m) = list.first() {
-                            model.set_text(m);
-                        }
-                        status.set_text(&format!("Connected. {} models available.", list.len()));
-                    }
-                    Err(e) => status.set_text(&e),
-                }
-            });
+            let b2 = b.clone();
+            form.test(move || b2.set_sensitive(true));
         });
     }
     {
-        let (w, ui2, kinds, kind_dd) = (win.clone(), ui.clone(), kinds.clone(), kind_dd.clone());
-        save.connect_clicked(move |_| {
-            let Some(&kind) = kinds.get(kind_dd.selected() as usize) else { return };
-            let (n, address, m) = (name.text().trim().to_string(), url.text().trim().to_string(), model.text().trim().to_string());
-            if n.is_empty() || address.is_empty() {
-                status.set_text("A name and an address are needed.");
-                return;
+        let (w, form) = (win.clone(), form.clone());
+        save.connect_clicked(move |_| match form.save() {
+            Ok(id) => {
+                w.close();
+                done(id);
             }
-            if !(address.starts_with("http://") || address.starts_with("https://")) {
-                status.set_text("The address should start with http:// or https://");
-                return;
-            }
-            let mut sel = Selection::load();
-            sel.profile = None; // do not borrow another profile's key
-            sel.provider = kind.id.to_string();
-            sel.model = m.clone();
-            sel.base_urls.insert(kind.id.to_string(), address);
-            let p = match profiles::create(&n, &sel) {
-                Ok(p) => p,
-                Err(e) => {
-                    status.set_text(&e);
-                    return;
-                }
-            };
-            let kid = format!("{}@{}", kind.id, p.id);
-            let typed = key.text().to_string();
-            if typed.trim().is_empty() {
-                keys::clear(&kid); // the new profile must not carry the shared custom key to another address
-            } else if let Err(e) = keys::set(&kid, &typed) {
-                status.set_text(&e);
-                return;
-            }
-            if !m.is_empty() {
-                profiles::pin(&p.id, &m);
-            }
-            let p = profiles::load().into_iter().find(|x| x.id == p.id).unwrap_or(p);
-            let mut s = Selection::load();
-            s.apply_profile(&p);
-            s.save();
-            ui2.model_label.set_text(&chat::pill_text(&s));
-            ui2.pv_model_label.set_text(&chat::pill_text(&s));
-            w.close();
-            done();
+            Err(e) => form.status.set_text(&e),
         });
     }
     win.present();
-    name_focus.grab_focus();
+    form.name.grab_focus();
+}
+
+/// The fields of the "account" form: a name, its key, and (for a provider that allows it) an address of its own.
+#[derive(Clone)]
+pub(crate) struct AccountForm {
+    pub root: gtk::Box,
+    pub name: gtk::Entry,
+    pub key: gtk::PasswordEntry,
+    pub url: gtk::Entry,
+    pub status: gtk::Label,
+    pub provider: &'static Provider,
+    pub existing: Option<accounts::View>,
+}
+
+impl AccountForm {
+    pub(crate) fn new(provider: &'static Provider, existing: Option<accounts::View>) -> AccountForm {
+        let root = vbox(10);
+        root.append(&lbl(&format!("Another API key of {}, for example a second account. Its key is kept on its own and only used for this account.", provider.name), "field-hint"));
+        let name = gtk::Entry::new();
+        name.add_css_class("field-input");
+        name.set_max_length(custom::MAX_NAME as i32);
+        name.set_placeholder_text(Some(&format!("{} 1", provider.name)));
+        root.append(&crate::field("Name", &name));
+        let key = gtk::PasswordEntry::new();
+        key.set_show_peek_icon(true);
+        key.add_css_class("field-input");
+        root.append(&crate::field(if existing.as_ref().is_some_and(|a| a.has_key) { "API key (saved: leave empty to keep it)" } else { "API key" }, &key));
+        let url = gtk::Entry::new();
+        url.add_css_class("field-input");
+        url.set_placeholder_text(Some(provider.base_url));
+        let own_address = !provider.is_custom() && !existing.as_ref().is_some_and(|a| a.is_default);
+        let url_field = crate::field("Address (optional)", &url);
+        url_field.append(&lbl(&format!("Only if this account uses another address of {}.", provider.name), "field-hint"));
+        url_field.set_visible(own_address);
+        root.append(&url_field);
+        let status = lbl("", "field-hint");
+        status.set_wrap(true);
+        status.set_xalign(0.0);
+        root.append(&status);
+        if let Some(a) = &existing {
+            name.set_text(&a.name);
+            url.set_text(a.base_url.as_deref().unwrap_or(""));
+        }
+        AccountForm { root, name, key, url, status, provider, existing }
+    }
+
+    /// Adds or saves the account and its key. Returns its id; on a refusal the sentence to show.
+    pub(crate) fn save(&self) -> Result<String, String> {
+        let (name, typed, url) = (self.name.text().trim().to_string(), self.key.text().trim().to_string(), self.url.text().trim().to_string());
+        let pid = self.provider.id;
+        match &self.existing {
+            None => {
+                if typed.is_empty() {
+                    return Err("Paste the account's API key.".into());
+                }
+                let a = accounts::add(pid, &name, Some(&url))?;
+                if let Err(e) = keys::set(&accounts::key_id(pid, Some(&a.id)), &typed) {
+                    let _ = accounts::remove(pid, &a.id);
+                    return Err(e);
+                }
+                Ok(a.id)
+            }
+            Some(old) => {
+                accounts::rename(pid, &old.id, &name)?;
+                if !old.is_default && !self.provider.is_custom() {
+                    accounts::set_address(pid, &old.id, &url)?;
+                }
+                if !typed.is_empty() {
+                    keys::set(&accounts::key_id(pid, Some(&old.id)), &typed)?;
+                }
+                Ok(old.id.clone())
+            }
+        }
+    }
+
+    /// Tests the account with its own key (the key typed here is not used: Save first to test a new one).
+    pub(crate) fn test(&self, done: impl FnOnce() + 'static) {
+        let Some(a) = self.existing.clone() else { return };
+        self.status.set_text("Testing the connection…");
+        let status = self.status.clone();
+        let base = accounts::address_of(self.provider.id, &a.id).unwrap_or_else(|| Selection::load().base_url_for(self.provider));
+        test_connection(self.provider, base, None, a.id.clone(), String::new(), move |r| {
+            status.set_text(&r.unwrap_or_else(|e| friendly_error(&e)));
+            done();
+        });
+    }
+}
+
+/// Add (or edit) an account of `p`. `done` gets the id of the account.
+pub fn account_sheet(ui: &Rc<Ui>, p: &'static Provider, existing: Option<accounts::View>, done: impl Fn(String) + 'static) {
+    let (win, body, foot) = sheet(ui, if existing.is_some() { "Edit account" } else { "Add an account" }, 480);
+    let form = AccountForm::new(p, existing.clone());
+    body.append(&form.root);
+    let test = secondary("Test connection");
+    test.set_visible(existing.is_some());
+    let cancel = secondary("Cancel");
+    let save = primary(if existing.is_some() { "Save" } else { "Add account" });
+    foot.append(&test);
+    foot.append(&cancel);
+    foot.append(&save);
+    {
+        let w = win.clone();
+        cancel.connect_clicked(move |_| w.close());
+    }
+    {
+        let form = form.clone();
+        test.connect_clicked(move |b| {
+            b.set_sensitive(false);
+            let b2 = b.clone();
+            form.test(move || b2.set_sensitive(true));
+        });
+    }
+    {
+        let (w, form) = (win.clone(), form.clone());
+        save.connect_clicked(move |_| match form.save() {
+            Ok(id) => {
+                w.close();
+                done(id);
+            }
+            Err(e) => form.status.set_text(&e),
+        });
+    }
+    win.present();
+    form.name.grab_focus();
 }
 
 #[cfg(test)]
@@ -821,23 +1111,144 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_three_custom_endpoint_formats_are_offered_and_alike() {
-        let ids: Vec<&str> = endpoint_providers().iter().map(|p| p.id).collect();
-        assert_eq!(ids, ["custom", "custom-responses", "custom-claude"]);
-        let mut hints = Vec::new();
-        for p in endpoint_providers() {
-            assert!(needs_url(p), "{} asks for an address", p.id);
-            hints.push(endpoint_hint(p));
+    fn the_three_api_formats_are_offered_with_their_own_lines() {
+        let ids: Vec<&str> = FORMATS.iter().map(|f| f.0).collect();
+        assert_eq!(ids, ["chat", "responses", "claude"]);
+        let hints: Vec<&str> = ids.iter().map(|i| endpoint_hint(i)).collect();
+        assert!(hints[0].contains("/v1/chat/completions") && hints[1].contains("/v1/responses") && hints[2].contains("/v1/messages"));
+        assert_eq!(hints.iter().collect::<std::collections::HashSet<_>>().len(), 3);
+        // the labels agree with what the core calls the formats
+        for (id, label) in FORMATS {
+            assert_eq!(providers::format_name(id), Some(id));
+            assert!(label.contains(providers::format_label(providers::format_protocol(id).unwrap())), "{label}");
         }
-        hints.dedup();
-        assert_eq!(hints.len(), 3, "each format has its own line");
-        assert!(endpoint_hint(providers::find("custom-responses").unwrap()).contains("/v1/responses"));
-        assert!(endpoint_hint(providers::find("custom-claude").unwrap()).contains("/v1/messages"));
+    }
+
+    #[test]
+    fn a_list_is_cached_per_provider_address_and_account() {
+        let p = providers::find("groq").unwrap();
+        let (a, b) = (cache_key(p, "https://x/v1/", "default"), cache_key(p, "https://x/v1", "groq-2"));
+        assert_ne!(a, b, "another account has another key, so another list");
+        assert_eq!(cache_key(p, "https://x/v1/", "default"), cache_key(p, "https://x/v1", "default"), "a trailing slash is the same address");
+        assert_ne!(cache_key(p, "https://x/v1", "default"), cache_key(providers::find("openai").unwrap(), "https://x/v1", "default"));
     }
 
     #[test]
     fn format_hints_from_the_core_are_not_reworded() {
         let h = zo_core::ai::wire::wrong_format_hint(Protocol::OpenAiResponses);
         assert_eq!(friendly_error(&format!("{h} (The provider answered 404)")), format!("{h} (The provider answered 404)"));
+    }
+
+    #[test]
+    fn the_formats_a_provider_speaks_are_named_for_the_picker() {
+        assert_eq!(format_id(providers::find("anthropic").unwrap()), "claude");
+        assert_eq!(format_id(providers::find("openai").unwrap()), "chat");
+        assert_eq!(format_id(providers::find("groq").unwrap()), "chat");
+    }
+
+    /// A private configuration for a test that saves: its own folders and a key file, so nothing of the person is touched.
+    fn private_config(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("zo-gtk-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
+        std::env::set_var("XDG_DATA_HOME", dir.join("data"));
+        std::env::set_var("ZOHARA_AGENT_KEYS_FILE", dir.join("keys.json"));
+        dir
+    }
+
+    /// GTK starts on one thread only, so the two form checks are one test.
+    #[test]
+    #[ignore = "needs a display (run under xvfb)"]
+    fn the_provider_and_account_forms_save_what_is_typed_with_their_own_keys() {
+        gtk::init().expect("a display");
+        the_custom_provider_form_adds_edits_and_keeps_the_key_with_the_provider();
+        the_account_form_adds_accounts_with_their_own_keys_and_checks_names();
+    }
+
+    fn the_custom_provider_form_adds_edits_and_keeps_the_key_with_the_provider() {
+        let dir = private_config("custom-form");
+        let f = CustomForm::new(None);
+        assert_eq!(f.format(), "chat");
+        assert!(f.save().is_err(), "a name is needed");
+        f.name.set_text("My router");
+        f.url.set_text("http://127.0.0.1:8123/v1");
+        f.format_dd.set_selected(1);
+        f.key.set_text("sk-form-1");
+        f.model.set_text("gpt-5");
+        assert_eq!(f.format(), "responses");
+        let id = f.save().unwrap();
+        assert_eq!(id, "custom:my-router");
+        let c = custom::get(&id).unwrap();
+        assert_eq!((c.name.as_str(), c.format.as_str(), c.base_url.as_str(), c.default_model.as_deref()), ("My router", "responses", "http://127.0.0.1:8123/v1", Some("gpt-5")));
+        assert_eq!(keys::get(&id).as_deref(), Some("sk-form-1"));
+        // a second provider of the same name is refused; another name gets its own key
+        let g = CustomForm::new(None);
+        g.name.set_text("my ROUTER");
+        g.url.set_text("http://127.0.0.1:8124/v1");
+        assert!(g.save().unwrap_err().contains("already a custom provider named"));
+        g.name.set_text("Home Ollama");
+        g.format_dd.set_selected(2);
+        g.key.set_text("sk-form-2");
+        let id2 = g.save().unwrap();
+        assert_eq!((keys::get(&id).as_deref(), keys::get(&id2).as_deref()), (Some("sk-form-1"), Some("sk-form-2")));
+        // the edit form starts from what is saved, a rename keeps the id and the key, a new address drops the key
+        let e = CustomForm::new(custom::get(&id));
+        assert_eq!((e.name.text().as_str(), e.url.text().as_str(), e.format(), e.model.text().as_str()), ("My router", "http://127.0.0.1:8123/v1", "responses", "gpt-5"));
+        e.name.set_text("Fast router");
+        assert_eq!(e.save().unwrap(), id);
+        assert_eq!(keys::get(&id).as_deref(), Some("sk-form-1"));
+        e.url.set_text("http://127.0.0.1:8999/v1");
+        e.save().unwrap();
+        assert_eq!(keys::get(&id), None);
+        assert_eq!(keys::get(&id2).as_deref(), Some("sk-form-2"));
+        // a bad address says so and saves nothing new
+        let b = CustomForm::new(None);
+        b.name.set_text("Bad");
+        b.url.set_text("not-an-address");
+        assert!(b.save().is_err());
+        assert_eq!(custom::list().len(), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn the_account_form_adds_accounts_with_their_own_keys_and_checks_names() {
+        let dir = private_config("account-form");
+        let groq = providers::find("groq").unwrap();
+        keys::set("groq", "gk-default").unwrap();
+        let f = AccountForm::new(groq, None);
+        assert!(f.save().is_err(), "a name is needed");
+        f.name.set_text("Groq 1");
+        assert!(f.save().unwrap_err().contains("API key"), "and a key");
+        f.key.set_text("gk-one");
+        let id = f.save().unwrap();
+        assert_eq!(id, "groq-1");
+        assert_eq!((keys::get("groq").as_deref(), keys::get("groq:groq-1").as_deref()), (Some("gk-default"), Some("gk-one")));
+        let g = AccountForm::new(groq, None);
+        g.name.set_text("groq 1");
+        g.key.set_text("gk-two");
+        assert!(g.save().unwrap_err().contains("already has an account named"));
+        assert_eq!(keys::get("groq:groq-1").as_deref(), Some("gk-one"), "a refused account changes no key");
+        // an account of another provider has its own key; a rename keeps the key
+        let o = AccountForm::new(providers::find("openai").unwrap(), None);
+        o.name.set_text("Groq 1");
+        o.key.set_text("ok-one");
+        o.save().unwrap();
+        assert_eq!((keys::get("openai:groq-1").as_deref(), keys::get("groq:groq-1").as_deref()), (Some("ok-one"), Some("gk-one")));
+        let view = accounts::list("groq").into_iter().find(|a| a.id == "groq-1");
+        let e = AccountForm::new(groq, view);
+        assert_eq!(e.name.text().as_str(), "Groq 1");
+        e.name.set_text("Work");
+        assert_eq!(e.save().unwrap(), "groq-1");
+        assert_eq!(keys::get("groq:groq-1").as_deref(), Some("gk-one"));
+        assert_eq!(accounts::list("groq").iter().map(|a| a.name.clone()).collect::<Vec<_>>(), ["Default", "Work"]);
+        // the Default account is renamed through the same form
+        let d = AccountForm::new(groq, accounts::list("groq").into_iter().next());
+        d.name.set_text("Main");
+        d.save().unwrap();
+        assert_eq!(accounts::list("groq")[0].name, "Main");
+        assert_eq!(key_for(groq, "groq-1", None).as_deref(), Some("gk-one"));
+        assert_eq!(key_for(groq, "default", None).as_deref(), Some("gk-default"));
+        assert_eq!(key_for(groq, "default", Some("typed".into())).as_deref(), Some("typed"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

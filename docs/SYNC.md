@@ -125,3 +125,16 @@ The open chat list in the app is not refreshed live when a sync brings something
 Not tested for the new kinds: a real Firestore round trip (the in-memory database stands in), adding an MCP server on the web against a live server (the web
 connects to it first; the save itself is the same code that the toggle test covers), the desktop Account and sync page on a real display beyond a headless look, and the
 connection test against real providers (only a local stand-in model server). The connection test with a model sends one small real request to the provider.
+
+## Named custom providers and accounts
+
+The list of custom providers (name, API format, address, default model) and the extra accounts of the providers (name, own address,
+hidden flag, and the name/hidden state of the Default account) are part of the **settings** document (the picker preferences), so they
+follow the person to the other devices like the hidden providers do. No key is in that document. The keys (`<provider>`,
+`<provider>:<account slug>`, `custom:<slug>[:<account slug>]`, `<provider>@<profile>`) travel only when key sync is on, one document per
+key as before; a key id for a custom provider is only taken in once the settings document that names it has arrived, and the other way
+round the settings document does not make a key appear. An address with a secret in it (`?api_key=...`, `user:password@host`) stays on
+the computer that has it (it is left out of the document, and a document that carries one is refused). A restricted account of the public
+service takes only public https addresses in instances and accounts, like in a profile. A profile that names the old fixed providers
+(`custom`, `custom-responses`, `custom-claude`) from a computer that has not been updated lands on the named instance made for it (see
+`docs/PROVIDERS.md`).

@@ -5,7 +5,7 @@ use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 use std::rc::Rc;
-use zo_core::ai::{agent, claude_code, profiles, providers, Selection};
+use zo_core::ai::{accounts, agent, claude_code, custom, profiles, providers, Selection};
 use zo_core::mcp_client::{self, ServerConfig};
 use std::sync::mpsc;
 
@@ -61,6 +61,32 @@ fn find_sub(r: &gtk::Box) -> gtk::Label {
         w = c.next_sibling();
     }
     lbl("", "pc-meta")
+}
+
+thread_local! {
+    /// The provider the "API key accounts" section shows (kept while the page is drawn again).
+    static ACCOUNT_PROVIDER: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// The line of a custom provider: its API format, address and key.
+pub(crate) fn custom_line(c: &custom::CustomProvider) -> String {
+    let format = crate::modelpick::FORMATS.iter().find(|f| f.0 == c.format).map(|f| f.1).unwrap_or("OpenAI Chat");
+    format!("{format} · {} · {}", c.base_url, if zo_core::ai::keys::get(&c.id).is_some() { "key saved" } else { "no key" })
+}
+
+/// The line of an account: its key, own address, whether it is in use and whether it is hidden.
+pub(crate) fn account_line(a: &accounts::View, in_use: bool) -> String {
+    let mut parts = vec![if a.has_key { "Key saved".to_string() } else { "No key".to_string() }];
+    if let Some(u) = a.base_url.as_deref().filter(|u| !u.trim().is_empty()) {
+        parts.push(u.to_string());
+    }
+    if in_use {
+        parts.push("in use".into());
+    }
+    if a.hidden {
+        parts.push("hidden".into());
+    }
+    parts.join(" · ")
 }
 
 pub(crate) fn no_control() -> Option<&'static gtk::Button> {
@@ -154,7 +180,7 @@ pub fn show(ui: &Rc<Ui>) {
     let provider = providers::find(&sel.provider);
     let profile_name = sel.profile.as_deref().and_then(|id| profiles::load().into_iter().find(|p| p.id == id)).map(|p| p.name);
     let current = match provider {
-        Some(p) if !sel.model.is_empty() => format!("{} · {}{}", p.name, sel.model, profile_name.as_ref().map(|n| format!(" · profile {n}")).unwrap_or_default()),
+        Some(p) if !sel.model.is_empty() => format!("{} · {}{}", accounts::label(p, sel.account.as_deref()), sel.model, profile_name.as_ref().map(|n| format!(" · profile {n}")).unwrap_or_default()),
         Some(p) => format!("{} · no model chosen", p.name),
         None => "Nothing chosen yet".to_string(),
     };
@@ -255,24 +281,160 @@ pub fn show(ui: &Rc<Ui>) {
             });
         }
         card.append(&row("Save the current settings as a profile", "Keeps the provider, model, address, effort and the API key that is in use now.", Some(&new)));
-        let endpoint = secondary("Add endpoint");
-        {
-            let ui2 = ui.clone();
-            endpoint.connect_clicked(move |_| {
-                let ui3 = ui2.clone();
-                crate::modelpick::add_endpoint_sheet(&ui2, move || show(&ui3));
-            });
-        }
-        card.append(&row("Add a custom endpoint", "Your own server or a router that speaks the OpenAI Chat, OpenAI Responses or Claude format: a name, the format, its address, a key and a model. It is saved as a profile.", Some(&endpoint)));
     }
     content.append(&sec);
+
+    // ---- custom providers: named servers of the person's own ----
+    {
+        let (sec, card) = section("Custom providers");
+        let all = custom::list();
+        for c in all.iter() {
+            let controls = hbox(6);
+            let edit = secondary("Edit");
+            {
+                let (ui2, c2) = (ui.clone(), c.clone());
+                edit.connect_clicked(move |_| {
+                    let ui3 = ui2.clone();
+                    crate::modelpick::custom_provider_sheet(&ui2, Some(c2.clone()), move |_| show(&ui3));
+                });
+            }
+            let test = secondary("Test");
+            {
+                let (c2, test2) = (c.clone(), test.clone());
+                test.connect_clicked(move |_| {
+                    test2.set_sensitive(false);
+                    test2.set_label("Testing…");
+                    let test3 = test2.clone();
+                    let Some(p) = custom::resolve(&c2.id) else { return };
+                    let model = c2.default_model.clone().unwrap_or_default();
+                    crate::modelpick::test_connection(p, c2.base_url.clone(), None, accounts::DEFAULT_ID.to_string(), model, move |r| {
+                        test3.set_sensitive(true);
+                        test3.set_label(&match r {
+                            Ok(_) => "Works".to_string(),
+                            Err(_) => "Failed".to_string(),
+                        });
+                        test3.set_tooltip_text(Some(&r.unwrap_or_else(|e| crate::modelpick::friendly_error(&e))));
+                    });
+                });
+            }
+            let del = crate::icon_button("edit-delete-symbolic", "Delete this custom provider", "icon-btn");
+            {
+                let (ui2, c2) = (ui.clone(), c.clone());
+                del.connect_clicked(move |_| {
+                    let (ui3, id) = (ui2.clone(), c2.id.clone());
+                    crate::confirm_delete(&ui2, &format!("Delete {}?", c2.name), "The provider, its API key, its accounts and the profiles that use it are removed from this computer. Chats stay.", move || {
+                        let _ = custom::remove(&id);
+                        let s = Selection::load();
+                        ui3.model_label.set_text(&chat::pill_text(&s));
+                        show(&ui3);
+                    });
+                });
+            }
+            controls.append(&edit);
+            controls.append(&test);
+            controls.append(&del);
+            card.append(&row(&c.name, &custom_line(c), Some(&controls)));
+        }
+        let add = crate::primary("Add custom provider");
+        {
+            let ui2 = ui.clone();
+            add.connect_clicked(move |_| {
+                let ui3 = ui2.clone();
+                crate::modelpick::custom_provider_sheet(&ui2, None, move |_| show(&ui3));
+            });
+        }
+        card.append(&row(
+            if all.is_empty() { "No custom providers yet" } else { "Add another" },
+            "Your own server or a router: give it a name, pick the API format (OpenAI Chat, OpenAI Responses or Claude), its address and a key. It shows in the model list under its name. Add as many as you like.",
+            Some(&add),
+        ));
+        content.append(&sec);
+    }
+
+    // ---- several accounts (API keys) of one provider ----
+    {
+        let (sec, card) = section("API key accounts");
+        let keyed: Vec<&'static providers::Provider> = providers::listed().into_iter().filter(|p| p.takes_accounts()).collect();
+        let chosen = ACCOUNT_PROVIDER.with(|c| c.borrow().clone());
+        let at = keyed.iter().position(|p| p.id == chosen).unwrap_or(0);
+        let names: Vec<&str> = keyed.iter().map(|p| p.name).collect();
+        let dd = gtk::DropDown::from_strings(&names);
+        dd.set_selected(at as u32);
+        card.append(&row("Provider", "Several accounts (API keys) of one provider, for example Groq 1 and Groq 2. The key you have now is the Default account.", Some(&dd)));
+        if let Some(&p) = keyed.get(at) {
+            {
+                let (ui2, keyed2) = (ui.clone(), keyed.clone());
+                dd.connect_selected_notify(move |d| {
+                    if let Some(p) = keyed2.get(d.selected() as usize) {
+                        ACCOUNT_PROVIDER.with(|c| *c.borrow_mut() = p.id.to_string());
+                        show(&ui2);
+                    }
+                });
+            }
+            let sel_account = sel.account_for(p.id).unwrap_or(accounts::DEFAULT_ID).to_string();
+            for a in accounts::list(p.id) {
+                let controls = hbox(6);
+                let edit = secondary("Edit");
+                {
+                    let (ui2, a2) = (ui.clone(), a.clone());
+                    edit.connect_clicked(move |_| {
+                        let ui3 = ui2.clone();
+                        crate::modelpick::account_sheet(&ui2, p, Some(a2.clone()), move |_| show(&ui3));
+                    });
+                }
+                let hide = secondary(if a.hidden { "Show" } else { "Hide" });
+                {
+                    let (ui2, a2) = (ui.clone(), a.clone());
+                    hide.connect_clicked(move |_| {
+                        let _ = accounts::set_hidden(p.id, &a2.id, !a2.hidden);
+                        show(&ui2);
+                    });
+                }
+                controls.append(&edit);
+                controls.append(&hide);
+                if !a.is_default {
+                    let del = crate::icon_button("edit-delete-symbolic", "Delete this account and its key", "icon-btn");
+                    let (ui2, a2) = (ui.clone(), a.clone());
+                    del.connect_clicked(move |_| {
+                        let (ui3, id) = (ui2.clone(), a2.id.clone());
+                        crate::confirm_delete(&ui2, &format!("Delete {} · {}?", p.name, a2.name), "The account and its API key are removed from this computer. Profiles that used it go back to the Default account.", move || {
+                            let _ = accounts::remove(p.id, &id);
+                            show(&ui3);
+                        });
+                    });
+                    controls.append(&del);
+                }
+                card.append(&row(&format!("{} · {}", p.name, a.name), &account_line(&a, a.id == sel_account && sel.provider == p.id), Some(&controls)));
+            }
+            let add = crate::primary("Add account");
+            {
+                let ui2 = ui.clone();
+                add.connect_clicked(move |_| {
+                    let ui3 = ui2.clone();
+                    crate::modelpick::account_sheet(&ui2, p, None, move |_| show(&ui3));
+                });
+            }
+            card.append(&row("Add an account", "", Some(&add)));
+        }
+        let rotate = gtk::Switch::new();
+        rotate.set_active(accounts::rotate_on_limit());
+        rotate.connect_active_notify(|s| {
+            let _ = accounts::set_rotate_on_limit(s.is_active());
+        });
+        card.append(&row(
+            "When an account hits its rate limit, switch to the next account",
+            "On a rate limit (HTTP 429) or a quota error the next account of the same provider is tried once, and the chat says so. Never another provider. Off by default.",
+            Some(&rotate),
+        ));
+        content.append(&sec);
+    }
 
     // ---- every pinned model, with a way to take it back out ----
     let (sec, card) = section("Pinned models");
     {
         let mut any = false;
         for p in profiles::load() {
-            let provider_name = providers::find(&p.provider).map(|x| x.name).unwrap_or("?");
+            let provider_name = providers::find(&p.provider).map(|x| accounts::label(x, p.account.as_deref())).unwrap_or_else(|| "?".to_string());
             for model in &p.pinned {
                 any = true;
                 let un = secondary("Unpin");
@@ -296,7 +458,7 @@ pub fn show(ui: &Rc<Ui>) {
     {
         let hidden = zo_core::ai::ui_prefs::hidden_providers();
         let mut status_labels: Vec<(String, gtk::Label)> = Vec::new();
-        for p in providers::all() {
+        for p in providers::listed() {
             let sw = gtk::Switch::new();
             sw.set_active(!hidden.iter().any(|h| h == p.id));
             sw.set_tooltip_text(Some("Show in the model picker"));
@@ -312,7 +474,7 @@ pub fn show(ui: &Rc<Ui>) {
         gtk::glib::spawn_future_local(async move {
             let found = gtk::gio::spawn_blocking(|| {
                 let profs = profiles::load();
-                providers::all()
+                providers::listed()
                     .iter()
                     .map(|p| {
                         let pins: usize = profs.iter().filter(|x| x.provider == p.id).map(|x| x.pinned.len()).sum();
@@ -2005,6 +2167,15 @@ fn add_machine_sheet(ui: &Rc<Ui>) {
 #[cfg(test)]
 mod account_tests {
     use super::*;
+
+    #[test]
+    fn the_lines_of_a_custom_provider_and_an_account() {
+        let c = custom::CustomProvider { id: "custom:zz-none".into(), name: "R".into(), format: "claude".into(), base_url: "https://r.example/v1".into(), default_model: None };
+        assert_eq!(custom_line(&c), "Claude format (/v1/messages) · https://r.example/v1 · no key");
+        let a = accounts::View { id: "groq-2".into(), name: "Groq 2".into(), is_default: false, hidden: true, base_url: Some("https://g.example/v1".into()), has_key: true };
+        assert_eq!(account_line(&a, true), "Key saved · https://g.example/v1 · in use · hidden");
+        assert_eq!(account_line(&accounts::View { has_key: false, hidden: false, base_url: None, ..a }, false), "No key");
+    }
 
     #[test]
     fn home_card_rules() {

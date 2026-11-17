@@ -1135,7 +1135,7 @@ pub fn show_model_popover(ui: &Rc<Ui>, btn: &gtk::Button) {
     let pinned_profiles: Vec<&profiles::Profile> = all_profiles.iter().filter(|p| !p.pinned.is_empty() && !hidden.contains(&p.provider)).collect();
     let have_pins = !pinned_profiles.is_empty();
     for prof in &pinned_profiles {
-        let provider_name = providers::find(&prof.provider).map(|x| x.name).unwrap_or("?");
+        let provider_name = providers::find(&prof.provider).map(|x| zo_core::ai::accounts::label(x, prof.account.as_deref())).unwrap_or_else(|| "?".to_string());
         body.append(&lbl(&format!("{} · {}", prof.name, provider_name), "pop-head"));
         for model in &prof.pinned {
             let row = choice_row(&nice_name(model), None, sel.profile.as_deref() == Some(prof.id.as_str()) && sel.model == *model);
@@ -1516,7 +1516,7 @@ pub(crate) fn name_sheet(ui: &Rc<Ui>, title: &str, initial: &str, ok_text: &str,
 }
 
 pub(crate) fn describe(p: &profiles::Profile) -> String {
-    let provider = providers::find(&p.provider).map(|x| x.name).unwrap_or("?");
+    let provider = providers::find(&p.provider).map(|x| zo_core::ai::accounts::label(x, p.account.as_deref())).unwrap_or_else(|| "?".to_string());
     format!("{provider} · {}", if p.model.is_empty() { "no model yet".to_string() } else { nice_name(&p.model) })
 }
 
