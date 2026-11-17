@@ -1892,7 +1892,7 @@ async function modelPopover(a) {
   if (!p.isConnected) return;
   const groups = prof.profiles.map(x => {
     const ms = (x.pinned && x.pinned.length) ? x.pinned : (x.model ? [x.model] : []);
-    return `<div class="pop-group">${esc(x.name)}</div>` + ms.map(m => `<button class="pop-row" data-p="${esc(x.id)}" data-m="${esc(m)}"><div class="c"><div class="pop-title">${esc(m)}</div><div class="pop-sub">${esc(x.provider + (x.account ? " · " + x.account : ""))}</div></div><span class="pop-check">${prof.active === x.id && status.model === m ? icon("check") : ""}</span></button>`).join("");
+    return `<div class="pop-group">${esc(x.name)}</div>` + ms.map(m => `<button class="pop-row" data-p="${esc(x.id)}" data-m="${esc(m)}"><div class="c"><div class="pop-title">${esc(m)}</div><div class="pop-sub">${esc((x.provider_name || x.provider) + (x.account_name ? " · " + x.account_name : ""))}</div></div><span class="pop-check">${prof.active === x.id && status.model === m ? icon("check") : ""}</span></button>`).join("");
   }).join("");
   p.innerHTML = (groups || '<div class="pop-empty">Nothing pinned yet. Open the full list and tap the star next to a model.</div>') + `<button class="pop-row pop-more" data-more><div class="c"><div class="pop-title">More…</div><div class="pop-sub">All models, API key, address</div></div></button>`;
   paint(p);
@@ -2020,7 +2020,7 @@ async function modelSheet() {
     else { const b = btn(cc && cc.present && cc.source === "own" ? "Log in again" : "Log in", cc && cc.present ? "mini" : "mini primary", () => claudeLogin(() => { sh.close(); modelSheet(); })); h.appendChild(b); }
   };
   const majorIds = new Set(["anthropic", "openai", "gemini"]), opt = p => `<option value="${esc(p.id)}"${p.id === prov.current ? " selected" : ""}>${esc(p.name)}${p.has_key || p.local ? " ✓" : ""}</option>`;
-  const groups = [["Your subscription", p => p.id === "claude-code"], ["Popular Providers", p => majorIds.has(p.id)], ["Cloud & Open-Weight", p => !majorIds.has(p.id) && !isCustomProv(p) && !isLocalProv(p)], ["Local Models (This Computer)", p => !isCustomProv(p) && p.id !== "claude-code" && !majorIds.has(p.id) && isLocalProv(p)], ["Custom endpoints", isCustomProv]];
+  const groups = [["Your subscription", p => p.id === "claude-code"], ["Popular Providers", p => majorIds.has(p.id)], ["Cloud & Open-Weight", p => !majorIds.has(p.id) && !isCustomProv(p) && !isLocalProv(p)], ["Local Models (This Computer)", p => !isCustomProv(p) && p.id !== "claude-code" && !majorIds.has(p.id) && isLocalProv(p)], ["Custom providers", isCustomProv]];
   if (!prov.current) sp.insertAdjacentHTML("afterbegin", '<option value="" selected>Choose…</option>');
   groups.forEach(([lbl, f]) => { const g = list.filter(f); if (g.length) sp.insertAdjacentHTML("beforeend", `<optgroup label="${lbl}">${g.map(opt).join("")}</optgroup>`); });
   let models = [], chosen = st.model || "", effort = "", loading = false, error = "", seq = 0, dirty = false, filter = "";
@@ -2942,7 +2942,7 @@ async function pageModel(b) {
   const [s, prof, prov, hid] = await Promise.all([op("status"), getProfiles(true), getProviders(true), getSettings(true)]); b.innerHTML = "";
   const refresh = () => { dropCache("profiles"); settingsPage("model"); refreshModel(); };
   b.appendChild(head("Model"));
-  b.appendChild(cardOf(row("Provider and model", s.ready ? (s.provider + " · " + (s.model || "no model chosen")) : "Nothing chosen yet", btn("Change", "primary", modelSheet))));
+  b.appendChild(cardOf(row("Provider and model", s.ready ? ((p => p ? (p.takes_accounts ? acctLabel(p, prov.current_account) : p.name) : s.provider)(prov.providers.find(x => x.id === s.provider)) + " · " + (s.model || "no model chosen")) : "Nothing chosen yet", btn("Change", "primary", modelSheet))));
   b.appendChild(head("Profiles"));
   const rows = prof.profiles.map(p => {
     const on = prof.active === p.id, c = document.createElement("div"); c.className = "acts";
@@ -2952,7 +2952,7 @@ async function pageModel(b) {
       const dlg = sheet("Rename profile", w, [btn("Cancel", "", () => dlg.close()), go]); i.focus(); i.select(); });
     const dl = btn("Delete", "danger", () => confirmBox("Delete " + p.name + "?", "The profile and its pinned models are removed. Chats stay.", "Delete", async () => { try { await op("profile_delete", { id: p.id }); refresh(); } catch (e) { toast(e.message); } }));
     c.append(u, rn, dl);
-    const r = row(p.name, [p.provider + (p.account ? " · " + p.account : ""), p.model, p.base_url].filter(Boolean).join(" · "), c);
+    const r = row(p.name, [(p.provider_name || p.provider) + (p.account_name ? " · " + p.account_name : ""), p.model, p.base_url].filter(Boolean).join(" · "), c);
     const pins = p.pinned || [];
     if (pins.length) {
       const d = document.createElement("div"); d.className = "chips";

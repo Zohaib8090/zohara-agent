@@ -568,6 +568,8 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             let sel = Selection::load();
             Ok(json!({"active": sel.profile, "profiles": crate::ai::profiles::load().iter().map(|p| json!({
                 "id": p.id, "name": p.name, "provider": p.provider, "account": p.account, "model": p.model, "effort": p.effort, "pinned": p.pinned,
+                // what a picker shows under the model: "Groq · Groq 1" (the provider's name, and the account's when it has several)
+                "provider_name": providers::find(&p.provider).map(|q| q.name), "account_name": p.account.as_ref().and_then(|a| accounts::list(&p.provider).into_iter().find(|v| &v.id == a).map(|v| v.name)),
                 "base_url": p.base_url, "vision": p.vision, "updated": p.updated,
             })).collect::<Vec<_>>()}))
         }
