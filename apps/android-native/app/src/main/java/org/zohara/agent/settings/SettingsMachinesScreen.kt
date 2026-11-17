@@ -130,7 +130,7 @@ object MachineText {
     else "A small program (zohara-agent-runner) that is copied to the machine over SSH, with its checksum checked. It lets scheduled tasks run there while your computer is off."
 
   fun taskDone(byRunner: Boolean, name: String) =
-    if (byRunner) "Sent to the runner on $name. The answer comes back to you." else "Started from here over SSH. It asks you first, as always."
+    if (byRunner) "Sent to the runner on $name. The answer comes back to you." else "Started from here over SSH. Anything that would need your OK is refused here, as nobody can answer."
 }
 
 @Composable
@@ -178,7 +178,7 @@ fun MachinesPanel() {
       machines, testing,
       onTest = { m -> testing = m.name; doer.run(onFail = { testing = null; doer.say(it) }) { doer.say(container.api.machineTest(m.name)); testing = null } },
       onRemove = { m -> manage = m.name }, onAdd = { wizard = true },
-      status = status ?: emptyMap(), checked = status != null, onTerminal = { nav.terminal() }, onManage = { manage = it.name }, onOwnKey = { ownKey = true },
+      status = status ?: emptyMap(), checked = status != null, onManage = { manage = it.name }, onOwnKey = { ownKey = true },
     )
   }
   if (wizard) MachineWizardSheet(container.api, onDismiss = { wizard = false; reload() })
@@ -330,6 +330,7 @@ fun MachineManageSheet(api: ZoApi, name: String, onDismiss: () -> Unit) {
   var confirm by remember { mutableStateOf<Triple<String, String, suspend (String) -> String>?>(null) }
   var appsPlan by remember { mutableStateOf<AppsPlanResp?>(null) }
   var removeAsk by remember { mutableStateOf(false) }
+  var forceAsk by remember { mutableStateOf<String?>(null) }
   var task by remember { mutableStateOf("") }
   val reload: () -> Unit = { scope.launch { s = try { api.machineStatus(name).firstOrNull() ?: s } catch (e: ApiException) { s } } }
   LaunchedEffect(name) { reload() }
@@ -404,9 +405,16 @@ fun MachineManageSheet(api: ZoApi, name: String, onDismiss: () -> Unit) {
   }
   confirm?.let { (title, sentence, run) -> NamedConfirmSheet(title, sentence, "Copy", { confirm = null }, run) { m -> message = m; reload() } }
   appsPlan?.let { plan -> AppsCopySheet(api, name, plan, onDismiss = { appsPlan = null }, onNeedConfirm = { sentence, picks -> confirm = Triple("Copy credentials to $name", sentence) { c -> "Copied ${api.machineAppsCopy(name, picks, c).copied} app(s) with credentials." } }, onDone = { m -> message = m; reload() }) }
-  if (removeAsk) ConfirmSheet("Remove $name?", "Zohara Agent forgets this machine and its saved key. Nothing changes on the machine itself (the runner stays unless you remove it first).", "Remove", {
-    scope.launch { try { api.machineRemove(name); onDismiss() } catch (e: ApiException) { message = e.text } }
+  if (removeAsk) ConfirmSheet("Remove $name?", "Zohara Agent forgets this machine and its saved key. If a runner is installed on it, the runner is removed first.", "Remove", {
+    removeAsk = false
+    scope.launch { try { api.machineRemove(name); onDismiss() } catch (e: ApiException) { forceAsk = e.text } }
   }, { removeAsk = false })
+  forceAsk?.let { why ->
+    ConfirmSheet("The runner could not be removed", "$why Remove $name anyway? If the machine still exists, the runner and what it holds stay there.", "Remove anyway", {
+      forceAsk = null
+      scope.launch { try { api.machineRemove(name, force = true); onDismiss() } catch (e: ApiException) { message = e.text } }
+    }, { forceAsk = null })
+  }
 }
 
 /** Picks which apps to copy, and for which of them the credentials too. */

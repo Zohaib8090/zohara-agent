@@ -171,8 +171,9 @@ pub fn handle(op: &str, req: &Value) -> Result<Value, String> {
             let (task, by_runner) = host::run_here(n, prompt, &title)?;
             if !by_runner {
                 // no runner: this computer does the work, over SSH, and asks the person as it always does
-                let approver: Arc<dyn Approver + Send + Sync> = Arc::new(crate::approval::AppApprover);
-                crate::scheduler::run_now_in_background(&task.id, approver, "machines", Arc::new(|t, o| crate::scheduler::notify("", t, &o.notice)))?;
+                // where nobody can answer an approval the answer is no (the cloud server); on a computer the person's own app asks
+                let approver: Arc<dyn Approver + Send + Sync> = if crate::tenant::multi_tenant() { Arc::new(crate::approval::Deny) } else { Arc::new(crate::approval::AppApprover) };
+                crate::scheduler::run_now_in_background(&task.id, approver, "machines", super::sched::notify_hook())?;
             }
             Ok(json!({"task": task.id, "by_runner": by_runner}))
         }

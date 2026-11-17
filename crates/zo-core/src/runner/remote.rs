@@ -522,3 +522,44 @@ pub fn main(args: &[String]) -> i32 {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(id: &str) -> Task {
+        Task { id: id.into(), title: "t".into(), prompt: "do it".into(), repeat: "daily".into(), next_run: 100, enabled: true, ..Default::default() }
+    }
+
+    #[test]
+    fn clean_task_keeps_only_what_the_runner_may_run() {
+        assert!(clean_task(task(""), None).is_err());
+        assert!(clean_task(task("a b"), None).is_err());
+        assert!(clean_task(task(&"x".repeat(65)), None).is_err());
+        let mut empty = task("a");
+        empty.prompt = "  ".into();
+        assert!(clean_task(empty, None).is_err());
+        let mut b = task("a");
+        b.kind = "browser".into();
+        assert!(clean_task(b, None).is_err(), "a runner has no browser");
+        let mut t = task("a");
+        t.mode = Some("bypass".into());
+        t.run_on = "machine:vm".into();
+        let c = clean_task(t, None).unwrap();
+        assert_eq!((c.mode.as_deref(), c.run_on.as_str()), (Some("manual"), "this"), "no Bypass, and it runs here");
+    }
+
+    #[test]
+    fn clean_task_keeps_the_runners_state_when_it_is_ahead() {
+        let mut old = task("a");
+        old.last_run = Some(50);
+        old.next_run = 500;
+        old.last_status = Some("ok".into());
+        let c = clean_task(task("a"), Some(&old)).unwrap();
+        assert_eq!((c.next_run, c.last_run, c.last_status.as_deref()), (500, Some(50), Some("ok")));
+        let mut other = task("a");
+        other.repeat = "weekly".into();
+        let c = clean_task(other, Some(&old)).unwrap();
+        assert_eq!(c.next_run, 100, "a changed schedule takes the sent state");
+    }
+}

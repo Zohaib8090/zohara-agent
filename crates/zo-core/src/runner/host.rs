@@ -101,12 +101,20 @@ pub fn call(name: &str, args: &[&str], stdin: Option<&[u8]>, timeout: u64) -> Re
     let last = d.stdout.lines().rev().find(|l| l.trim_start().starts_with('{')).unwrap_or("");
     let v: Value = serde_json::from_str(last).map_err(|_| {
         let why = d.stderr.trim();
-        if why.is_empty() { "The runner answered with something that is not understood.".to_string() } else { format!("The runner could not start: {}", why.lines().last().unwrap_or("")) }
+        if why.is_empty() { NOT_UNDERSTOOD.to_string() } else { format!("{COULD_NOT_START} {}", why.lines().last().unwrap_or("")) }
     })?;
     if v["ok"].as_bool() == Some(false) {
         return Err(v["error"].as_str().unwrap_or("The runner reported an error.").to_string());
     }
     Ok(v)
+}
+
+const COULD_NOT_START: &str = "The runner could not start:";
+const NOT_UNDERSTOOD: &str = "The runner answered with something that is not understood.";
+
+/// Is this error one where ssh worked but the program on the machine failed?
+fn runner_failed(e: &str) -> bool {
+    e.starts_with(COULD_NOT_START) || e == NOT_UNDERSTOOD
 }
 
 /// Is there such a machine? (For the other parts of the runner.)
@@ -125,6 +133,8 @@ pub fn status(name: &str) -> Value {
     let mut v = match call(name, &["status"], None, 30) {
         Ok(r) => json!({"reachable": true, "installed": true, "runner": r}),
         Err(e) if e == NOT_INSTALLED => json!({"reachable": true, "installed": false}),
+        // ssh itself worked; the program there did not answer well: the machine is reachable, the runner is not in order
+        Err(e) if runner_failed(&e) => json!({"reachable": true, "installed": true, "runner_error": e, "error": e}),
         Err(e) => json!({"reachable": false, "installed": entry.is_some(), "error": e}),
     };
     v["name"] = json!(name);
@@ -271,14 +281,28 @@ pub fn set_allow(name: &str, commands: bool, files: bool) -> Result<(), String> 
     if !has_runner(name) {
         return Err(NOT_INSTALLED.into());
     }
-    change(|r| {
-        if let Some(e) = r.get_mut(name) {
+    let old = change(|r| {
+        r.get_mut(name).map(|e| {
+            let old = (e.commands, e.files);
             e.commands = commands;
             e.files = files;
             e.sig.clear();
-        }
+            old
+        })
     });
-    sync(name).map(|_| ())
+    let r = sync(name).map(|_| ());
+    if r.is_err() {
+        // the runner did not get it: what is stored must not become true later by itself
+        if let Some((c, f)) = old {
+            change(|m| {
+                if let Some(e) = m.get_mut(name) {
+                    e.commands = c;
+                    e.files = f;
+                }
+            });
+        }
+    }
+    r
 }
 
 fn allow_of(e: &RunnerEntry) -> Vec<&'static str> {
@@ -287,12 +311,13 @@ fn allow_of(e: &RunnerEntry) -> Vec<&'static str> {
         v.push("zohara_shell");
     }
     if e.files {
-        v.extend(["zohara_fs_write", "zohara_fs_mkdir"]);
+        v.extend(["zohara_fs_write", "zohara_fs_mkdir", "zohara_ai_add_memory"]);
     }
     v
 }
 
-/// The tasks this machine's runner runs: the ones set to run on it, except browser tasks (it has no browser).
+/// The tasks this machine's runner runs: the ones set to run on it, except browser tasks (it has no browser; the host runs those, see
+/// `scheduler::host_runs`).
 fn tasks_for(name: &str) -> Vec<Task> {
     let on = format!("machine:{name}");
     schedules::load().into_iter().filter(|t| t.run_on == on && t.kind() != "browser").collect()
@@ -348,12 +373,28 @@ pub fn push_model(name: &str, confirm: &str) -> Result<String, String> {
         let k = crate::ai::profiles::get_key(&sel, p.id).ok_or_else(|| format!("There is no API key for {} here to copy.", p.name))?;
         keys.insert(p.id.to_string(), json!(k));
     }
+    // only the chosen provider's address and format travel, like the key
+    let mut sel = sel;
+    sel.base_urls.retain(|k, _| k == p.id);
+    sel.api_formats.retain(|k, _| k == p.id);
+    let loopback = p.local || sel.base_urls.get(p.id).is_some_and(|u| is_loopback(u));
     let body = json!({"selection": sel, "keys": keys});
     drop(keys);
     call(name, &["config-set"], Some(body.to_string().as_bytes()), 60)?;
     // only the fact is logged, never the key
     crate::audit::log("runner_copy_model", &json!({"machine": name, "provider": p.id, "model": sel.model}), "ok");
-    Ok(format!("{} ({}) is set on {name}.", p.name, if sel.model.is_empty() { "its default model" } else { &sel.model }))
+    let mut msg = format!("{} ({}) is set on {name}.", p.name, if sel.model.is_empty() { "its default model" } else { &sel.model });
+    if loopback {
+        msg.push_str(&format!(" Its address points to this computer, so on {name} it means {name} itself: the tasks there cannot reach this model unless it runs there too."));
+    }
+    Ok(msg)
+}
+
+fn is_loopback(url: &str) -> bool {
+    let host = url.split("://").nth(1).unwrap_or(url).split(['/', '?']).next().unwrap_or("");
+    let host = host.rsplit('@').next().unwrap_or("");
+    let host = if let Some(h) = host.strip_prefix('[') { h.split(']').next().unwrap_or("") } else { host.split(':').next().unwrap_or("") };
+    host.eq_ignore_ascii_case("localhost") || host == "::1" || host.starts_with("127.") || host == "0.0.0.0"
 }
 
 /// Removes the model choice and key from the machine.
@@ -376,9 +417,17 @@ fn entry_kind(k: &str) -> &'static str {
     }
 }
 
+fn pull_lock(name: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+    static LOCKS: std::sync::Mutex<BTreeMap<String, std::sync::Arc<std::sync::Mutex<()>>>> = std::sync::Mutex::new(BTreeMap::new());
+    LOCKS.lock().unwrap_or_else(|e| e.into_inner()).entry(name.to_string()).or_default().clone()
+}
+
 /// Fetches the results the runner has not given yet: each becomes a chat (so it can be read), a line in the task's history and a
 /// notification. Returns how many.
 pub fn pull(name: &str) -> Result<usize, String> {
+    // one pull at a time per machine, so that the same result is not applied twice (`pulled` is read after the lock is taken)
+    let lock = pull_lock(name);
+    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
     let after = load().get(name).map(|e| e.pulled).unwrap_or(0);
     let v = call(name, &["results", "--after", &after.to_string()], None, 120)?;
     let list = v["results"].as_array().cloned().unwrap_or_default();
@@ -432,6 +481,18 @@ pub fn pull(name: &str) -> Result<usize, String> {
 
 /// Looks at every runner now and then (a few minutes apart), or at once when its tasks changed. Called from the desktop's timer; it
 /// can take a while when a machine does not answer, so call it from a thread.
+/// When the next `tick` has something to do for any runner (the cloud server uses it to wake up), or None without runners.
+pub fn next_tick() -> Option<u64> {
+    let now = schedules::now_millis();
+    load()
+        .iter()
+        .map(|(name, e)| {
+            let body = json!({"tasks": tasks_for(name), "allow": allow_of(e)});
+            if sha256_hex(body.to_string().as_bytes()) != e.sig { now.max(e.last_sync + 60_000) } else { e.last_sync + 5 * 60_000 }
+        })
+        .min()
+}
+
 pub fn tick() {
     let now = schedules::now_millis();
     for (name, e) in load() {
@@ -468,7 +529,7 @@ pub fn run_here(name: &str, prompt: &str, title: &str) -> Result<(Task, bool), S
 
 /// Tells the runner to look for due tasks right now (it does not wait for its timer). Returns at once.
 pub fn trigger(name: &str) -> Result<(), String> {
-    let d = ssh::run_on(name, &format!("setsid nohup {} run-due >/dev/null 2>&1 </dev/null &", remote_path(&format!("~/{BIN_REL}"))?), None, 30, 2_000)?;
+    let d = ssh::run_on(name, &format!("export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin:$PATH\"; setsid nohup {} run-due >/dev/null 2>&1 </dev/null &", remote_path(&format!("~/{BIN_REL}"))?), None, 30, 2_000)?;
     match ssh::failure(&d, name) {
         Some(e) => Err(e),
         None => Ok(()),
@@ -485,4 +546,100 @@ pub fn run_task_now(task_id: &str) -> Result<(), String> {
     schedules::request_run(task_id);
     sync(&name)?;
     trigger(&name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::schedules::New;
+
+    fn with_dirs(name: &str, f: impl FnOnce()) {
+        let _g = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("zo-{name}-{}", std::process::id()));
+        std::env::set_var("XDG_DATA_HOME", dir.join("data"));
+        std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
+        f();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::remove_var("XDG_DATA_HOME");
+        std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
+    fn runner_on(name: &str) {
+        change(|m| {
+            m.insert(name.to_string(), RunnerEntry { installed: 1, ..Default::default() });
+        });
+    }
+
+    fn task_on(kind: &str, machine: &str) -> Task {
+        schedules::add_new(New { prompt: "x".into(), next_run: 1, repeat: "once".into(), kind: kind.into(), run_on: format!("machine:{machine}"), ..Default::default() }).unwrap()
+    }
+
+    #[test]
+    fn a_runner_owns_its_tasks_except_browser_ones() {
+        with_dirs("host-owns", || {
+            runner_on("vm");
+            let (t, b, other) = (task_on("task", "vm"), task_on("browser", "vm"), task_on("task", "plain"));
+            assert!(!crate::scheduler::host_runs(&t), "the runner runs it");
+            assert!(crate::scheduler::host_runs(&b), "the runner has no browser, so the host keeps it");
+            assert!(crate::scheduler::host_runs(&other), "no runner on that machine");
+            let ids: Vec<String> = tasks_for("vm").into_iter().map(|t| t.id).collect();
+            assert_eq!(ids, vec![t.id]);
+        });
+    }
+
+    #[test]
+    fn writing_files_also_allows_adding_memory() {
+        let e = RunnerEntry { files: true, ..Default::default() };
+        assert!(allow_of(&e).contains(&"zohara_ai_add_memory"));
+        assert!(allow_of(&RunnerEntry::default()).is_empty());
+    }
+
+    #[test]
+    fn loopback_addresses_are_found() {
+        for u in ["http://127.0.0.1:11434/v1", "http://localhost:1234", "http://[::1]:8080/x", "http://u:p@localhost/"] {
+            assert!(is_loopback(u), "{u}");
+        }
+        for u in ["https://api.example.com/v1", "http://10.0.0.5:11434", "http://localhost.example.com"] {
+            assert!(!is_loopback(u), "{u}");
+        }
+    }
+
+    #[test]
+    fn one_pull_lock_per_machine() {
+        assert!(std::sync::Arc::ptr_eq(&pull_lock("a-lock"), &pull_lock("a-lock")));
+        assert!(!std::sync::Arc::ptr_eq(&pull_lock("a-lock"), &pull_lock("b-lock")));
+    }
+
+    #[test]
+    fn a_failed_permission_change_is_not_kept() {
+        with_dirs("host-allow", || {
+            runner_on("gone");
+            // the machine does not exist, so nothing can be sent
+            assert!(set_allow("gone", true, true).is_err());
+            let e = load().get("gone").cloned().unwrap();
+            assert!(!e.commands && !e.files, "what the runner never accepted must not become true later");
+        });
+    }
+
+    #[test]
+    fn a_machine_with_a_runner_is_removed_only_with_its_runner_or_by_force() {
+        with_dirs("host-remove", || {
+            runner_on("vm");
+            let ask = |v: serde_json::Value| crate::service::machine_remove(&v);
+            let e = ask(json!({"name": "vm"})).unwrap_err();
+            assert!(e.contains("runner is installed"), "{e}");
+            let e = ask(json!({"name": "vm", "uninstall_runner": true})).unwrap_err();
+            assert!(e.contains("force"), "an unreachable machine says what can be done: {e}");
+            assert!(has_runner("vm"), "nothing was forgotten");
+            let _ = ask(json!({"name": "vm", "force": true}));
+            assert!(!has_runner("vm"), "force forgets the runner record");
+        });
+    }
+
+    #[test]
+    fn runner_errors_after_a_working_ssh_are_not_unreachable() {
+        assert!(runner_failed("The runner could not start: GLIBC_2.38 not found"));
+        assert!(runner_failed(NOT_UNDERSTOOD));
+        assert!(!runner_failed("Could not connect to vm"));
+    }
 }

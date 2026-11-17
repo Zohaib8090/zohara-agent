@@ -91,14 +91,15 @@ pub fn host_runs(task: &Task) -> bool {
         "cloud" => tenant::multi_tenant(),
         "this" => !tenant::multi_tenant(),
         // machine:<name>: this host runs it, unless a runner on that machine does (docs/RUNNER.md)
-        _ => !task.machine().is_some_and(crate::runner::host::has_runner),
+        // (a browser task is the exception: the runner has no browser, so the host keeps running it)
+        _ => task.kind() == "browser" || !task.machine().is_some_and(crate::runner::host::has_runner),
     }
 }
 
 /// "this computer", "the cloud server" or "<machine> (from this computer)".
 pub fn place_text(task: &Task) -> String {
     match task.machine() {
-        Some(m) if crate::runner::host::has_runner(m) => format!("{m}, by the runner on it (it works while this computer is off)"),
+        Some(m) if crate::runner::host::has_runner(m) && task.kind() != "browser" => format!("{m}, by the runner on it (it works while this computer is off)"),
         Some(m) => format!("{m}, worked on from {}", if tenant::multi_tenant() { "the cloud server" } else { "this computer" }),
         None if task.run_on() == "cloud" => "the cloud server".into(),
         None => "this computer".into(),
@@ -489,7 +490,7 @@ pub fn run_due(approver: &dyn Approver, source: &str, cancel: &Arc<AtomicBool>, 
 pub fn run_now_in_background(id: &str, approver: Arc<dyn Approver + Send + Sync>, source: &'static str, shown: Arc<dyn Fn(&Task, &Outcome) + Send + Sync>) -> Result<(), String> {
     let task = schedules::get(id).ok_or("That task is gone.")?;
     // a task that a runner on its machine owns: the runner is asked to run it now, and its result is fetched when it is there
-    if task.machine().is_some_and(crate::runner::host::has_runner) {
+    if task.machine().is_some_and(crate::runner::host::has_runner) && !host_runs(&task) {
         let id = id.to_string();
         tenant::spawn(move || {
             if let Err(e) = crate::runner::host::run_task_now(&id) {

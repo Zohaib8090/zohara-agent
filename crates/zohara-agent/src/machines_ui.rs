@@ -591,16 +591,26 @@ impl Manage {
                 sw.connect_state_set(move |sw, on| {
                     let cur = me.status.borrow().clone().unwrap_or(Value::Null);
                     let want = |k: &str| if k == key { on } else { cur[k] == json!(true) };
-                    match call("machine_runner_allow", json!({"name": me.name, "commands": want("commands"), "files": want("files")})) {
-                        Ok(_) => {
-                            if let Some(st) = me.status.borrow_mut().as_mut() {
-                                st[key] = json!(on);
+                    // an SSH call: not on the main thread (the window would freeze while the machine answers)
+                    let req = json!({"name": me.name, "commands": want("commands"), "files": want("files")});
+                    sw.set_sensitive(false);
+                    let (me2, sw2) = (me.clone(), sw.clone());
+                    background(
+                        move || call("machine_runner_allow", req),
+                        move |r| {
+                            sw2.set_sensitive(true);
+                            match r {
+                                Ok(_) => {
+                                    if let Some(st) = me2.status.borrow_mut().as_mut() {
+                                        st[key] = json!(on);
+                                    }
+                                    me2.msg.set_text("");
+                                    sw2.set_state(on);
+                                }
+                                Err(e) => me2.msg.set_text(&e),
                             }
-                            me.msg.set_text("");
-                            sw.set_state(on);
-                        }
-                        Err(e) => me.msg.set_text(&e),
-                    }
+                        },
+                    );
                     gtk::glib::Propagation::Stop
                 });
                 card.append(&row(title, sub, Some(&sw)));
@@ -725,10 +735,31 @@ impl Manage {
             del.connect_clicked(move |_| {
                 let me2 = me.clone();
                 let name = me.name.clone();
-                crate::confirm_delete(&me.ui, &format!("Remove \"{name}\"?"), "Zohara Agent forgets this machine and its private key. Nothing changes on the machine itself (the runner stays unless you remove it first).", move || {
-                    let _ = machines::remove(&name);
-                    me2.win.close();
-                    (me2.changed)();
+                crate::confirm_delete(&me.ui, &format!("Remove \"{name}\"?"), "Zohara Agent forgets this machine and its private key. If a runner is installed on it, the runner is removed first.", move || {
+                    let (me3, name2) = (me2.clone(), name.clone());
+                    background(
+                        move || call("machine_remove", json!({"name": name2, "uninstall_runner": true})),
+                        move |r| match r {
+                            Ok(_) => {
+                                me3.win.close();
+                                (me3.changed)();
+                            }
+                            Err(e) => {
+                                // the machine may be gone for good: then it can be forgotten without the runner being touched
+                                let (me4, name3) = (me3.clone(), me3.name.clone());
+                                crate::confirm_delete(&me3.ui, "The runner could not be removed", &format!("{e}\n\nRemove \"{name3}\" anyway? If the machine still exists, the runner and what it holds stay there."), move || {
+                                    let r = call("machine_remove", json!({"name": name3, "force": true}));
+                                    match r {
+                                        Ok(_) => {
+                                            me4.win.close();
+                                            (me4.changed)();
+                                        }
+                                        Err(e) => me4.msg.set_text(&e),
+                                    }
+                                });
+                            }
+                        },
+                    );
                 });
             });
         }

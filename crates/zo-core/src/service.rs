@@ -38,17 +38,40 @@ fn socket_for(name: &str) -> PathBuf {
     runtime_base(name).join(name).join("agent.sock")
 }
 
-/// Where this version listens.
+/// Forgets a machine. With a runner on it the runner goes first (`uninstall_runner`), or, when the machine is gone, `force` forgets both.
+pub fn machine_remove(req: &Value) -> Result<Value, String> {
+    let name = s(req, "name");
+    let force = req.get("force").and_then(Value::as_bool) == Some(true);
+    // a runner left behind on a machine that is forgotten here could not be controlled any more: it goes first
+    if crate::runner::host::has_runner(name) {
+        if req.get("uninstall_runner").and_then(Value::as_bool) != Some(true) && !force {
+            return Err("A runner is installed on this machine. Remove the machine with its runner (uninstall_runner), or with force if the machine is gone.".into());
+        }
+        if let Err(e) = crate::runner::host::uninstall(name) {
+            if !force {
+                return Err(format!("{e} If the machine is gone for good, remove it anyway (force): the runner, if it still exists, is then not touched."));
+            }
+            crate::audit::log("machine_remove_forced", &json!({"machine": name, "why": e}), "ok");
+            crate::runner::host::forget(name);
+        }
+    }
+    crate::runner::apps::forget(name);
+    crate::store::machines::remove(name).map(|_| json!({}))
+}
+
 /// A machine operation for the desktop window, which lives in the same process as the service: the same code as the operation `op`
 /// (docs/SSH.md), without the socket. Only the `machine_*` operations of the VM features are reachable this way.
 pub fn machine_call(op: &str, req: &Value) -> Result<Value, String> {
     if vm::handles(op) {
         vm::handle(op, req)
+    } else if op == "machine_remove" {
+        machine_remove(req)
     } else {
         Err("Unknown machine operation.".into())
     }
 }
 
+/// Where this version listens.
 pub fn socket_path() -> PathBuf {
     socket_for(crate::legacy::NAME)
 }
@@ -545,18 +568,7 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             crate::store::machines::add(m, req.get("key").and_then(Value::as_str))?;
             Ok(json!({}))
         }
-        "machine_remove" => {
-            let name = s(req, "name");
-            // a runner left behind on a machine that is forgotten here could not be controlled any more: it goes first
-            if crate::runner::host::has_runner(name) {
-                if req.get("uninstall_runner").and_then(Value::as_bool) != Some(true) {
-                    return Err("A runner is installed on this machine. Uninstall the runner first, or remove the machine together with its runner.".into());
-                }
-                crate::runner::host::uninstall(name)?;
-            }
-            crate::runner::apps::forget(name);
-            crate::store::machines::remove(name).map(|_| json!({}))
-        }
+        "machine_remove" => machine_remove(req),
         "machine_test" => crate::tools::ssh::test(s(req, "name")).map(|m| json!({"message": m})),
         "projects" => Ok(json!({"text": crate::tools::call("zohara_ai_projects", &json!({}))?})),
         "project_create" => Ok(json!({"message": crate::tools::call("zohara_ai_create_project", &json!({"name": s(req, "name"), "goal": s(req, "goal")}))?})),

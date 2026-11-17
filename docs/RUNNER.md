@@ -14,7 +14,7 @@ none of this, the service refuses every `machine_*` operation for it):
   **Add machine**. Settings > Machines is the full page with the same list.
 - **Terminal**: on the desktop a terminal tab in the window that is an ssh session to the machine; on the web the terminal panel of the
   cloud server, started as an ssh session (administrator only: a shell that starts connections from the server's address is not for
-  everyone); on Android the terminal page (the existing one-command box of the cloud session, administrator only).
+  everyone); on Android there is no Terminal button on a machine (the phone's terminal page is the cloud session's own one-command box, not an ssh session).
 - **Add machine** is a wizard: name, address, user, port, then Zohara Agent makes a NEW ed25519 key for the machine (the private half goes
   to the key store, never shown), shows the public line and the one command that puts it in `authorized_keys`, and has a **Test connection**
   button. If the machine accepts a password, "Use it once" puts the key there with a one-time password that is used for that one `ssh` run and
@@ -56,10 +56,11 @@ be installed there: `schedules.json` (its task list), `allow.json`, `keys.json` 
   with the two switches: "run commands" allows `zohara_shell`, "write files" allows `zohara_fs_write`, `zohara_fs_mkdir` and adding memory.
   Removing files, stopping processes and everything else is never on that list.
 - A missed run (the machine was off) runs once at the next start, marked "missed".
-- It needs a model there: **Copy model key** sends the chosen model and its API key (a local model needs no key; Claude Code cannot be copied,
+- It needs a model there: **Copy model key** sends the chosen model and its API key (only the chosen provider's address travels with it; a local model needs no key, but an address that points to this computer, such as 127.0.0.1, means the machine itself there and is warned about; Claude Code cannot be copied,
   it needs its own login on the machine). Without one the task is marked "skipped" with the reason.
 - Results are written to the local log, and your computer fetches them (`machine_runner_sync`, every few minutes and when you open the
-  popup): each becomes a chat titled "Scheduled on <machine>: <task>" and a notification, like a desktop run. When the server is reachable
+  popup; the desktop app does it from its timer, and the cloud server does it for the administrator's runners when the administrator's
+  index says a look is due): each becomes a chat titled "Scheduled on <machine>: <task>" and a notification, like a desktop run. When the server is reachable
   from the machine the task list is not needed there again until it changes.
 - "Run a task here" makes a one-time task due now and wakes the runner at once (`setsid ... run-due`). Without a runner on the machine the
   same task runs from this computer through the SSH tools and asks as always (phase 1 of the plan).
@@ -95,7 +96,7 @@ offered in the wizard of the app. If a task needs a machine that is not there, t
 `machine_status`, `machine_new`, `machine_pubkey`, `machine_authorize`, `machine_runner_install`, `machine_runner_uninstall`,
 `machine_runner_allow`, `machine_runner_sync`, `machine_model_plan`, `machine_model_copy`, `machine_model_clear`, `machine_apps_plan`,
 `machine_apps_copy`, `machine_apps_revoke`, `machine_apps_check`, `machine_apps_sync`, `machine_task_run`, `machine_terminal` (desktop),
-`machine_terminal_spec` (the cloud server's terminal). Plus the older `machines`, `machine_add`, `machine_remove`, `machine_test`.
+`machine_terminal_spec` (the cloud server's terminal). Plus the older `machines`, `machine_add`, `machine_remove` (with a runner: `uninstall_runner: true` removes the runner first; `force: true` forgets the machine and the runner's record even when the machine cannot be reached), `machine_test`.
 
 ## Security
 

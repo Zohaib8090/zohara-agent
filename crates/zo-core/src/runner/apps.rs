@@ -64,6 +64,9 @@ fn candidates() -> Vec<ServerConfig> {
 /// The labels (never values) of what an app needs to sign in.
 fn credential_labels(s: &ServerConfig) -> Vec<String> {
     let mut v: Vec<String> = s.env.keys().map(|k| format!("variable {k}")).collect();
+    if command_carries_secret(&s.command) {
+        v.push(if mcp_client::is_url(&s.command) { "a key or login in its address".into() } else { "a key in its command line".into() });
+    }
     v.extend(s.headers.keys().map(|k| format!("header {k}")));
     v.extend(s.secret_headers.iter().map(|k| format!("header {k}")));
     if crate::ai::keys::get(&mcp_client::token_id(&s.name)).is_some() {
@@ -73,6 +76,21 @@ fn credential_labels(s: &ServerConfig) -> Vec<String> {
         v.push("a client secret".into());
     }
     v
+}
+
+/// Does the address or the command line itself carry a secret (a query string, a user name and password in the address, or an argument
+/// that looks like a key)? Such an app is copied as one with credentials, because the definition is the credential.
+pub fn command_carries_secret(command: &str) -> bool {
+    const WORDS: [&str; 8] = ["token", "secret", "password", "passwd", "apikey", "api_key", "api-key", "key="];
+    if mcp_client::is_url(command) {
+        let rest = command.split("://").nth(1).unwrap_or("");
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        return command.contains('?') || authority.contains('@');
+    }
+    mcp_client::split_command(command).iter().skip(1).any(|a| {
+        let a = a.to_ascii_lowercase();
+        WORDS.iter().any(|w| a.contains(w)) || a.starts_with("sk-") || a.starts_with("ghp_")
+    })
 }
 
 fn runtime_of(s: &ServerConfig) -> String {
@@ -179,7 +197,8 @@ pub fn copy(machine: &str, picks: &[(String, bool)], confirm: &str) -> Result<Va
         let s = all.iter().find(|s| &s.name == name).ok_or_else(|| format!("There is no app called \"{name}\" that can be copied."))?;
         // asking for credentials of an app that has none is not a credential copy
         let has = !credential_labels(s).is_empty();
-        chosen.push((s.clone(), *creds && has));
+        // an address or command line that is itself the secret cannot be sent without the sentence
+        chosen.push((s.clone(), (*creds && has) || command_carries_secret(&s.command)));
     }
     let with: Vec<String> = chosen.iter().filter(|(_, c)| *c).map(|(s, _)| s.name.clone()).collect();
     if !with.is_empty() {
@@ -302,6 +321,18 @@ mod tests {
         assert!(!text.contains("secret") && !text.contains("cs\""), "{text}");
         assert_eq!(c.env.get("API_KEY").map(String::as_str), Some(""), "the name stays, the value does not");
         assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn an_address_or_command_that_holds_the_secret_counts_as_credentials() {
+        assert!(command_carries_secret("https://host.example/mcp?api_key=abc"));
+        assert!(command_carries_secret("https://user:pw@host.example/mcp"));
+        assert!(command_carries_secret("npx -y server --token=abc"));
+        assert!(command_carries_secret("npx -y server --api-key abc"));
+        assert!(!command_carries_secret("https://host.example/mcp"));
+        assert!(!command_carries_secret("npx -y @scope/server"));
+        let s = ServerConfig { name: "n".into(), command: "https://h.example/mcp?key=abc".into(), enabled: true, ..Default::default() };
+        assert!(!credential_labels(&s).is_empty(), "the sentence is asked for");
     }
 
     #[test]

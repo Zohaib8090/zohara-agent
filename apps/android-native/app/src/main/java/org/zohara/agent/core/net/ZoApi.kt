@@ -286,7 +286,7 @@ class ZoApi(
     op("machine_add") { put("name", name); put("host", host); put("user", user); put("port", port); put("note", note); put("key", key) }
   }
   suspend fun machineTest(name: String): String = opAs<TextResp>("machine_test") { put("name", name) }.message
-  suspend fun machineRemove(name: String) { op("machine_remove") { put("name", name) } }
+  suspend fun machineRemove(name: String, force: Boolean = false) { op("machine_remove") { put("name", name); if (force) put("force", true) else put("uninstall_runner", true) } }
   // docs/RUNNER.md: status, the add wizard, the runner, the model and the connected apps on a machine. Administrators only (the server refuses the rest).
   /** every machine (or just [name]) with reachable / runner installed; one SSH call each, all at the same time */
   suspend fun machineStatus(name: String? = null): List<MachineStatus> = opAs<MachineStatusResp>("machine_status", true) { if (name != null) put("name", name) }.machines
