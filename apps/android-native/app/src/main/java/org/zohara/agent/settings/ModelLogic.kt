@@ -45,7 +45,7 @@ object ModelLogic {
    * Responses." (or "...try OpenAI Responses or Claude format as the API format..."). Null when the message names none or names the one in use ([current]).
    */
   fun hintFormat(message: String, current: ApiFormat?): ApiFormat? {
-    val m = Regex("(?:API format (?:of this provider )?to|try) (OpenAI Chat|OpenAI Responses|Claude format)").find(message) ?: return null
+    val m = Regex("(?:API format (?:of this provider )?to |try \"?(?:Custom endpoint: )?|Custom endpoint: )(OpenAI Chat|OpenAI Responses|Claude format)").find(message) ?: return null
     return FORMATS.firstOrNull { it.name == m.groupValues[1] }?.takeIf { it != current }
   }
 
@@ -82,6 +82,14 @@ object ModelLogic {
   /** The accounts the pickers offer: the ones that are not hidden, and always the one in use ([keep]). */
   fun shownAccounts(p: ProviderInfo, keep: String?): List<AccountInfo> = p.accounts.filter { !it.hidden || it.id == keep }
 
+  /** The line of a custom provider in Settings: its API format, address and key. */
+  fun customLine(p: ProviderInfo): String = formatOf(p).label + " · " + p.baseUrl + if (p.hasKey) " · key saved" else " · no key"
+
+  /** The line of an account in Settings: key, own address, in use, hidden. */
+  fun accountLine(a: AccountInfo): String = listOfNotNull(
+    if (a.hasKey) "Key saved" else "No key", a.baseUrl?.takeIf { it.isNotBlank() }, if (a.active) "in use" else null, if (a.hidden) "hidden" else null,
+  ).joinToString(" · ")
+
   /** "Groq · Groq 1": a provider with one of its accounts; just the provider's name when it has only one account (or the account is unknown). */
   fun accountLabel(p: ProviderInfo, accountId: String?): String {
     val name = p.name.ifBlank { p.id }
@@ -97,6 +105,16 @@ object ModelLogic {
   /** The account in use for the sheet: [wanted] when the provider has it, else the Default account. */
   fun accountFor(p: ProviderInfo?, wanted: String?): String =
     if (p != null && p.takesAccounts && wanted != null && p.accounts.any { it.id == wanted }) wanted else "default"
+
+  /** A name turned into the part of an id that is safe in a file name or a key id (the same as the server's `slug`): lowercase letters, digits, single dashes, at most 30. */
+  fun slug(name: String): String {
+    val sb = StringBuilder()
+    for (ch in name.trim().lowercase()) {
+      if (ch in 'a'..'z' || ch in '0'..'9') sb.append(ch) else if (sb.isNotEmpty() && sb.last() != '-') sb.append('-')
+    }
+    val out = sb.toString().trimEnd('-').take(30).trimEnd('-')
+    return out.ifEmpty { "item" }
+  }
 
   /** A name of a custom provider or an account: 1..40 characters, no control characters. "" when fine, else the sentence to show. */
   fun validateName(name: String, what: String, existing: Collection<String> = emptyList()): String {
@@ -244,11 +262,19 @@ object ModelLogic {
     prof.profiles.flatMap { p -> p.pinned.map { PinRow(p.id, p.name, providerName(p.provider), it) } }
 
   /** MODEL-01/06: the groups of the model menu: one per profile, with its pinned models (or its one model). */
-  data class MenuGroup(val profileId: String, val header: String, val provider: String, val models: List<String>)
+  data class MenuGroup(val profileId: String, val header: String, val provider: String, val models: List<String>, val label: String = provider)
 
-  fun menuGroups(prof: ProfilesResp, providerName: (String) -> String): List<MenuGroup> = prof.profiles.mapNotNull { p ->
+  /** [providerLabel] names the provider of a profile with its account ("Groq · Groq 1"); the default is the provider's name. */
+  fun menuGroups(prof: ProfilesResp, providerLabel: ((Profile) -> String)? = null, providerName: (String) -> String): List<MenuGroup> = prof.profiles.mapNotNull { p ->
+    val label = providerLabel ?: { q: Profile -> providerName(q.provider).ifBlank { q.provider } }
     val ms = if (p.pinned.isNotEmpty()) p.pinned else if (p.model.isNotBlank()) listOf(p.model) else emptyList()
-    if (ms.isEmpty()) null else MenuGroup(p.id, p.name + " · " + providerName(p.provider).ifBlank { p.provider }, p.provider, ms)
+    if (ms.isEmpty()) null else MenuGroup(p.id, p.name + " · " + label(p), p.provider, ms, label(p))
+  }
+
+  /** "Groq · Groq 1" for the provider and account of a profile (just the provider's name when it has one account or the server sent none). */
+  fun profileProviderLabel(p: Profile, providers: List<ProviderInfo>): String {
+    val prov = providers.firstOrNull { it.id == p.provider } ?: return p.provider
+    return accountLabel(prov, p.account)
   }
 
   /** MODEL-02: true when the current model is not one of the models the menu lists, so "In use now" is shown. */

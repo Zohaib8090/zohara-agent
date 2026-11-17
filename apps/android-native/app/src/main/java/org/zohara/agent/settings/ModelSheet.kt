@@ -68,6 +68,8 @@ class ModelSheetActions(
   val onApiFormat: (String) -> Unit = {},
   val onSwitchFormat: (ModelLogic.ApiFormat) -> Unit = {},
   val onAddEndpoint: () -> Unit = {},
+  val onAccount: (String) -> Unit = {},
+  val onAddAccount: () -> Unit = {},
 )
 
 /**
@@ -91,11 +93,13 @@ fun ModelSheet(onDismiss: () -> Unit, onUsed: () -> Unit = {}) {
   DisposableEffect(ctl) { ctl.start(); onDispose { } }
   val s by ctl.state.collectAsState()
   var addEndpoint by remember { mutableStateOf(false) }
+  var addAccount by remember { mutableStateOf(false) }
   val actions = remember(ctl) {
     ModelSheetActions(
       onProvider = ctl::selectProvider, onAddress = ctl::setAddress, onAddressDone = ctl::addressDone, onFilter = ctl::setFilter,
       onChoose = ctl::choose, onFetch = { ctl.fetchModels(force = true) }, onTest = ctl::testConnection, onSaveKey = { k -> ctl.saveKey(k) },
       onTogglePin = ctl::togglePin, onEffort = ctl::setEffort, onApiFormat = ctl::setApiFormat, onSwitchFormat = ctl::switchToFormat, onAddEndpoint = { addEndpoint = true },
+      onAccount = { id -> if (id == ADD_ACCOUNT) addAccount = true else ctl.selectAccount(id) }, onAddAccount = { addAccount = true },
     )
   }
   ZoBottomSheet(
@@ -105,8 +109,21 @@ fun ModelSheet(onDismiss: () -> Unit, onUsed: () -> Unit = {}) {
       PrimaryButton("Use this model", { ctl.use { onUsed(); onDismiss() } }, enabled = s.canUse, loading = s.using)
     },
   ) { ModelSheetBody(s, restricted, actions) }
-  if (addEndpoint) AddEndpointSheet(restricted = restricted, onDismiss = { addEndpoint = false }, onAdded = { addEndpoint = false; ctl.start() })
+  if (addEndpoint) {
+    CustomProviderSheet(
+      existing = null, otherNames = s.providers.filter { ModelLogic.isCustom(it) }.map { it.name }, restricted = restricted,
+      onDismiss = { addEndpoint = false }, onDone = { id -> addEndpoint = false; ctl.start(select = id) },
+    )
+  }
+  if (addAccount) {
+    s.provider?.let { p ->
+      AccountSheet(provider = p, existing = null, onDismiss = { addAccount = false }, onDone = { id -> addAccount = false; ctl.start(select = p.id, account = id) })
+    }
+  }
 }
+
+/** The "Add an account…" entry of the account drop-down. */
+const val ADD_ACCOUNT = "+"
 
 /** The content of the sheet (stateless: screenshot tested). */
 @Composable
@@ -126,14 +143,22 @@ fun ModelSheetBody(s: ModelSheetState, restricted: Boolean, a: ModelSheetActions
 
     val p = s.provider
     if (p != null) {
+      if (p.takesAccounts) AccountSection(s, p, a)
       if (p.takesFormat) ApiFormatSection(s, p, a.onApiFormat)
       AddressSection(s, p, restricted, a)
       if (!ModelLogic.isLocal(p)) KeySection(s, p, restricted, a)
       ModelListSection(s, a)
       if (s.efforts.isNotEmpty()) EffortPicker(s, a.onEffort)
     }
-    Row(Modifier.padding(top = 16.dp)) { PillButton("Add a custom endpoint…", a.onAddEndpoint) }
+    Row(Modifier.padding(top = 16.dp)) { PillButton("Add a custom provider…", a.onAddEndpoint) }
   }
+}
+
+/** The account (API key) of the provider: "Groq · Groq 1". Every provider with a key has the Default account; "Add an account…" makes more. */
+@Composable
+private fun AccountSection(s: ModelSheetState, p: ProviderInfo, a: ModelSheetActions) {
+  val options = s.accounts.map { it.id to (p.name.ifBlank { p.id } + " · " + it.name + if (it.hasKey) " ✓" else "") } + (ADD_ACCOUNT to "Add an account…")
+  Column(Modifier.padding(top = 14.dp)) { FormatDropdown("Account", options, s.accountId, a.onAccount) }
 }
 
 @Composable
@@ -195,9 +220,9 @@ private fun AddressSection(s: ModelSheetState, p: ProviderInfo, restricted: Bool
           color = when (s.testOk) { true -> c.ok; false -> c.danger; null -> c.dimmer }, modifier = Modifier.weight(1f),
         )
       }
-      // the server said which format it speaks: one tap picks the Custom endpoint for it
-      s.hintedFormat?.takeIf { ModelLogic.isCustom(p) }?.let { f ->
-        Row(Modifier.padding(top = 8.dp)) { PillButton("Use Custom endpoint: ${f.name}", { a.onSwitchFormat(f) }, accent = true) }
+      // the server said which format it speaks: one tap sets the API format of this provider to it
+      s.hintedFormat?.takeIf { ModelLogic.isCustom(p) || p.takesFormat }?.let { f ->
+        Row(Modifier.padding(top = 8.dp)) { PillButton("Use API format: ${f.name}", { a.onSwitchFormat(f) }, accent = true) }
       }
     }
   }
@@ -206,12 +231,12 @@ private fun AddressSection(s: ModelSheetState, p: ProviderInfo, restricted: Bool
 @Composable
 private fun KeySection(s: ModelSheetState, p: ProviderInfo, restricted: Boolean, a: ModelSheetActions) {
   val c = ZoTheme.colors
-  var key by remember(p.id) { mutableStateOf("") }
+  var key by remember(p.id, s.accountId) { mutableStateOf("") }
   Column(Modifier.padding(top = 14.dp)) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 6.dp)) {
       Text("API key", style = ZoTheme.type.fieldLabel, color = c.text)
       Spacer(Modifier.width(8.dp))
-      val saved = p.hasKey
+      val saved = ModelLogic.accountHasKey(p, s.accountId)
       ZoChip(if (saved) "Key saved" else "No key yet", color = if (saved) c.okChip else c.warn)
     }
     Row(verticalAlignment = Alignment.Top) {
@@ -386,60 +411,123 @@ fun FormatDropdown(label: String, options: List<Pair<String, String>>, selected:
   }
 }
 
-// ================================================================================================================ add a custom endpoint (MODEL-25)
+// ================================================================================================================ custom providers and accounts
 
+/** Add (existing null) or edit a custom provider: name, API format, address, key and a model to start with. [onDone] gets its id. */
 @Composable
-fun AddEndpointSheet(restricted: Boolean, onDismiss: () -> Unit, onAdded: () -> Unit) {
+fun CustomProviderSheet(existing: org.zohara.agent.core.net.CustomProviderInfo?, otherNames: Collection<String>, restricted: Boolean, onDismiss: () -> Unit, onDone: (String) -> Unit) {
   val container = LocalAppContainer.current
   val scope = rememberCoroutineScope()
   val ctl = remember {
-    AddEndpointController(
+    CustomProviderController(
       container.api, scope, restricted, toast = { t -> scope.launch { container.toast.show(t) } },
       invalidate = { container.providersCache.clear(); container.profilesCache.clear(); container.modelsCache.clear() },
+      otherNames = otherNames.filter { it != existing?.name },
     )
   }
   val st by ctl.state.collectAsState()
-  var format by remember { mutableStateOf(ModelLogic.FORMATS[0]) }
-  var name by remember { mutableStateOf("") }
-  var address by remember { mutableStateOf("") }
+  var format by remember { mutableStateOf(ModelLogic.formatById(existing?.format) ?: ModelLogic.FORMATS[0]) }
+  var name by remember { mutableStateOf(existing?.name.orEmpty()) }
+  var address by remember { mutableStateOf(existing?.baseUrl.orEmpty()) }
   var key by remember { mutableStateOf("") }
-  var model by remember { mutableStateOf("") }
+  var model by remember { mutableStateOf(existing?.defaultModel.orEmpty()) }
   ZoBottomSheet(
-    title = "Add a custom endpoint", onDismiss = onDismiss,
+    title = if (existing == null) "Add a custom provider" else "Edit custom provider", onDismiss = onDismiss,
     footer = {
       SecondaryButton("Cancel", onDismiss)
-      PrimaryButton("Add and use", { ctl.add(format, name, address, key, model, onAdded) }, loading = st.busy)
+      PrimaryButton(if (existing == null) "Add provider" else "Save", { ctl.save(existing?.id, name, format, address, key, model, onDone) }, loading = st.busy)
     },
   ) {
     EndpointForm(
       name, { name = it }, address, { address = it }, key, { key = it }, model, { model = it },
-      st.error, st.testText, st.testOk, st.testing, onTest = { ctl.test(format, address, key, model) },
-      format = format, onFormat = { format = it },
+      st.error, st.testText, st.testOk, st.testing, onTest = { ctl.test(existing?.id, format, address, key, model) },
+      format = format, onFormat = { format = it }, keyHint = if (existing != null) (if (existing.hasKey) "Key saved. Empty keeps it; a new address removes it." else "No key saved") else "Only if the server needs one",
     )
   }
+}
+
+/**
+ * Add (existing null) or edit an account of [provider]: a name, its API key, and (only for a provider that allows it) an address of its own.
+ * [onDone] gets the id of the account.
+ */
+@Composable
+fun AccountSheet(provider: ProviderInfo, existing: org.zohara.agent.core.net.AccountInfo?, onDismiss: () -> Unit, onDone: (String) -> Unit) {
+  val container = LocalAppContainer.current
+  val scope = rememberCoroutineScope()
+  val ctl = remember { AccountController(container.api, invalidate = { container.providersCache.clear(); container.profilesCache.clear(); container.modelsCache.clear() }) }
+  var name by remember { mutableStateOf(existing?.name.orEmpty()) }
+  var key by remember { mutableStateOf("") }
+  var address by remember { mutableStateOf(existing?.baseUrl.orEmpty()) }
+  var error by remember { mutableStateOf("") }
+  var busy by remember { mutableStateOf(false) }
+  var testText by remember { mutableStateOf("") }
+  var testOk by remember { mutableStateOf<Boolean?>(null) }
+  var testing by remember { mutableStateOf(false) }
+  val takesAddress = !ModelLogic.isCustom(provider) && existing?.default != true
+  val others = provider.accounts.filter { it.id != existing?.id }.map { it.name }
+  ZoBottomSheet(
+    title = if (existing == null) "Add an account" else "Edit account", onDismiss = onDismiss,
+    footer = {
+      SecondaryButton("Cancel", onDismiss)
+      PrimaryButton(if (existing == null) "Add account" else "Save", {
+        busy = true
+        scope.launch {
+          val msg = if (existing == null) ctl.add(provider.id, name, key, address, others)
+          else ctl.edit(provider.id, existing.id, name, key, if (takesAddress) address else null, others)
+          busy = false
+          if (msg.isEmpty()) onDone(existing?.id ?: accountIdFor(provider, name)) else error = msg
+        }
+      }, loading = busy)
+    },
+  ) {
+    val c = ZoTheme.colors
+    Column(Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+      Text("Another API key of ${provider.name.ifBlank { provider.id }}, for example a second account. Its key is kept on its own and only used for this account.", style = ZoTheme.type.fieldHint, color = c.dimmer)
+      ZoTextField(name, { name = it }, label = "Name", placeholder = "${provider.name.ifBlank { provider.id }} 1", modifier = Modifier.fillMaxWidth())
+      ZoTextField(key, { key = it }, label = "API key", password = true, placeholder = if (existing == null) "Paste the key" else if (existing.hasKey) "Key saved. Empty keeps it" else "No key yet", modifier = Modifier.fillMaxWidth())
+      if (takesAddress) ZoTextField(address, { address = it }, label = "Address (optional)", placeholder = provider.defaultUrl.ifBlank { "https://" }, hint = "Only if this account uses another address of ${provider.name}.", keyboardType = androidx.compose.ui.text.input.KeyboardType.Uri, modifier = Modifier.fillMaxWidth())
+      if (existing != null) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          SecondaryButton("Test connection", {
+            testing = true; testOk = null; testText = "Testing…"
+            scope.launch { val (ok, m) = ctl.test(provider.id, existing.id); testing = false; testOk = ok; testText = m }
+          }, enabled = !testing, loading = testing)
+          Spacer(Modifier.width(10.dp))
+          Text(testText, style = ZoTheme.type.fieldHint, color = when (testOk) { true -> c.ok; false -> c.danger; null -> c.dimmer }, modifier = Modifier.weight(1f))
+        }
+      }
+      if (error.isNotBlank()) ErrorLine(error)
+    }
+  }
+}
+
+/** The id the server gives an account named [name]: a slug, made unique per provider (the sheet then shows that account). */
+fun accountIdFor(provider: ProviderInfo, name: String): String = ModelLogic.slug(name).let { base ->
+  val taken = provider.accounts.map { it.id }.toSet() + "default"
+  if (base !in taken) base else generateSequence(2) { it + 1 }.map { "$base-$it" }.first { it !in taken }
 }
 
 @Composable
 fun EndpointForm(
   name: String, onName: (String) -> Unit, address: String, onAddress: (String) -> Unit, key: String, onKey: (String) -> Unit,
   model: String, onModel: (String) -> Unit, error: String, testText: String, testOk: Boolean?, testing: Boolean, onTest: () -> Unit,
-  format: ModelLogic.ApiFormat = ModelLogic.FORMATS[0], onFormat: (ModelLogic.ApiFormat) -> Unit = {},
+  format: ModelLogic.ApiFormat = ModelLogic.FORMATS[0], onFormat: (ModelLogic.ApiFormat) -> Unit = {}, keyHint: String = "Only if the server needs one",
 ) {
   val c = ZoTheme.colors
   Column(Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-    Text("Any server that speaks one of the three formats: vLLM, LM Studio, an agent router, a company gateway, a proxy.", style = ZoTheme.type.fieldHint, color = c.dimmer)
+    Text("Any server that speaks one of the three formats: vLLM, LM Studio, an agent router, a company gateway, a proxy. Give it a name; it shows in the model list under that name.", style = ZoTheme.type.fieldHint, color = c.dimmer)
     FormatDropdown("API format", ModelLogic.FORMATS.map { it.id to it.label }, format.id) { id -> ModelLogic.formatById(id)?.let(onFormat) }
     Text("The app adds ${format.path.removePrefix("/v1")} to the address. Not sure? Test connection says which one the server speaks.", style = ZoTheme.type.fieldHint, color = c.dimmer)
-    ZoTextField(name, onName, label = "Name", placeholder = "Work server, Home GPU…", modifier = Modifier.fillMaxWidth())
+    ZoTextField(name, onName, label = "Name", placeholder = "My router, Work gateway, Home Ollama", modifier = Modifier.fillMaxWidth())
     ZoTextField(address, onAddress, label = "Address", placeholder = "https://my-host.example/v1", keyboardType = androidx.compose.ui.text.input.KeyboardType.Uri, modifier = Modifier.fillMaxWidth())
-    ZoTextField(key, onKey, label = "Key", password = true, placeholder = "Only if the server needs one", modifier = Modifier.fillMaxWidth())
+    ZoTextField(key, onKey, label = "Key", password = true, placeholder = keyHint, modifier = Modifier.fillMaxWidth())
     ZoTextField(model, onModel, label = "Model", placeholder = "Model name (Test connection can list them)", modifier = Modifier.fillMaxWidth())
     Row(verticalAlignment = Alignment.CenterVertically) {
       SecondaryButton("Test connection", onTest, enabled = !testing, loading = testing)
       Spacer(Modifier.width(10.dp))
       Text(testText, style = ZoTheme.type.fieldHint, color = when (testOk) { true -> c.ok; false -> c.danger; null -> c.dimmer }, modifier = Modifier.weight(1f))
     }
-    if (testOk == false) ModelLogic.hintFormat(testText, format)?.let { f -> Row { PillButton("Use Custom endpoint: ${f.name}", { onFormat(f) }, accent = true) } }
+    if (testOk == false) ModelLogic.hintFormat(testText, format)?.let { f -> Row { PillButton("Use API format: ${f.name}", { onFormat(f) }, accent = true) } }
     if (error.isNotBlank()) ErrorLine(error)
   }
 }

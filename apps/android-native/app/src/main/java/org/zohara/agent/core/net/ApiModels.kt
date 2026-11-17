@@ -82,8 +82,12 @@ val ZoJson: Json = Json {
 @Serializable data class ModelTestResp(val works: Boolean = false, val message: String = "")
 @Serializable data class SelectResp(val provider: String = "", val account: String? = null, val model: String = "", val effort: String? = null, val baseUrl: String = "", val apiFormat: String? = null)
 @Serializable data class Profile(
-  val id: String, val name: String = "", val provider: String = "", val account: String? = null, val model: String = "", val effort: String? = null,
+  val id: String, val name: String = "", val provider: String = "", val model: String = "", val effort: String? = null,
   val pinned: List<String> = emptyList(), val baseUrl: String = "", val vision: Boolean? = null, val updated: Long = 0,
+  /** the account (API key) of the provider the profile uses; null = the Default account */
+  val account: String? = null,
+  /** the names a picker shows ("Groq", "Groq 2"); empty from an older server */
+  val providerName: String? = null, val accountName: String? = null,
 )
 @Serializable data class ProfilesResp(val active: String = "", val profiles: List<Profile> = emptyList())
 @Serializable data class IdResp(val id: String = "")

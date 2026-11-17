@@ -29,6 +29,8 @@ sealed interface SendEvent {
   data class Steps(val n: Int) : SendEvent
   /** the agent repeats the same call ([n] times, tool [tool]); the person may stop it, nothing stops by itself */
   data class Stuck(val n: Int, val tool: String) : SendEvent
+  /** a short notice that is not part of the answer, for example "Switched to Groq 2 (Groq 1 hit its limit)" */
+  data class Notice(val text: String) : SendEvent
   data class Usage(val input: Long, val output: Long) : SendEvent
   /** Test of a scheduled task (docs/SCHEDULED.md): the first line says what is being tested and where it runs */
   data class Test(val title: String, val kind: String, val place: String) : SendEvent
@@ -72,6 +74,7 @@ object SendEventParser {
       "question" -> SendEvent.Question(obj.long("id") ?: 0, parseQuestions(obj["questions"]))
       "steps" -> SendEvent.Steps((obj.long("n") ?: 0).coerceIn(0, Int.MAX_VALUE.toLong()).toInt())
       "stuck" -> SendEvent.Stuck((obj.long("n") ?: 0).coerceIn(0, Int.MAX_VALUE.toLong()).toInt(), obj.str("tool").orEmpty())
+      "notice" -> SendEvent.Notice(obj.str("text").orEmpty().take(300))
       "usage" -> SendEvent.Usage(obj.long("input") ?: 0, obj.long("output") ?: 0)
       "test" -> SendEvent.Test(obj.str("title").orEmpty(), obj.str("kind").orEmpty(), obj.str("place").orEmpty())
       "notify" -> SendEvent.Notify(obj.str("title").orEmpty(), obj.str("body").orEmpty(), obj.str("kind").orEmpty(), obj.bool("ok") ?: true)

@@ -325,6 +325,7 @@ class ChatSession(
         dropTransient(); finalizeLive()
         add(StuckItem(key(), ev.n, ev.tool))
       }
+      is SendEvent.Notice -> if (ev.text.isNotBlank()) mutate { dropTransient(); finalizeLive(); add(NoticeItem(key(), ev.text)) }
       is SendEvent.Usage -> _state.update { it.copy(usage = Usage(ev.input, ev.output)) }
       is SendEvent.Error -> {
         mutate {

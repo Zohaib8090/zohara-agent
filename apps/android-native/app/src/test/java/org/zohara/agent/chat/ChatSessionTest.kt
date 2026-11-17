@@ -119,6 +119,13 @@ class ChatSessionTest {
     assertEquals("stop 4", be.replies.single())
   }
 
+  @Test fun theAccountSwitchNoticeIsShownInlineBetweenTheTextBeforeAndTheAnswer() = runTest(UnconfinedTestDispatcher()) {
+    val (s, be, _) = make()
+    play(s, be, "hi", SendEvent.Stream(1), SendEvent.Chat("c", "hi"), SendEvent.Notice("Switched to Groq 2 (Groq 1 hit its limit)"), SendEvent.Notice(""), SendEvent.Delta("fine"), SendEvent.Done)
+    assertEquals(listOf("UserItem", "NoticeItem", "AiItem"), s.types())
+    assertEquals("Switched to Groq 2 (Groq 1 hit its limit)", s.state.value.items.filterIsInstance<NoticeItem>().single().text)
+  }
+
   @Test fun visionNoticeIsInlineAndTheAnswerStillComes() = runTest(UnconfinedTestDispatcher()) {
     val (s, be, _) = make()
     play(s, be, "look", SendEvent.Stream(1), SendEvent.Chat("c", "look"), SendEvent.ToolDone("vision", false, "The model m1 cannot look at pictures."), SendEvent.Delta("ok"), SendEvent.Done)

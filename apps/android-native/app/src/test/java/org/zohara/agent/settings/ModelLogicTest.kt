@@ -38,7 +38,7 @@ class ModelLogicTest {
   // ---- MODEL-09
   @Test fun providerGroupsAndTicks() {
     val g = ModelLogic.groups(all)
-    assertEquals(listOf("Popular Providers", "Cloud & Open-Weight", "Local Models (This Computer)", "Custom Endpoint"), g.map { it.label })
+    assertEquals(listOf("Popular Providers", "Cloud & Open-Weight", "Local Models (This Computer)", "Custom providers"), g.map { it.label })
     assertEquals(listOf("anthropic", "openai", "gemini"), g[0].items.map { it.id })
     assertEquals(listOf("groq", "openrouter"), g[1].items.map { it.id })
     assertEquals(listOf("ollama", "claude-code"), g[2].items.map { it.id })
@@ -171,14 +171,14 @@ class ModelLogicTest {
   @Test fun anOlderServerThatSendsNoCustomFlagStillGetsTheKnownIds() {
     val old = listOf(provider("custom", "Custom endpoint"), provider("custom-responses", "Custom endpoint: OpenAI Responses"), provider("groq"))
     assertTrue(old.take(2).all { ModelLogic.isCustom(it) && ModelLogic.needsAddress(it) })
-    assertEquals(listOf("Custom Endpoint", "Cloud & Open-Weight"), ModelLogic.groups(old).map { it.label }.reversed())
-    assertEquals(listOf("custom", "custom-responses"), ModelLogic.groups(old).first { it.label == "Custom Endpoint" }.items.map { it.id })
+    assertEquals(listOf("Custom providers", "Cloud & Open-Weight"), ModelLogic.groups(old).map { it.label }.reversed())
+    assertEquals(listOf("custom", "custom-responses"), ModelLogic.groups(old).first { it.label == "Custom providers" }.items.map { it.id })
     assertEquals("responses", ModelLogic.formatOf(old[1]).id)
   }
 
   @Test fun theGroupsPutAllThreeCustomEndpointsUnderCustomEndpointAndNowhereElse() {
     val g = ModelLogic.groups(all)
-    assertEquals(listOf("Popular Providers", "Cloud & Open-Weight", "Local Models (This Computer)", "Custom Endpoint"), g.map { it.label })
+    assertEquals(listOf("Popular Providers", "Cloud & Open-Weight", "Local Models (This Computer)", "Custom providers"), g.map { it.label })
     assertEquals(listOf("custom", "custom-responses", "custom-claude"), g.last().items.map { it.id })
     assertTrue(g.dropLast(1).none { grp -> grp.items.any { it.id.startsWith("custom") } })
   }
@@ -226,5 +226,85 @@ class ModelLogicTest {
       assertTrue(ModelLogic.validateAddress("https://192.168.1.20/v1", ModelLogic.needsAddress(p), true).startsWith("Use a public address"))
       assertEquals("", ModelLogic.validateAddress("https://router.example.com/v1", ModelLogic.needsAddress(p), true))
     }
+  }
+
+  // ---- named custom providers and accounts
+  private fun acct(id: String, name: String, def: Boolean = false, hidden: Boolean = false, key: Boolean = true, url: String? = null, active: Boolean = false) =
+    org.zohara.agent.core.net.AccountInfo(id, name, def, hidden, url, key, active)
+  private val groq = provider("groq", "Groq").copy(takesAccounts = true, accounts = listOf(acct("default", "Default", true), acct("groq-2", "Groq 2"), acct("groq-3", "Groq 3", hidden = true, key = false)))
+
+  @Test fun namedCustomProvidersAreCustomAndGroupedUnderCustomProviders() {
+    val named = provider("custom:my-router", "My router", needsUrl = true, custom = true, format = "responses")
+    assertTrue(ModelLogic.isCustom(named)); assertTrue(ModelLogic.needsAddress(named))
+    assertTrue("an older server sends no custom flag but the id says it", ModelLogic.isCustom(provider("custom:home", "Home")))
+    assertFalse(ModelLogic.isCustom(provider("openai")))
+    val g = ModelLogic.groups(listOf(provider("openai"), named, provider("custom:b", "B", custom = true)))
+    assertEquals(listOf("Popular Providers", "Custom providers"), g.map { it.label })
+    assertEquals(listOf("My router", "B"), g.last().items.map { it.name })
+    assertEquals("http://x/v1", ModelLogic.savedAddress(named.copy(baseUrl = "http://x/v1"), "openai"))
+    assertEquals("responses", ModelLogic.formatOf(named).id)
+  }
+
+  @Test fun accountLabelsShowTheProviderAndTheAccountOnlyWhenThereAreSeveral() {
+    assertEquals("Groq · Default", ModelLogic.accountLabel(groq, null))
+    assertEquals("Groq · Default", ModelLogic.accountLabel(groq, "default"))
+    assertEquals("Groq · Groq 2", ModelLogic.accountLabel(groq, "groq-2"))
+    assertEquals("an unknown account is the Default one", "Groq · Default", ModelLogic.accountLabel(groq, "gone"))
+    assertEquals("Groq", ModelLogic.accountLabel(groq.copy(accounts = groq.accounts.take(1)), "default"))
+    assertEquals("Groq", ModelLogic.accountLabel(provider("groq", "Groq"), "x"))
+    assertEquals(listOf("default", "groq-2"), ModelLogic.shownAccounts(groq, null).map { it.id })
+    assertEquals("a hidden account in use is always shown", listOf("default", "groq-2", "groq-3"), ModelLogic.shownAccounts(groq, "groq-3").map { it.id })
+    assertTrue(ModelLogic.accountHasKey(groq, "groq-2")); assertFalse(ModelLogic.accountHasKey(groq, "groq-3"))
+    assertTrue("an older server sends no accounts: the provider's flag", ModelLogic.accountHasKey(provider("openai", hasKey = true), "default"))
+    assertEquals("groq-2", ModelLogic.accountFor(groq, "groq-2")); assertEquals("default", ModelLogic.accountFor(groq, "gone")); assertEquals("default", ModelLogic.accountFor(null, "groq-2"))
+    assertEquals("default", ModelLogic.accountFor(provider("ollama", local = true), "groq-2"))
+    assertEquals("Key saved · 3 accounts", ModelLogic.providerSub(groq.copy(hasKey = true), 0, false))
+  }
+
+  @Test fun theNamesOfProvidersAndAccountsAreOneToFortyCharactersWithoutControlCharacters() {
+    assertEquals("", ModelLogic.validateName("My router", "provider"))
+    assertEquals("", ModelLogic.validateName("x".repeat(40), "provider"))
+    assertEquals("Give the account a name.", ModelLogic.validateName("   ", "account"))
+    assertEquals("The provider name can have at most 40 characters.", ModelLogic.validateName("x".repeat(41), "provider"))
+    assertEquals("The provider name cannot have control characters.", ModelLogic.validateName("a\tb", "provider"))
+    assertEquals("There is already a provider named \"groq 2\".", ModelLogic.validateName("groq 2", "provider", listOf("Groq 2")))
+    assertEquals("", ModelLogic.validateName("Groq 3", "provider", listOf("Groq 2")))
+  }
+
+  @Test fun theSlugIsTheSameAsTheServersAndNeverEmpty() {
+    assertEquals("my-router", ModelLogic.slug("My router"))
+    assertEquals("etc-passwd", ModelLogic.slug("../../etc/passwd"))
+    assertEquals("item", ModelLogic.slug("!!!"))
+    assertEquals(30, ModelLogic.slug("a".repeat(80)).length)
+    assertEquals("groq-2", accountIdFor(groq.copy(accounts = groq.accounts.take(1)), "Groq 2"))
+    assertEquals("the server makes ids unique per provider", "groq-2-2", accountIdFor(groq, "Groq 2"))
+    assertEquals("default is taken", "default-2", accountIdFor(groq, "Default"))
+  }
+
+  @Test fun theFormatHintOfTheNewMessagesNamesTheFormatToUse() {
+    val chat = ModelLogic.FORMATS[0]
+    assertEquals("responses", ModelLogic.hintFormat("This server speaks the OpenAI Responses format: set the API format of this provider to OpenAI Responses.", chat)?.id)
+    assertEquals("responses", ModelLogic.hintFormat("The server does not take /chat/completions (404). It may speak another API format: try OpenAI Responses or Claude format as the API format of this provider.", chat)?.id)
+    assertNull(ModelLogic.hintFormat("This server speaks the OpenAI Responses format: set the API format of this provider to OpenAI Responses.", ModelLogic.FORMATS[1]))
+    assertNull(ModelLogic.hintFormat("The provider answered 401: bad key", chat))
+  }
+
+  @Test fun theProfileAndMenuLinesNameTheAccount() {
+    val p = Profile("p1", "Fast", "groq", "llama", pinned = listOf("llama"), account = "groq-2")
+    assertEquals("Groq · Groq 2", ModelLogic.profileProviderLabel(p, listOf(groq)))
+    assertEquals("Groq · Default", ModelLogic.profileProviderLabel(p.copy(account = null), listOf(groq)))
+    assertEquals("gone-provider", ModelLogic.profileProviderLabel(p.copy(provider = "gone-provider"), listOf(groq)))
+    assertEquals("Groq · Groq 2 · llama · 1 pinned", ModelLogic.profileLine(p, "Groq", "Groq 2"))
+    val g = ModelLogic.menuGroups(ProfilesResp("p1", listOf(p)), { ModelLogic.profileProviderLabel(it, listOf(groq)) }) { it }
+    assertEquals("Fast · Groq · Groq 2", g[0].header); assertEquals("Groq · Groq 2", g[0].label); assertEquals("groq", g[0].provider)
+    assertEquals("the provider's name when no label function is given", "Fast · groq", ModelLogic.menuGroups(ProfilesResp("p1", listOf(p))) { it }[0].header)
+  }
+
+  @Test fun theLinesOfACustomProviderAndOfAnAccount() {
+    val c = provider("custom:r", "R", needsUrl = true, custom = true, format = "claude", baseUrl = "https://r.example/v1", hasKey = true)
+    assertEquals("Claude format (/v1/messages) · https://r.example/v1 · key saved", ModelLogic.customLine(c))
+    assertEquals("OpenAI Chat (/v1/chat/completions) · https://r.example/v1 · no key", ModelLogic.customLine(c.copy(format = "chat", hasKey = false)))
+    assertEquals("Key saved · in use", ModelLogic.accountLine(acct("a", "A", active = true)))
+    assertEquals("No key · https://g.example/v1 · hidden", ModelLogic.accountLine(acct("a", "A", key = false, hidden = true, url = "https://g.example/v1")))
   }
 }
