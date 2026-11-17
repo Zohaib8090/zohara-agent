@@ -19,6 +19,7 @@ pub mod mcp_client;
 pub mod mcp_oauth;
 pub mod policy;
 pub mod pty;
+pub mod runner;
 pub mod scheduler;
 pub mod service;
 pub mod store;

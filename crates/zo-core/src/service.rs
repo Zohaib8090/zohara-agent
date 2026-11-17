@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 mod sched;
+mod vm;
 
 fn runtime_base(name: &str) -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
@@ -515,6 +516,7 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             Ok(json!({}))
         }
         op if sched::handles(op) => sched::handle(op, req),
+        op if vm::handles(op) => vm::handle(op, req),
         "machines" => Ok(json!({"machines": crate::store::machines::load().iter().map(|m| json!({
             "name": m.name, "host": m.host, "user": m.user, "port": m.port, "note": m.note, "has_key": m.has_key(),
         })).collect::<Vec<_>>()})),
@@ -533,7 +535,18 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             crate::store::machines::add(m, req.get("key").and_then(Value::as_str))?;
             Ok(json!({}))
         }
-        "machine_remove" => crate::store::machines::remove(s(req, "name")).map(|_| json!({})),
+        "machine_remove" => {
+            let name = s(req, "name");
+            // a runner left behind on a machine that is forgotten here could not be controlled any more: it goes first
+            if crate::runner::host::has_runner(name) {
+                if req.get("uninstall_runner").and_then(Value::as_bool) != Some(true) {
+                    return Err("A runner is installed on this machine. Uninstall the runner first, or remove the machine together with its runner.".into());
+                }
+                crate::runner::host::uninstall(name)?;
+            }
+            crate::runner::apps::forget(name);
+            crate::store::machines::remove(name).map(|_| json!({}))
+        }
         "machine_test" => crate::tools::ssh::test(s(req, "name")).map(|m| json!({"message": m})),
         "projects" => Ok(json!({"text": crate::tools::call("zohara_ai_projects", &json!({}))?})),
         "project_create" => Ok(json!({"message": crate::tools::call("zohara_ai_create_project", &json!({"name": s(req, "name"), "goal": s(req, "goal")}))?})),

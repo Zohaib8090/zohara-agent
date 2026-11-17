@@ -81,10 +81,10 @@ pub fn argv(m: &Machine, key_file: &Path, known: &Path, remote_cmd: &str) -> Res
 }
 
 /// A private key in a file only its owner can read; deleted when this goes out of scope (also when a run times out or fails).
-struct TempKey(PathBuf);
+pub struct TempKey(PathBuf);
 
 impl TempKey {
-    fn new(key: &str) -> Result<TempKey, String> {
+    pub(crate) fn new(key: &str) -> Result<TempKey, String> {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("zohara-agent");
         std::fs::create_dir_all(&dir).map_err(|e| format!("no place for the key file: {e}"))?;
@@ -98,6 +98,19 @@ impl TempKey {
         k.push('\n');
         f.write_all(k.as_bytes()).map_err(|e| e.to_string())?;
         Ok(guard)
+    }
+}
+
+impl TempKey {
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+    /// Keeps the file for `secs` more seconds on a thread of its own, then removes it (an interactive ssh reads its key right at the start).
+    pub fn remove_later(self, secs: u64) {
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(secs));
+            drop(self);
+        });
     }
 }
 
@@ -136,7 +149,7 @@ pub fn run_on(name: &str, remote_cmd: &str, input: Option<&[u8]>, timeout: u64, 
     if remote_cmd.trim().is_empty() || remote_cmd.contains('\0') {
         return Err("No command provided".into());
     }
-    let m = machines::get(name).ok_or_else(|| format!("There is no machine called \"{name}\". Use zohara_ssh_machines to see the list."))?;
+    let m = machines::get(name).ok_or_else(|| format!("There is no machine called \"{name}\". Use zohara_ssh_machines to see the list, or add it with zohara_ssh_add_machine (that asks the person first)."))?;
     let key = crate::ai::keys::get(&machines::key_id(&m.name)).ok_or("This machine has no private key saved.")?;
     let key_file = TempKey::new(&key)?;
     drop(key);
@@ -202,14 +215,14 @@ pub fn run_on(name: &str, remote_cmd: &str, input: Option<&[u8]>, timeout: u64, 
 }
 
 /// 255 is ssh's own failure (cannot connect, key refused, host key changed): a clean error instead of a command result.
-fn failure(d: &Done, name: &str) -> Option<String> {
+pub(crate) fn failure(d: &Done, name: &str) -> Option<String> {
     (d.code == 255).then(|| {
         let why = d.stderr.trim();
         format!("Could not use {name} over SSH: {}", if why.is_empty() { "ssh failed" } else { why })
     })
 }
 
-fn report(d: &Done) -> String {
+pub(crate) fn report(d: &Done) -> String {
     let mut s = d.stdout.trim_end().to_string();
     if !d.stderr.trim().is_empty() {
         if !s.is_empty() {
@@ -292,6 +305,204 @@ pub fn test(name: &str) -> Result<String, String> {
     } else {
         Err(report(&d))
     }
+}
+
+
+// ── Keys made for Zohara Agent, and an interactive terminal ──
+
+/// A throw-away folder (`0700`) that is removed when this goes away.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(prefix: &str) -> Result<TempDir, String> {
+        use std::os::unix::fs::DirBuilderExt;
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("zohara-agent");
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+        let dir = base.join(format!("{prefix}-{}-{nanos}-{n}", std::process::id()));
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).map_err(|e| format!("no place for a private file: {e}"))?;
+        Ok(TempDir(dir))
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A new ed25519 key pair without a passphrase, made with the system's `ssh-keygen`: `(private key text, public key line)`. The files
+/// exist only for a moment, in a `0700` folder, and are removed at once.
+pub fn generate_key(comment: &str) -> Result<(String, String), String> {
+    if comment.is_empty() || !comment.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@')) {
+        return Err("The key comment has a character that is not allowed.".into());
+    }
+    let dir = TempDir::new("keygen")?;
+    let file = dir.0.join("key");
+    let mut cmd = Command::new("ssh-keygen");
+    crate::exec::scrub(&mut cmd);
+    let out = cmd
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", comment, "-f"])
+        .arg(&file)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { "ssh-keygen is not installed on this computer.".to_string() } else { e.to_string() })?;
+    if !out.status.success() {
+        return Err(format!("ssh-keygen failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    let private = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
+    let public = std::fs::read_to_string(dir.0.join("key.pub")).map_err(|e| e.to_string())?.trim().to_string();
+    Ok((private, public))
+}
+
+/// The public key line that belongs to the private key saved for machine `name` (made with `ssh-keygen -y`).
+pub fn public_of(name: &str) -> Result<String, String> {
+    let key = crate::ai::keys::get(&machines::key_id(name)).ok_or("This machine has no private key saved.")?;
+    let key_file = TempKey::new(&key)?;
+    drop(key);
+    let mut cmd = Command::new("ssh-keygen");
+    crate::exec::scrub(&mut cmd);
+    let out = cmd.args(["-y", "-f"]).arg(key_file.path()).stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
+    drop(key_file);
+    if !out.status.success() {
+        return Err("The saved key could not be read.".into());
+    }
+    clean_public_key(String::from_utf8_lossy(&out.stdout).trim())
+}
+
+/// A public key line is `ssh-ed25519 AAAA… comment`; anything with other characters is never put in a command.
+pub fn clean_public_key(line: &str) -> Result<String, String> {
+    let t = line.trim();
+    let ok = t.len() < 1000
+        && (t.starts_with("ssh-ed25519 ") || t.starts_with("ssh-rsa ") || t.starts_with("ecdsa-sha2-"))
+        && t.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '+' | '/' | '=' | '@' | '.' | '_' | '-'));
+    if ok { Ok(t.to_string()) } else { Err("That is not a public key line.".into()) }
+}
+
+/// The one line the person pastes on the machine to let Zohara Agent in.
+pub fn authorize_command(public: &str) -> Result<String, String> {
+    let p = clean_public_key(public)?;
+    Ok(format!("mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '{p}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"))
+}
+
+/// Puts a public key into `authorized_keys` of machine `name`, logging in ONCE with a password the person typed. The password goes to
+/// ssh through a throw-away `SSH_ASKPASS` helper in a `0700` folder (never an argument, never an environment variable, never stored,
+/// never in a log) and the folder is removed when ssh ends.
+pub fn authorize_with_password(name: &str, password: &str, public: &str) -> Result<String, String> {
+    let m = machines::get(name).ok_or_else(|| format!("There is no machine called \"{name}\"."))?;
+    m.validate()?;
+    if password.is_empty() || password.len() > 512 || password.contains('\0') || password.contains('\n') {
+        return Err("The password is empty or not valid.".into());
+    }
+    let remote = authorize_command(public)?;
+    let dir = TempDir::new("askpass")?;
+    let (pw, script) = (dir.0.join("pw"), dir.0.join("askpass.sh"));
+    for (path, body, mode) in [(&pw, password.to_string(), 0o600), (&script, format!("#!/bin/sh\nexec cat '{}'\n", pw.to_string_lossy().replace('\'', "")), 0o700)] {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(path).map_err(|e| e.to_string())?;
+        f.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    let _ = std::fs::create_dir_all(crate::audit::config_dir());
+    let known = known_hosts();
+    let known = known.to_string_lossy();
+    if known.contains(['"', '\n', '\0']) || known.contains(char::is_whitespace) {
+        return Err("The settings folder has a character ssh cannot take in its path.".into());
+    }
+    let mut c = Command::new("ssh");
+    crate::exec::scrub(&mut c);
+    c.args(["-F", "/dev/null", "-T", "-o", "BatchMode=no", "-o", "ConnectTimeout=15", "-o", "StrictHostKeyChecking=accept-new", "-o", "PubkeyAuthentication=no"])
+        .args(["-o", "PreferredAuthentications=password,keyboard-interactive", "-o", "NumberOfPasswordPrompts=1", "-o", "LogLevel=ERROR"])
+        .arg("-o")
+        .arg(format!("UserKnownHostsFile={known}"))
+        .args(["-p", &m.port.to_string(), "--"])
+        .arg(format!("{}@{}", m.user, m.host))
+        .arg(remote)
+        .env("SSH_ASKPASS", &script)
+        .env("SSH_ASKPASS_REQUIRE", "force")
+        .env("DISPLAY", "zohara-agent:0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let child = c.spawn().map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { "The ssh program is not installed on this computer.".to_string() } else { e.to_string() })?;
+    let pid = child.id() as i32;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    let out = match rx.recv_timeout(Duration::from_secs(45)) {
+        Ok(r) => r.map_err(|e| e.to_string())?,
+        Err(_) => {
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+            return Err("The machine did not answer in time.".into());
+        }
+    };
+    if out.status.success() {
+        Ok("The key is in place: Zohara Agent can log in without the password now. The password was not kept.".into())
+    } else {
+        let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        Err(format!("Could not log in with the password: {}", if why.is_empty() { "ssh failed" } else { why.as_str() }))
+    }
+}
+
+/// The arguments that open an interactive ssh session to `name`, and the key file it reads (ssh reads it at the start; the caller keeps
+/// it a short while). Used for a terminal tab and for the web terminal.
+pub fn terminal_command(name: &str) -> Result<(Vec<String>, TempKey), String> {
+    let m = machines::get(name).ok_or_else(|| format!("There is no machine called \"{name}\"."))?;
+    let key = crate::ai::keys::get(&machines::key_id(&m.name)).ok_or("This machine has no private key saved.")?;
+    let key_file = TempKey::new(&key)?;
+    drop(key);
+    let _ = std::fs::create_dir_all(crate::audit::config_dir());
+    let mut v = argv(&m, key_file.path(), &known_hosts(), "")?;
+    v.pop(); // no remote command: a login shell
+    if let Some(t) = v.iter_mut().find(|a| *a == "-T") {
+        *t = "-tt".into();
+    }
+    Ok((v, key_file))
+}
+
+/// `terminal_command` as one line for a local shell (every word quoted), for a terminal tab that starts programs through `$SHELL -c`.
+pub fn terminal_shell_line(name: &str) -> Result<String, String> {
+    let (args, key) = terminal_command(name)?;
+    key.remove_later(60);
+    Ok(format!("exec ssh {}", args.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ")))
+}
+
+/// The tool `zohara_ssh_add_machine`: adds a machine with a NEW key made for Zohara Agent (the private key goes to the key store and is
+/// never shown), and says what the person has to put on the machine. It takes no password: a password typed into a chat would be in
+/// the model's context, so a password login is only offered in the Add machine dialog of the app.
+pub fn add_machine(a: &Value) -> Result<String, String> {
+    let name = text(a, "name")?.trim();
+    let port = match a.get("port") {
+        Some(Value::Number(n)) => n.as_u64().filter(|p| (1..=65535).contains(p)).ok_or("The port must be a number from 1 to 65535.")? as u16,
+        Some(Value::String(t)) => machines::parse_port(t)?,
+        _ => 22,
+    };
+    let m = Machine { name: name.into(), host: text(a, "host")?.trim().into(), user: text(a, "user")?.trim().into(), port, note: a.get("note").and_then(Value::as_str).unwrap_or("").trim().into() };
+    m.validate()?;
+    if machines::get(&m.name).is_some() {
+        return Err(format!("A machine called \"{}\" is added already. Use zohara_ssh_test to check it.", m.name));
+    }
+    let (private, public) = generate_key(&format!("zohara-agent-{}", m.name))?;
+    machines::add(m.clone(), Some(&private))?;
+    drop(private);
+    let cmd = authorize_command(&public)?;
+    let tested = match test(&m.name) {
+        Ok(msg) => format!("Test: {msg} The machine already lets Zohara Agent in."),
+        Err(_) => "Test: it does not let Zohara Agent in yet (expected: the key is new).".to_string(),
+    };
+    Ok(format!(
+        "Added the machine \"{}\" ({}@{}:{}). Zohara Agent made a new key for it; the private key stays in Zohara Agent's key store.\n\
+         To let Zohara Agent in, the person runs this one line ON the machine (for example in the provider's web console):\n{cmd}\n\
+         The public key is: {public}\n{tested}\n\
+         When they have done it, call zohara_ssh_test with machine \"{}\".",
+        m.name, m.user, m.host, m.port, m.name
+    ))
+}
+
+/// The tool `zohara_ssh_test`.
+pub fn test_tool(a: &Value) -> Result<String, String> {
+    test(text(a, "machine")?)
 }
 
 #[cfg(test)]

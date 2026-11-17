@@ -2052,6 +2052,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zo-runner"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "zo-core",
+]
+
+[[package]]
 name = "zo-server"
 version = "0.1.0"
 dependencies = [

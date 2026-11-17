@@ -90,13 +90,15 @@ pub fn host_runs(task: &Task) -> bool {
     match task.run_on() {
         "cloud" => tenant::multi_tenant(),
         "this" => !tenant::multi_tenant(),
-        _ => true, // machine:<name>
+        // machine:<name>: this host runs it, unless a runner on that machine does (docs/RUNNER.md)
+        _ => !task.machine().is_some_and(crate::runner::host::has_runner),
     }
 }
 
 /// "this computer", "the cloud server" or "<machine> (from this computer)".
 pub fn place_text(task: &Task) -> String {
     match task.machine() {
+        Some(m) if crate::runner::host::has_runner(m) => format!("{m}, by the runner on it (it works while this computer is off)"),
         Some(m) => format!("{m}, worked on from {}", if tenant::multi_tenant() { "the cloud server" } else { "this computer" }),
         None if task.run_on() == "cloud" => "the cloud server".into(),
         None => "this computer".into(),
@@ -293,7 +295,7 @@ fn kind_note(task: &Task, test: bool, missed: Option<u64>) -> String {
         s.push_str(" It is a browser task: you may use the browser tools (zohara_browser_*) and the web tools to open pages, read, fill in and collect what is asked, and then report back here. Never buy, pay, book, order, send a message or e-mail, post, submit a form that sends something, or delete anything unless the person's approval comes through the approval step; if approval is not given, stop and say what you would have done.");
     }
     if let Some(m) = task.machine() {
-        s.push_str(&format!(" The work is on the machine named \"{m}\": use zohara_ssh_run, zohara_ssh_read_file and zohara_ssh_write_file with that machine name, and do not change the computer you run on."));
+        s.push_str(&format!(" The work is on the machine named \"{m}\": use zohara_ssh_run, zohara_ssh_read_file and zohara_ssh_write_file with that machine name, and do not change the computer you run on. If a command says the machine is not reachable or not added, say so in your answer; do not try to work around it."));
     }
     if test {
         s.push_str(" This run is a TEST of the task: do what the task says, but keep any change small and reversible, and say clearly at the end what a real run would do differently, if anything.");
@@ -486,6 +488,16 @@ pub fn run_due(approver: &dyn Approver, source: &str, cancel: &Arc<AtomicBool>, 
 /// Starts "Run now" in the background and returns at once; the result shows in the task (last result, history) when it ends.
 pub fn run_now_in_background(id: &str, approver: Arc<dyn Approver + Send + Sync>, source: &'static str, shown: Arc<dyn Fn(&Task, &Outcome) + Send + Sync>) -> Result<(), String> {
     let task = schedules::get(id).ok_or("That task is gone.")?;
+    // a task that a runner on its machine owns: the runner is asked to run it now, and its result is fetched when it is there
+    if task.machine().is_some_and(crate::runner::host::has_runner) {
+        let id = id.to_string();
+        tenant::spawn(move || {
+            if let Err(e) = crate::runner::host::run_task_now(&id) {
+                schedules::finish(&id, schedules::now_millis(), Finished { status: "failed".into(), summary: e, chat: None, ms: 0, missed: None, how: "manual".into() });
+            }
+        });
+        return Ok(());
+    }
     if !host_runs(&task) {
         return Err(format!("This task runs on {}, not here.", place_text(&task)));
     }
