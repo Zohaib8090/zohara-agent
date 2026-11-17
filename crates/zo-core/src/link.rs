@@ -237,7 +237,31 @@ pub fn parse_job(v: &Value, now_ms: u64) -> Result<Job, (Option<String>, String)
                 return bad("This operation is not allowed from the web.");
             }
             let mut args = Vec::new();
-            if let (Some(o), true) = (obj, control) {
+            if let (Some(o), true, true) = (obj, control, crate::control::is_migrate(name)) {
+                // Migrate takes lists of ids; nothing else (never a key, never a path)
+                let list = |k: &str| -> Result<Option<Value>, ()> {
+                    match o.get(k) {
+                        None | Some(Value::Null) => Ok(None),
+                        Some(Value::Array(a)) if a.len() <= 400 && a.iter().all(|x| x.as_str().is_some_and(|s| s.len() <= 80 && !s.chars().any(char::is_control))) => Ok(Some(Value::Array(a.clone()))),
+                        _ => Err(()),
+                    }
+                };
+                match list("select") {
+                    Ok(Some(v)) => args.push(("select".to_string(), v)),
+                    Ok(None) => {}
+                    Err(()) => return bad("The list of items is not valid."),
+                }
+                match o.get("targets") {
+                    None | Some(Value::Null) => {}
+                    Some(Value::Object(t)) if t.len() <= 400 && t.iter().all(|(k, v)| k.len() <= 80 && v.as_str().is_some_and(|s| s.len() <= 80 && !s.chars().any(char::is_control))) => args.push(("targets".to_string(), Value::Object(t.clone()))),
+                    _ => return bad("The targets are not valid."),
+                }
+                match o.get("batch") {
+                    None | Some(Value::Null) => {}
+                    Some(Value::String(b)) if b.len() <= 40 && safe_id(b, 40) => args.push(("batch".to_string(), Value::String(b.clone()))),
+                    _ => return bad("The import id is not valid."),
+                }
+            } else if let (Some(o), true) = (obj, control) {
                 // the control operations take one argument, a path, checked again when it is resolved
                 match o.get("path") {
                     None | Some(Value::Null) => {}
@@ -857,6 +881,12 @@ fn control_reply(host: &dyn Host, op: &str, args: &[(String, Value)], received: 
         return Err("This computer is already waiting for your answer to another web request.".into());
     }
     let _busy = BusyGuard;
+    if crate::control::is_migrate(op) {
+        return match crate::migrate::source::Local::new() {
+            Ok(local) => migrate_control(host, op, args, received, &local),
+            Err(e) => Err(e),
+        };
+    }
     // 1. what it would touch, checked before anyone is asked
     let target = match op {
         "fs_list" | "fs_read" => match c::resolve(path_arg) {
@@ -890,6 +920,55 @@ fn control_reply(host: &dyn Host, op: &str, args: &[(String, Value)], received: 
         _ => Err("This operation is not allowed from the web.".into()),
     };
     audit(if r.is_ok() { "done" } else { "failed" }, &shown);
+    r
+}
+
+/// The Migrate operations from the web (docs/MIGRATE.md): the person is asked ON THIS COMPUTER before anything is read or changed.
+/// What the dialog says comes from what is found here (names of tools, servers and files), never from the page's text. What goes back
+/// to the page has no key value in it, and no key is ever copied through this route: a key stays on this computer.
+fn migrate_control(host: &dyn Host, op: &str, args: &[(String, Value)], received: Instant, reader: &dyn crate::migrate::source::Reader) -> Result<Value, String> {
+    use crate::migrate as m;
+    let audit = |outcome: &str, what: &str| crate::audit::log(&format!("web:{op}"), &json!({"what": what}), outcome);
+    let ask = |summary: &str| -> Result<(), String> {
+        if !host.ask_local(summary) {
+            audit("denied on the computer", "");
+            return Err("You said no on your computer.".into());
+        }
+        if received.elapsed() >= CONTROL_WAIT {
+            audit("too late", "");
+            return Err("The answer came too late: the web page had given up. Ask again.".into());
+        }
+        Ok(())
+    };
+    let arg = |k: &str| args.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let r = match op {
+        "migrate_scan" => {
+            ask("look through your home folder for the settings of other AI tools (Claude Code, Claude Desktop, Codex CLI, Gemini CLI, Cursor, VS Code, Zed) and show the web page the NAMES of their MCP servers and instruction files with a short preview. Nothing is copied; no key or token value is sent.")?;
+            let mut v = m::scan(reader, "computer")?.view();
+            // keys are never copied through the web
+            v["can"]["secrets"] = json!(false);
+            v["via_link"] = json!(true);
+            Ok(v)
+        }
+        "migrate_apply" => {
+            let req = m::Request::from_json(&json!({"select": arg("select"), "targets": arg("targets")}))?;
+            let sc = m::scan(reader, "computer")?;
+            let names = sc.describe(&req.select);
+            if names.is_empty() {
+                return Err("Nothing that was found matches what was ticked (look again).".into());
+            }
+            ask(&format!("import into Zohara Agent on this computer: {}. Servers are only saved, not started. Keys are NOT copied.", names.join("; ")))?;
+            m::apply_scan(&sc, &req)
+        }
+        "migrate_undo" => {
+            let batch = arg("batch").and_then(|b| b.as_str().map(str::to_string)).unwrap_or_default();
+            let what = m::history()["batches"].as_array().and_then(|l| l.iter().find(|b| b["id"] == json!(batch)).map(|b| b["summary"].as_str().unwrap_or("").to_string())).ok_or("That import is not in the list any more.")?;
+            ask(&format!("undo the import \"{what}\" (it takes back what that import added)"))?;
+            m::undo(&batch)
+        }
+        _ => Err("This operation is not allowed from the web.".into()),
+    };
+    audit(if r.is_ok() { "done" } else { "failed" }, "");
     r
 }
 
@@ -1757,6 +1836,59 @@ mod tests {
         assert!(control_reply(&*h, "bogus", &[], Instant::now()).is_err());
         assert!(!CONTROL_BUSY.load(Ordering::SeqCst));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_over_the_link_asks_here_and_never_moves_a_key() {
+        const TOKEN: &str = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+        let (_g, dir) = sandbox("ctl_mig");
+        with_home(&dir, |home| {
+            std::fs::write(home.join(".claude.json"), format!(r#"{{"mcpServers": {{"github": {{"command": "npx", "args": ["-y", "gh-mcp"], "env": {{"GITHUB_TOKEN": "{TOKEN}"}}}}}}}}"#)).unwrap();
+            std::fs::create_dir_all(home.join(".claude")).unwrap();
+            std::fs::write(home.join(".claude/CLAUDE.md"), "# Rules\n\n- Always answer in short sentences.\n").unwrap();
+            // the job: only lists of ids get through, a key request is dropped
+            let job = parse_job(&json!({"id": "m1", "type": "op", "inner": {"op": "migrate_apply", "select": ["a"], "secrets": ["a"], "confirm": ["x"], "targets": {"a": "notes"}, "path": "/etc"}}), 0).unwrap();
+            match job.kind {
+                Kind::Op { op, args } => assert_eq!((op.as_str(), args.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>()), ("migrate_apply", vec!["select", "targets"])),
+                k => panic!("{k:?}"),
+            }
+            let why = |v: Value| parse_job(&v, 0).unwrap_err().1;
+            assert!(why(json!({"id": "m2", "type": "op", "inner": {"op": "migrate_apply", "select": "x"}})).contains("not valid"));
+            assert!(why(json!({"id": "m3", "type": "op", "inner": {"op": "migrate_apply", "select": [1]}})).contains("not valid"));
+            assert!(why(json!({"id": "m4", "type": "op", "inner": {"op": "migrate_undo", "batch": "a b"}})).contains("not valid"));
+            // a no on this computer: nothing is read
+            let h = host(false);
+            assert!(control_reply(&*h, "migrate_scan", &[], Instant::now()).unwrap_err().contains("no on your computer"));
+            // a yes: names and previews, no key value, and the page is told keys cannot be copied from here
+            let h = host(true);
+            let r = control_reply(&*h, "migrate_scan", &[], Instant::now()).unwrap();
+            assert!(!r.to_string().contains(TOKEN), "{r}");
+            assert_eq!((r["servers"][0]["name"].clone(), r["can"]["secrets"].clone(), r["via_link"].clone()), (json!("github"), json!(false), json!(true)));
+            assert!(h.asked.lock().unwrap()[0].contains("NAMES"));
+            // an import: the dialog is built here from what was found and names the server; the key is not copied
+            let (sid, iid) = (r["servers"][0]["id"].clone(), r["instructions"][0]["id"].clone());
+            let h = host(true);
+            let out = control_reply(&*h, "migrate_apply", &[("select".into(), json!([sid, iid]))], Instant::now()).unwrap();
+            let asked = h.asked.lock().unwrap().clone();
+            assert!(asked.len() == 1 && asked[0].contains("server github") && asked[0].contains("Keys are NOT copied"), "{asked:?}");
+            assert_eq!((out["servers"]["added"].clone(), out["notes"]["added"].clone()), (json!(["github"]), json!(1)));
+            let saved = crate::mcp_client::load_servers();
+            assert_eq!(saved[0].env.get("GITHUB_TOKEN").map(String::as_str), Some(""));
+            assert!(!std::fs::read_to_string(crate::audit::config_dir().join("mcp-servers.json")).unwrap().contains(TOKEN));
+            // a refused import changes nothing
+            let h = host(false);
+            assert!(control_reply(&*h, "migrate_undo", &[("batch".into(), out["batch"].clone())], Instant::now()).is_err());
+            assert_eq!(crate::mcp_client::load_servers().len(), 1);
+            // the unknown id is refused before anyone is asked
+            let h = host(true);
+            assert!(control_reply(&*h, "migrate_apply", &[("select".into(), json!(["nope"]))], Instant::now()).is_err());
+            assert!(h.asked.lock().unwrap().is_empty());
+            // undo, asked on this computer
+            let h = host(true);
+            let u = control_reply(&*h, "migrate_undo", &[("batch".into(), out["batch"].clone())], Instant::now()).unwrap();
+            assert!(u["message"].as_str().unwrap().starts_with("Undone"), "{u}");
+            assert!(crate::mcp_client::load_servers().is_empty());
+        });
     }
 
     #[test]

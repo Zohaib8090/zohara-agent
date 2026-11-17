@@ -25,10 +25,10 @@ import kotlinx.serialization.json.jsonObject
 
 class SettingsLogicTest {
   // ---- SET-01, SET-03
-  @Test fun adminSeesTwelvePagesAndRestrictedTen() {
-    assertEquals(12, SettingsPages.visible(false).size)
+  @Test fun adminSeesThirteenPagesAndRestrictedEleven() {
+    assertEquals(13, SettingsPages.visible(false).size)
     val r = SettingsPages.visible(true).map { it.id }
-    assertEquals(10, r.size)
+    assertEquals(11, r.size)
     assertFalse("apps" in r); assertFalse("machines" in r)
     assertEquals(listOf("model", "personality", "memory", "general"), r.take(4))
   }

@@ -13,6 +13,7 @@ mod composer;
 mod connectors_ui;
 mod dock;
 mod markdown;
+mod migrate_ui;
 mod memfeed;
 mod modelpick;
 use zo_core::store::projects as model;

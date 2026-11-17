@@ -2831,7 +2831,7 @@ async function showActivity() {
 }
 
 /* ---------- settings: a list of pages, each with a Back button ---------- */
-const PAGES = [["model", "Model and profiles", "Which AI answers, its key, and saved presets."], ["personality", "Personality", "How Zohara Agent talks to you."], ["memory", "Memory", "What Zohara Agent remembers about you between chats."], ["general", "Appearance and permissions", "Light or dark, and what Zohara Agent may do on its own."], ["apps", "Connected apps", "Tools Zohara Agent can use (MCP servers)."], ["machines", "Machines", "Computers Zohara Agent can reach over SSH."], ["sync", "Desktop sync", "Share chats and memory with the desktop app."], ["computers", "My computers", "Computers you can run Zohara Agent on from this page."], ["notifications", "Install and notifications", "Install Zohara Agent as an app, and get told when an answer is ready."], ["account", "Account", "Your data, signed-in devices, export and delete."], ["data", "Data", "Saved chats."], ["about", "About", "Versions and updates."]];
+const PAGES = [["model", "Model and profiles", "Which AI answers, its key, and saved presets."], ["personality", "Personality", "How Zohara Agent talks to you."], ["memory", "Memory", "What Zohara Agent remembers about you between chats."], ["general", "Appearance and permissions", "Light or dark, and what Zohara Agent may do on its own."], ["apps", "Connected apps", "Tools Zohara Agent can use (MCP servers)."], ["machines", "Machines", "Computers Zohara Agent can reach over SSH."], ["import", "Import", "Bring in MCP servers and instructions from Claude Code, Cursor and other tools."], ["sync", "Desktop sync", "Share chats and memory with the desktop app."], ["computers", "My computers", "Computers you can run Zohara Agent on from this page."], ["notifications", "Install and notifications", "Install Zohara Agent as an app, and get told when an answer is ready."], ["account", "Account", "Your data, signed-in devices, export and delete."], ["data", "Data", "Saved chats."], ["about", "About", "Versions and updates."]];
 const pages = () => PAGES.filter(p => !(restricted() && ADMIN_PAGES.includes(p[0])));
 function row(title, sub, control) { const r = document.createElement("div"); r.className = "settings-row"; r.innerHTML = `<div class="col"><div class="pc-name2"></div>${sub ? '<div class="pc-meta2"></div>' : ""}</div>`; r.querySelector(".pc-name2").textContent = title; if (sub) r.querySelector(".pc-meta2").textContent = sub; if (control) r.appendChild(control); return r; }
 function cardOf(...rows) { const c = document.createElement("div"); c.className = "settings-card"; rows.forEach(r => c.appendChild(r)); return c; }
@@ -2849,7 +2849,7 @@ async function settingsPage(id) {
   view().style.overflow = ""; view().innerHTML = `<div class="pagebox narrow"><div class="page-head" id="ph" style="gap:10px"></div><div id="pbody"></div></div>`;
   $("ph").appendChild(bk); $("ph").insertAdjacentHTML("beforeend", '<div class="page-title"></div>'); $("ph").querySelector(".page-title").textContent = name;
   const b = $("pbody"); b.innerHTML = skel(4);
-  try { await ({ model: pageModel, personality: pagePersonality, memory: pageMemory, general: pageGeneral, apps: pageApps, machines: pageMachines, sync: pageSync, computers: pageComputers, notifications: pageNotifications, account: pageAccount, data: pageData, about: pageAbout })[id](b); } catch (e) { b.innerHTML = `<div class="msg-error">${esc(e.message)}</div>`; }
+  try { await ({ model: pageModel, personality: pagePersonality, memory: pageMemory, general: pageGeneral, apps: pageApps, machines: pageMachines, import: pageImport, sync: pageSync, computers: pageComputers, notifications: pageNotifications, account: pageAccount, data: pageData, about: pageAbout })[id](b); } catch (e) { b.innerHTML = `<div class="msg-error">${esc(e.message)}</div>`; }
 }
 async function pageModel(b) {
   const [s, prof, prov, hid] = await Promise.all([op("status"), getProfiles(true), getProviders(true), getSettings(true)]); b.innerHTML = "";
@@ -3044,6 +3044,122 @@ async function pageApps(b) {
   b.appendChild(cardOf(...rows, row(rows.length ? "Add more" : "No servers yet", "Add a server by its web address, or paste a config.", acts)));
   b.insertAdjacentHTML("beforeend", '<div class="note">Servers that run a program on your computer (command or stdio) can only be added and run on the desktop. Remote servers sync from your desktop when you are signed in there. <a href="#" id="toSync2">Open Desktop sync</a></div>');
   $("toSync2").onclick = e => { e.preventDefault(); settingsPage("sync"); };
+}
+/* ---------- Import (docs/MIGRATE.md): MCP servers and instructions from Claude Code, Claude Desktop, Codex, Gemini, Cursor, VS Code, Zed ----------
+   Three ways in: files the person pastes or uploads (read by the server, never stored), "From my computer" through the desktop link (the
+   computer asks first and sends back names and short previews only), and, for an unrestricted account, a machine read over SSH.
+   Keys are never copied from this page: a server comes in with an empty placeholder and the person fills it in on the desktop.
+   Everything shown comes from other people's files, so it is only ever written with textContent. */
+const MG_MAX = 900 * 1024;
+const mgEl = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+async function pageImport(b) {
+  b.innerHTML = "";
+  b.appendChild(head("Find other tools' settings"));
+  const rows = [], again = () => settingsPage("import");
+  if (!restricted()) { try { await linkRefresh(); } catch {} }
+  const online = restricted() ? [] : links.devices.filter(d => d.online);
+  if (online.length) online.forEach(d => rows.push(row("From " + devName(d), "Reads the settings files of Claude Code, Cursor and the others on that computer. It asks you first and sends back only names and short previews, never a key.", btn("Detect", "primary", () => mgDetectLink(d, again)))));
+  else if (!restricted()) rows.push(row("From my computer", links.devices.length ? "None of your linked computers is online. Start Zohara Agent on it (it can run in the tray)." : "Link a computer first, or paste the files below.", btn("My computers", "", () => settingsPage("computers"))));
+  const acts = mgEl("div", "acts"), fi = document.createElement("input"); fi.type = "file"; fi.multiple = true; fi.hidden = true;
+  fi.onchange = async () => { const fs = [...fi.files]; fi.value = ""; if (!fs.length) return; try { const files = []; let n = 0; for (const f of fs.slice(0, 12)) { n += f.size; if (n > MG_MAX) throw new Error("That is too much text at once (900 KB at most)."); files.push({ name: f.name, text: await f.text() }); } mgDetectPaste(files, again); } catch (e) { toast(e.message); } };
+  acts.append(btn("Paste…", "", () => mgPasteSheet(again)), btn("Upload files…", "", () => fi.click()), fi);
+  rows.push(row("Paste or upload files", "A claude_desktop_config.json, .mcp.json, config.toml, settings.json, mcp.json, CLAUDE.md, AGENTS.md or GEMINI.md. The text is read by this server and not kept.", acts));
+  if (!restricted()) { try { const m = (await op("machines")).machines || []; if (m.length) { const sel = document.createElement("select"); m.forEach(x => sel.appendChild(new Option(x.name, x.name))); const go = btn("Detect", "primary", () => mgDetectMachine(sel.value, again)); const w = mgEl("div", "acts"); w.append(sel, go); rows.push(row("A machine (read-only over SSH)", "Reads the same files there with ordinary read commands. Nothing is written on the machine.", w)); } } catch {} }
+  b.appendChild(cardOf(...rows));
+  const n = mgEl("div", "note", "Pasted text goes to this server to be read and is not saved. Remove API keys and tokens from it first if you can. Keys are never copied from this page: an imported server gets an empty placeholder, and you add the key on your computer.");
+  b.appendChild(n);
+  try {
+    const h = (await op("migrate_history")).batches || [];
+    if (h.length) { b.appendChild(head("Imports you can undo")); b.appendChild(cardOf(...h.map(x => row(String(x.summary || "An import").slice(0, 200), String(x.origin || "").slice(0, 80), btn("Undo", "", () => confirmBox("Undo this import?", "What it added is taken back, unless you changed it since (those stay).", "Undo", async () => { try { toast((await op("migrate_undo", { batch: x.id })).message || "Undone", 5000); } catch (e) { toast(e.message); } again(); })))))); }
+  } catch {}
+}
+function mgPasteSheet(again) {
+  const w = document.createElement("div");
+  w.innerHTML = '<div class="field-hint" style="margin:0 0 8px">Paste the text of one file. Nothing is imported until you tick it on the next screen.</div><div class="field-label">File name (helps to recognise it)</div><input class="field-input" maxlength="80" placeholder="claude_desktop_config.json" autocomplete="off" spellcheck="false"><div class="field-label">Text</div><textarea class="field-input" rows="9" spellcheck="false"></textarea><div class="field-hint" id="mgpe"></div>';
+  const nm = w.querySelector("input"), t = w.querySelector("textarea");
+  const go = btn("Look at it", "primary", () => { if (!t.value.trim()) { w.querySelector("#mgpe").textContent = "Paste some text first."; return; } if (t.value.length > MG_MAX) { w.querySelector("#mgpe").textContent = "That is too long (900 KB at most)."; return; } dlg.close(); mgDetectPaste([{ name: nm.value.trim() || "pasted.txt", text: t.value }], again); });
+  const dlg = sheet("Paste a settings file", w, [btn("Cancel", "", () => dlg.close()), go], true); t.focus();
+}
+async function mgDetectPaste(files, again) {
+  const box = mgEl("div"); box.appendChild(ctlWaiting("Reading…")); const sh = sheet("Looking at the files", box, [btn("Close", "", () => sh.close())], true);
+  try { const v = await op("migrate_scan", { source: "paste", files }); sh.close(); mgReview(v, { source: "paste", files }, again); } catch (e) { box.textContent = ""; box.appendChild(ctlErrBox(e.message)); }
+}
+async function mgDetectMachine(name, again) {
+  const box = mgEl("div"); box.appendChild(ctlWaiting("Reading the files on " + name + "…")); const sh = sheet("Looking on " + name, box, [btn("Close", "", () => sh.close())], true);
+  try { const v = await op("migrate_scan", { source: "machine", machine: name }); sh.close(); mgReview(v, { source: "machine", machine: name }, again); } catch (e) { box.textContent = ""; box.appendChild(ctlErrBox(e.message)); }
+}
+async function mgDetectLink(dev, again) {
+  const box = mgEl("div"); box.appendChild(ctlWaiting()); const sh = sheet("Looking on " + devName(dev), box, [btn("Close", "", () => sh.close())], true);
+  try { const v = await ctlCall(dev, { op: "migrate_scan" }); sh.close(); mgReview(v, { link: dev }, again); } catch (e) { box.textContent = ""; box.appendChild(ctlErrBox(e.message)); }
+}
+/* the checklist. `src` says where it came from, so the import reads the same place again (the files for a paste, the computer for a link). */
+function mgReview(v, src, again) {
+  const can = v.can || {}, body = mgEl("div"), servers = [], instrs = [];
+  const found = (v.tools || []).filter(t => t.found).map(t => String(t.name).slice(0, 40));
+  body.appendChild(mgEl("div", "field-hint", found.length ? "Settings of: " + found.join(", ") + "." : "None of the supported tools left settings there."));
+  (v.notes || []).slice(0, 12).forEach(n => body.appendChild(mgEl("div", "field-hint", String(n).slice(0, 300))));
+  const sv = (v.servers || []).slice(0, 300);
+  if (sv.length) {
+    body.appendChild(mgEl("div", "field-label", "MCP servers"));
+    body.appendChild(mgEl("div", "field-hint", "A server is only saved, not started; the first time the chat uses it, it asks first. " + (can.secrets ? "" : "Keys are not copied from here: a server that needs one comes in with an empty placeholder.")));
+    if (can.servers === false) body.appendChild(ctlErrBox("MCP servers are not available to this account. Only the instructions below can be imported."));
+    let last = "";
+    sv.forEach(s => {
+      if (s.tool_name !== last) { last = s.tool_name; body.appendChild(mgEl("div", "pc-meta2", String(s.tool_name).slice(0, 40))); }
+      const prog = s.kind === "program", blocked = can.servers === false || (prog && can.programs === false), dup = !!s.duplicate;
+      const lab = mgEl("label", "q-opt"), cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = !blocked && !dup; cb.disabled = blocked || dup;
+      const tx = mgEl("div"); tx.appendChild(mgEl("div", "pc-name2", String(s.name).slice(0, 60) + (prog ? "  (runs a program)" : "  (remote)")));
+      tx.appendChild(mgEl("div", "pc-meta2", String(s.target).slice(0, 300)));
+      let meta = String(s.source).slice(0, 120) + (s.folder ? " · for the folder " + String(s.folder).slice(0, 120) : "") + (s.disabled ? " · switched off there (stays off)" : "");
+      if (dup === true || s.duplicate === "here") meta += " · already added as " + String(s.duplicate_of || s.name).slice(0, 60) + " (kept as it is)"; else if (s.duplicate === "scan") meta += " · the same server is listed above; pick one";
+      if (blocked && prog && can.servers !== false) meta += " · programs run on a computer: add this one in the desktop app";
+      tx.appendChild(mgEl("div", "pc-meta2", meta));
+      (s.notes || []).slice(0, 3).forEach(n => tx.appendChild(mgEl("div", "field-hint", String(n).slice(0, 200))));
+      if ((s.needs || []).length) tx.appendChild(mgEl("div", "field-hint", "Needs: " + s.needs.slice(0, 10).map(n => String(n.name).slice(0, 60) + (n.from ? " (from " + String(n.from).slice(0, 60) + ")" : "")).join(", ") + ". It comes in with an empty placeholder."));
+      lab.append(cb, tx); body.appendChild(lab); servers.push({ id: s.id, cb });
+    });
+  }
+  const il = (v.instructions || []).slice(0, 60);
+  if (il.length) {
+    body.appendChild(mgEl("div", "field-label", "Instructions"));
+    body.appendChild(mgEl("div", "field-hint", "An instruction file becomes memory notes (one per rule), or" + (can.projects === false ? "" : " is added to the end of a project's instruction") + ". Lines that look like keys are left out."));
+    il.forEach(i => {
+      const lab = mgEl("label", "q-opt"), cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = true;
+      const tx = mgEl("div"); tx.appendChild(mgEl("div", "pc-name2", String(i.source).slice(0, 120) + " (" + String(i.tool_name).slice(0, 30) + ")"));
+      let meta = (+i.lines || 0) + " lines · " + (+i.notes || 0) + " notes" + (i.notes_more > 0 ? " (" + i.notes_more + " more rules are not imported)" : "") + (i.secret_lines > 0 ? " · " + i.secret_lines + " line(s) that look like keys are left out" : "");
+      tx.appendChild(mgEl("div", "pc-meta2", meta));
+      if (i.preview) tx.appendChild(mgEl("div", "field-hint", "“" + String(i.preview).slice(0, 180) + "”"));
+      const sel = document.createElement("select"); sel.style.marginTop = "6px"; sel.appendChild(new Option("Memory notes (everywhere)", "notes"));
+      if (can.projects !== false) (v.projects || []).slice(0, 50).forEach(p => { sel.appendChild(new Option("Add to the instruction of project " + String(p.name).slice(0, 40), "instruction:" + p.id)); sel.appendChild(new Option("Memory notes of project " + String(p.name).slice(0, 40), "notes:" + p.id)); });
+      if (i.suggest) { const w = "instruction:" + i.suggest; if ([...sel.options].some(o => o.value === w)) sel.value = w; }
+      tx.appendChild(sel); lab.append(cb, tx); body.appendChild(lab); instrs.push({ id: i.id, cb, sel });
+    });
+  }
+  const ex = (v.extras || []).slice(0, 80);
+  if (ex.length) { body.appendChild(mgEl("div", "field-label", "Found, but not imported")); body.appendChild(mgEl("div", "field-hint", ex.map(e => String(e.tool_name).slice(0, 30) + " " + String(e.kind).slice(0, 12) + ": " + String(e.name).slice(0, 80)).join("\n"))).style.whiteSpace = "pre-wrap"; }
+  if (!sv.length && !il.length) body.appendChild(mgEl("div", "field-hint", "There is nothing to import here."));
+  const status = mgEl("div", "field-hint"); body.appendChild(status);
+  const go = btn("Import ticked", "primary", async () => {
+    const select = [...servers.filter(s => s.cb.checked).map(s => s.id), ...instrs.filter(i => i.cb.checked).map(i => i.id)];
+    if (!select.length) { status.className = "field-hint bad"; status.textContent = "Tick something first."; return; }
+    const targets = {}; instrs.filter(i => i.cb.checked).forEach(i => targets[i.id] = i.sel.value);
+    go.disabled = true; status.className = "field-hint"; status.textContent = src.link ? "Waiting for your approval on your computer…" : "Importing…";
+    try {
+      const out = src.link ? await ctlCall(src.link, { op: "migrate_apply", select, targets }) : await op("migrate_apply", { ...(src.source === "paste" ? { source: "paste", files: src.files } : { source: "machine", machine: src.machine }), select, targets });
+      sh.close(); mgDone(out, src, again);
+    } catch (e) { status.className = "field-hint bad"; status.textContent = e.message; go.disabled = false; }
+  });
+  const sh = sheet("Found in " + String(v.origin || "").slice(0, 60), body, [btn("Close", "", () => sh.close()), go], true);
+}
+function mgDone(out, src, again) {
+  const box = mgEl("div"); box.appendChild(mgEl("div", "pc-name2", String(out.message || "Done.").slice(0, 300)));
+  const add = t => box.appendChild(mgEl("div", "field-hint", String(t).slice(0, 300)));
+  ((out.servers || {}).skipped || []).slice(0, 30).forEach(k => add("Left out " + String(k.name).slice(0, 60) + ": " + String(k.why).slice(0, 200)));
+  ((out.instructions || {}).skipped || []).slice(0, 30).forEach(k => add("Left out " + String(k.source).slice(0, 80) + ": " + String(k.why).slice(0, 200)));
+  (out.needs || []).slice(0, 30).forEach(k => add(String(k.server).slice(0, 60) + " still needs: " + (k.needs || []).slice(0, 10).map(n => String(n.name).slice(0, 60)).join(", ")));
+  const foot = [btn("Done", "primary", () => { sh.close(); again(); })];
+  if (out.batch) foot.unshift(btn("Undo", "", async () => { try { toast((src.link ? await ctlCall(src.link, { op: "migrate_undo", batch: out.batch }) : await op("migrate_undo", { batch: out.batch })).message || "Undone", 5000); sh.close(); again(); } catch (e) { toast(e.message); } }));
+  const sh = sheet("Imported", box, foot, true);
 }
 /* ---------- Browse connectors (docs/MCP.md): the directory of remote MCP servers, read from the public registry by the server ---------- */
 const CONN_CATS = [["all", "All"], ["dev", "Developer"], ["docs", "Documents"], ["chat", "Chat"], ["data", "Data"], ["finance", "Finance"], ["media", "Media"], ["search", "Search"], ["other", "Other"]];

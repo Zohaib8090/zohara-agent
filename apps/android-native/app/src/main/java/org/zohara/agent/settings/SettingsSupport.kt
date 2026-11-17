@@ -72,6 +72,7 @@ object SettingsPages {
     SettingsPageDef("general", Routes.SETTINGS_GENERAL, "Appearance and permissions", "Light or dark, and what Zohara Agent may do on its own."),
     SettingsPageDef("apps", Routes.SETTINGS_APPS, "Connected apps", "Tools Zohara Agent can use (MCP servers).", adminOnly = true),
     SettingsPageDef("machines", Routes.SETTINGS_MACHINES, "Machines", "Computers Zohara Agent can reach over SSH.", adminOnly = true),
+    SettingsPageDef("import", Routes.SETTINGS_IMPORT, "Import", "Bring in MCP servers and instructions from Claude Code, Cursor and other tools."),
     SettingsPageDef("sync", Routes.SETTINGS_SYNC, "Desktop sync", "Share chats and memory with the desktop app."),
     SettingsPageDef("computers", Routes.SETTINGS_COMPUTERS, "My computers", "Computers you can run Zohara Agent on from this app."),
     SettingsPageDef("notifications", Routes.SETTINGS_NOTIFICATIONS, "Notifications", "Be told when an answer is ready or Zohara Agent needs you."),

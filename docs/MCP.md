@@ -56,6 +56,10 @@ Access tokens are renewed shortly before they run out (Claude renews 5 minutes b
 * Showing resources and prompts in the interface (the model can use them; there is no `@` picker or `/` list yet).
 * Extensions in the `.mcpb` format.
 
+## Import from other tools
+
+Settings > Import finds the MCP servers (and instruction files) that Claude Code, Claude Desktop, Codex CLI, Gemini CLI, Cursor, VS Code and Zed already have and brings the ticked ones in: docs/MIGRATE.md. A server whose key is kept in the key store (`secret_env`, `secret_headers` of `ServerConfig`) never has it in `mcp-servers.json`.
+
 ## Browse connectors (the directory)
 
 Settings > Connected apps > **Browse connectors** (desktop, website and Android app) lists remote MCP servers to add with one click. Built
