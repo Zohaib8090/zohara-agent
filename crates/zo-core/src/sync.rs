@@ -315,8 +315,8 @@ fn checked<'a>(kind: &'a str, id: &str) -> Result<&'a str, String> {
     }
     // on the server the id comes from a client and becomes a document name in the database: a plain, short, unambiguous name
     // ("." and ".." are refused by the database, "/" would be lossy, and "__" is how a long document is cut into parts).
-    // A key's id (`provider` or `provider@profile`) is a name in the key store, not a document, and may have the `@`.
-    let extra = |c: char| kind == "keys" && c == '@';
+    // A key's id (`provider`, `provider@profile`, `provider:account`, `custom:name:account`) is a name in the key store, not a document, and may have the `@` and `:`.
+    let extra = |c: char| kind == "keys" && (c == '@' || c == ':');
     if crate::tenant::multi_tenant() && (id.len() > 100 || id.contains("__") || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || extra(c))) {
         return Err("That id is not allowed (letters, digits, - and _ only, at most 100 characters, no double underscore).".into());
     }
@@ -498,7 +498,12 @@ fn check_profile(id: &str, p: &mut profiles::Profile) -> Result<(), String> {
         let restricted = crate::tenant::is_restricted();
         p.provider = r.map_err(|e| if restricted { format!("{NOT_FOR_ACCOUNT}{e}") } else { e })?;
     }
-    let prov = providers::find(&p.provider).ok_or("The profile names a provider this version does not know.")?;
+    let prov = match providers::find(&p.provider) {
+        Some(prov) => prov,
+        // a custom provider that was left out here (a private address for a restricted account) is not a problem to show every round
+        None if p.provider.starts_with("custom:") && crate::tenant::is_restricted() => return Err(format!("{NOT_FOR_ACCOUNT}The profile names a custom provider that is not available to this account.")),
+        None => return Err("The profile names a provider this version does not know.".into()),
+    };
     if prov.protocol == providers::Protocol::ClaudeCode && crate::tenant::is_restricted() {
         return Err(format!("{NOT_FOR_ACCOUNT}Claude Code is not available to this account."));
     }
@@ -568,12 +573,24 @@ pub fn put_doc(kind: &str, id: &str, doc: &Value) -> Result<bool, String> {
             if id != SETTINGS_ID {
                 return Err("Unknown kind of item.".into());
             }
-            let p: ui_prefs::Prefs = serde_json::from_value(doc.clone()).map_err(bad)?;
-            let p = ui_prefs::clean(p)?;
-            let secret_addr = |u: &str| address_carries_secret(u) || u.split("://").nth(1).unwrap_or("").split(['/', '?', '#']).next().unwrap_or("").contains('@');
-            if p.custom_providers.iter().any(|c| secret_addr(&c.base_url)) || p.accounts.values().flatten().any(|a| a.base_url.as_deref().is_some_and(secret_addr)) {
-                return Err("An address with a user name, password or key inside it is not synced (it would be stored as plain text).".into());
+            let mut p: ui_prefs::Prefs = serde_json::from_value(doc.clone()).map_err(bad)?;
+            // A custom provider or account whose address does not fit this computer is left out, not the whole document: an address with a
+            // secret inside it is never stored (it would be plain text), and a restricted account takes only public https addresses.
+            // What names the missing provider later (a profile) says so, and stays on the computer it came from.
+            let restricted = crate::tenant::is_restricted();
+            let fits = |u: &str| {
+                let secret = address_carries_secret(u) || u.split("://").nth(1).unwrap_or("").split(['/', '?', '#']).next().unwrap_or("").contains('@');
+                !secret && (!restricted || crate::ai::custom::check_address(u).is_ok())
+            };
+            p.custom_providers.retain(|c| fits(&c.base_url));
+            let kept: Vec<String> = p.custom_providers.iter().map(|c| c.id.clone()).collect();
+            p.accounts.retain(|prov, _| !prov.starts_with("custom:") || kept.contains(prov));
+            p.default_accounts.retain(|prov, _| !prov.starts_with("custom:") || kept.contains(prov));
+            for list in p.accounts.values_mut() {
+                list.retain(|a| a.base_url.as_deref().map_or(true, |u| u.trim().is_empty() || fits(u)));
             }
+            p.accounts.retain(|_, l| !l.is_empty());
+            let p = ui_prefs::clean(p)?;
             if p.updated == 0 {
                 return Err("The preferences have no time.".into());
             }
@@ -1152,7 +1169,18 @@ pub fn sync_with(base: &str, token: &str) -> Result<(usize, usize, usize), Strin
             Err(e) => note(k, e)?,
         }
     }
-    for k in &plan.pull {
+    // the settings come first: they carry the custom providers and accounts that a profile or a key may name
+    let by_rank = |v: &Vec<String>| {
+        let mut v = v.clone();
+        v.sort_by_key(|k| match k.split(':').next().unwrap_or("") {
+            "settings" => 0,
+            "profiles" => 1,
+            "keys" => 2,
+            _ => 3,
+        });
+        v
+    };
+    for k in &by_rank(&plan.pull) {
         let up = remote.items.get(k).copied().unwrap_or(0);
         if is_refused("pull", k, up) {
             continue;
@@ -1169,7 +1197,7 @@ pub fn sync_with(base: &str, token: &str) -> Result<(usize, usize, usize), Strin
             Err(e) => note(k, e)?,
         }
     }
-    for k in &plan.push {
+    for k in &by_rank(&plan.push) {
         let up = local.items.get(k).copied().unwrap_or(0);
         if is_refused("push", k, up) {
             continue;
@@ -1928,20 +1956,33 @@ mod tests {
             let d = get_doc("settings", SETTINGS_ID).unwrap();
             assert!(!d.to_string().contains("abcdef") && !d.to_string().contains("secret"), "{d}");
         });
+        // an address with a secret in it is left out (the rest of the document is taken), not stored
         let mut bad = doc.clone();
         bad["custom_providers"][0]["base_url"] = json!("https://user:pw@router.example/v1");
-        crate::tenant::scope(&b, || assert!(put_doc("settings", SETTINGS_ID, &bad).is_err()));
-        // a restricted account takes no private address in an instance or in an account
+        bad["updated"] = json!(doc["updated"].as_u64().unwrap() + 1);
+        crate::tenant::scope(&b, || {
+            assert!(put_doc("settings", SETTINGS_ID, &bad).unwrap());
+            assert!(crate::ai::custom::list().is_empty(), "the instance with a secret address is not stored");
+            assert!(!std::fs::read_to_string(crate::audit::config_dir().join("ui-prefs.json")).unwrap_or_default().contains("pw@"));
+            assert_eq!(crate::ai::accounts::list("groq").len(), 2, "the accounts of the other providers still arrive");
+        });
+        // a restricted account takes no private address in an instance or in an account: those are left out, the public ones are kept
         let mut private = doc.clone();
         private["custom_providers"][0]["base_url"] = json!("http://127.0.0.1:8000/v1");
+        private["custom_providers"].as_array_mut().unwrap().push(json!({"id": "custom:cloud", "name": "Cloud", "format": "chat", "base_url": "https://8.8.8.8/v1"}));
         let mut private_acct = doc.clone();
         private_acct["accounts"]["groq"][0]["base_url"] = json!("http://10.0.0.5/v1");
         crate::tenant::scope(&restricted, || {
-            for d in [&private, &private_acct] {
-                let e = put_doc("settings", SETTINGS_ID, d).unwrap_err();
-                assert!(e.contains("public https"), "{e}");
-            }
-            assert!(put_doc("settings", SETTINGS_ID, &doc).unwrap());
+            assert!(put_doc("settings", SETTINGS_ID, &private).unwrap());
+            assert_eq!(crate::ai::custom::list().iter().map(|c| c.id.clone()).collect::<Vec<_>>(), ["custom:cloud"], "only the public one");
+            assert!(put_doc("settings", SETTINGS_ID, &json!({"updated": private["updated"].as_u64().unwrap() + 1, "accounts": private_acct["accounts"].clone()})).unwrap());
+            assert!(crate::ai::accounts::list("groq").len() == 1, "the account with a private address is not stored");
+            let mut again = doc.clone();
+            again["updated"] = json!(doc["updated"].as_u64().unwrap() + 9);
+            assert!(put_doc("settings", SETTINGS_ID, &again).unwrap());
+            // a profile of the custom provider that was left out stays where it came from, quietly
+            let e = put_doc("profiles", "pq", &json!({"id": "pq", "name": "Q", "provider": "custom:gone", "model": "m", "updated": 5})).unwrap_err();
+            assert!(e.starts_with(NOT_FOR_ACCOUNT), "{e}");
         });
         // a profile from a computer that still has the single "custom" provider lands on the named instance made for it
         crate::tenant::scope(&b, || {
@@ -1949,7 +1990,10 @@ mod tests {
             assert!(put_doc("profiles", "pz", &p).unwrap());
             let got = get_doc("profiles", "pz").unwrap();
             assert_eq!(got["provider"], "custom:custom-endpoint", "{got}");
-            // a profile of a named instance this computer has, and one it does not have yet
+            // a profile of a named instance this computer has (the settings document comes again, newer), and one it does not have
+            let mut newer = doc.clone();
+            newer["updated"] = json!(doc["updated"].as_u64().unwrap() + 20);
+            assert!(put_doc("settings", SETTINGS_ID, &newer).unwrap());
             assert!(put_doc("profiles", "py", &json!({"id": "py", "name": "New", "provider": "custom:home-ollama", "model": "m", "updated": 5})).unwrap());
             assert!(put_doc("profiles", "px", &json!({"id": "px", "name": "New", "provider": "custom:nobody", "model": "m", "updated": 5})).is_err());
         });

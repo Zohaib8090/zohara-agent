@@ -83,12 +83,12 @@ mod tests {
     fn provider_keys_travel_only_to_the_desktops_own_sync_credential() {
         let root = crate::testenv::env();
         let a = Tenant::open_in(&root, &"c3".repeat(16), true).unwrap();
-        tenant::scope(&a, || zo_core::ai::keys::set("custom", "sk-typed-on-the-web").unwrap());
-        let get = json!({"kind": "keys", "id": "custom"});
+        tenant::scope(&a, || zo_core::ai::keys::set("openrouter", "sk-typed-on-the-web").unwrap());
+        let get = json!({"kind": "keys", "id": "openrouter"});
         let desk = handle("/api/sync/get", &get, &a, true).unwrap();
         assert_eq!(desk["doc"]["key"], "sk-typed-on-the-web");
         for path in ["/api/sync/get", "/api/sync/put", "/api/sync/delete"] {
-            let e = handle(path, &json!({"kind": "keys", "id": "custom", "doc": {"key": "x", "updated": 5}, "at": 5}), &a, false).unwrap_err();
+            let e = handle(path, &json!({"kind": "keys", "id": "openrouter", "doc": {"key": "x", "updated": 5}, "at": 5}), &a, false).unwrap_err();
             assert!(e.contains("not available"), "{path}: {e}");
         }
         let m = handle("/api/sync/manifest", &json!({}), &a, false).unwrap();

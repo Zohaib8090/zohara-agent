@@ -1263,11 +1263,13 @@ mod end_to_end {
         let secret = "sk-desktop-secret-value-123";
 
         // the desktop has a profile with a pin and an address of its own, an MCP server, a hidden provider and a key
-        let pid = desk.run(&["profile", "Work", "custom", "m1", "https://models.example.com/v1", "m1,m2"]);
+        let cid = desk.run(&["customadd", "Work gw", "chat", "https://models.example.com/v1"]);
+        assert_eq!(cid, "custom:work-gw");
+        let pid = desk.run(&["profile", "Work", &cid, "m1", "https://models.example.com/v1", "m1,m2"]);
         desk.run(&["mcpadd", "docs", "https://docs.example.com/mcp"]);
         desk.run(&["mcpadd", "files", "npx -y some-local-server"]);
         desk.run(&["hidden", "groq,mistral"]);
-        desk.run(&["key", "custom", secret]);
+        desk.run(&["key", &cid, secret]);
         let s = desk.run(&["syncnow"]);
         println!("first sync: {s}");
         assert!(s.starts_with("synced"), "{s}");
@@ -1276,13 +1278,13 @@ mod end_to_end {
         let list = op(&r, "tok-a", json!({"op": "profiles"}));
         let p = list["profiles"].as_array().unwrap().iter().find(|p| p["id"] == pid.as_str()).unwrap_or_else(|| panic!("{list}")).clone();
         println!("web sees profile: {} base_url={} pinned={}", p["name"], p["base_url"], p["pinned"]);
-        assert_eq!((p["base_url"].clone(), p["pinned"].clone(), p["provider"].clone()), (json!("https://models.example.com/v1"), json!(["m1", "m2"]), json!("custom")));
+        assert_eq!((p["base_url"].clone(), p["pinned"].clone(), p["provider"].clone()), (json!("https://models.example.com/v1"), json!(["m1", "m2"]), json!(cid)));
         let mcp = op(&r, "tok-a", json!({"op": "mcp_list"}));
         assert_eq!(mcp["servers"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect::<Vec<_>>(), ["docs"], "the remote one only, never the program: {mcp}");
         assert_eq!(op(&r, "tok-a", json!({"op": "settings_get"}))["hidden_providers"], json!(["groq", "mistral"]));
         // keys are OFF: no key on the server, none in the manifest, and the secret is nowhere in what the server says
         let prov = op(&r, "tok-a", json!({"op": "providers"}));
-        assert_eq!(prov["providers"].as_array().unwrap().iter().find(|p| p["id"] == "custom").unwrap()["has_key"], false);
+        assert_eq!(prov["providers"].as_array().unwrap().iter().find(|p| p["id"] == cid.as_str()).unwrap()["has_key"], false);
         let cred = desk.credential().unwrap();
         let man = call(&r, &cred, "/api/sync/manifest", json!({})).body;
         assert!(man["keys"].as_object().unwrap().is_empty(), "{man}");
@@ -1316,41 +1318,43 @@ mod end_to_end {
         assert!(op(&r, "tok-a", json!({"op": "profiles"}))["profiles"].as_array().unwrap().is_empty());
         // and a profile made on the web arrives on the desktop
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        op(&r, "tok-a", json!({"op": "select", "provider": "custom", "model": "web-m"}));
+        op(&r, "tok-a", json!({"op": "select", "provider": cid, "model": "web-m"}));
         let web_id = op(&r, "tok-a", json!({"op": "profile_create", "name": "FromWeb"}))["id"].as_str().unwrap().to_string();
         desk.run(&["syncnow"]);
         assert!(desk.run(&["profiles"]).contains(&format!("profile {web_id} FromWeb")));
 
         // keys only travel once the toggle is on, here
-        assert_eq!(desk.run(&["keyis", "custom", secret]), "true");
+        assert_eq!(desk.run(&["keyis", &cid, secret]), "true");
         desk.run(&["kinds", "true", "true", "true"]);
         let s = desk.run(&["syncnow"]);
         println!("sync with keys on: {s}");
         let prov = op(&r, "tok-a", json!({"op": "providers"}));
-        assert_eq!(prov["providers"].as_array().unwrap().iter().find(|p| p["id"] == "custom").unwrap()["has_key"], true, "the web has the key now: {prov}");
+        assert_eq!(prov["providers"].as_array().unwrap().iter().find(|p| p["id"] == cid.as_str()).unwrap()["has_key"], true, "the web has the key now: {prov}");
         assert!(!prov.to_string().contains(secret), "the key itself is never in an answer");
         let man = call(&r, &cred, "/api/sync/manifest", json!({})).body;
-        assert!(man["keys"].as_object().unwrap().contains_key("custom") && !man["keys"].as_object().unwrap().keys().any(|k| k.contains("sync-token")), "{man}");
+        assert!(man["keys"].as_object().unwrap().contains_key(cid.as_str()) && !man["keys"].as_object().unwrap().keys().any(|k| k.contains("sync-token")), "{man}");
         // a key saved on the web (for the profile it is using there) comes to the desktop, under that profile
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        assert_eq!(call(&r, "tok-a", "/api/op", json!({"op": "set_key", "provider": "custom", "key": "sk-web-new-key-456"})).status, 200);
+        assert_eq!(call(&r, "tok-a", "/api/op", json!({"op": "set_key", "provider": cid, "key": "sk-web-new-key-456"})).status, 200);
         desk.run(&["syncnow"]);
-        assert_eq!(desk.run(&["keyis", &format!("custom@{web_id}"), "sk-web-new-key-456"]), "true");
+        assert_eq!(desk.run(&["keyis", &format!("{cid}@{web_id}"), "sk-web-new-key-456"]), "true");
         // switching keys off again stops the traffic: a new desktop key stays on the desktop
         desk.run(&["kinds", "true", "true", "false"]);
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        desk.run(&["key", "custom", "sk-desktop-only-789"]);
+        desk.run(&["key", &cid, "sk-desktop-only-789"]);
         desk.run(&["syncnow"]);
-        let a = call(&r, &cred, "/api/sync/get", json!({"kind": "keys", "id": "custom"}));
+        let a = call(&r, &cred, "/api/sync/get", json!({"kind": "keys", "id": cid}));
         assert_eq!(a.body["doc"]["key"], secret, "the server has the key the desktop sent");
-        let a = call(&r, &cred, "/api/sync/get", json!({"kind": "keys", "id": &format!("custom@{web_id}")}));
+        let a = call(&r, &cred, "/api/sync/get", json!({"kind": "keys", "id": &format!("{cid}@{web_id}")}));
         assert_eq!(a.body["doc"]["key"], "sk-web-new-key-456", "the server still has the old one");
 
         // a restricted person: no MCP server, no private address, but a public https profile and the pins arrive
         let rd = Device::new("rdesk", &r.base, &bin);
         sign_in(&r, "tok-r", &rd, "R desk");
-        rd.run(&["profile", "Local", "custom", "m", "http://127.0.0.1:8000/v1", ""]);
-        rd.run(&["profile", "Cloud", "custom", "m", "https://8.8.8.8/v1", "m,n"]);
+        let (local_id, cloud_id) = (rd.run(&["customadd", "Local gw", "chat", "http://127.0.0.1:8000/v1"]), rd.run(&["customadd", "Cloud gw", "chat", "https://8.8.8.8/v1"]));
+        assert_eq!((local_id.as_str(), cloud_id.as_str()), ("custom:local-gw", "custom:cloud-gw"));
+        rd.run(&["profile", "Local", &local_id, "m", "http://127.0.0.1:8000/v1", ""]);
+        rd.run(&["profile", "Cloud", &cloud_id, "m", "https://8.8.8.8/v1", "m,n"]);
         rd.run(&["mcpadd", "docs", "https://docs.example.com/mcp"]);
         let s = rd.run(&["syncnow"]);
         println!("restricted desktop sync: {s}");
@@ -1450,10 +1454,11 @@ fn slow_model(delay_ms: u64, text: &'static str) -> String {
 fn use_slow_model(uid: &str, url: &str) {
     let t = zo_core::tenant::Tenant::open_in(&testenv::env(), &tenant_of(uid), false).unwrap();
     zo_core::tenant::scope(&t, || {
-        let mut sel = zo_core::ai::Selection { provider: "custom".into(), model: "m".into(), ..Default::default() };
-        sel.base_urls.insert("custom".into(), url.to_string());
+        // a named custom provider that points at the slow model
+        let c = zo_core::ai::custom::add("Slow model", "chat", url, None).unwrap();
+        let sel = zo_core::ai::Selection { provider: c.id.clone(), model: "m".into(), ..Default::default() };
         sel.save();
-        zo_core::ai::keys::set("custom", "sk-test-bring-your-own-0001").unwrap();
+        zo_core::ai::keys::set(&c.id, "sk-test-bring-your-own-0001").unwrap();
     });
 }
 

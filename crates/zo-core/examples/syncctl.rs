@@ -14,6 +14,7 @@
 //!   syncctl whoami             the signed-in account, or "not signed in"
 //!
 //! Profiles, MCP servers, preferences and keys (the sync of those kinds):
+//!   syncctl customadd NAME FORMAT URL | accountadd PROVIDER NAME  a named custom provider (prints its id) / an account of a provider
 //!   syncctl profile NAME PROVIDER MODEL BASE_URL PINS   make a profile (PINS: comma separated models)
 //!   syncctl pin ID MODEL | unpin ID MODEL | rmprofile ID | profiles
 //!   syncctl mcpadd NAME URL | mcplist
@@ -67,6 +68,14 @@ fn main() {
         },
         "signout" => println!("{:?}", zo_core::login::sign_out()),
         "whoami" => println!("{}", zo_core::login::signed_in().unwrap_or_else(|| "not signed in".into())),
+        "customadd" => match zo_core::ai::custom::add(&arg(1), &arg(2), &arg(3), None) {
+            Ok(c) => println!("{}", c.id),
+            Err(e) => println!("failed: {e}"),
+        },
+        "accountadd" => match zo_core::ai::accounts::add(&arg(1), &arg(2), None) {
+            Ok(a) => println!("{}", a.id),
+            Err(e) => println!("failed: {e}"),
+        },
         "profile" => {
             use zo_core::ai::{profiles, Selection};
             let mut sel = Selection { provider: arg(2), model: arg(3), ..Default::default() };
