@@ -345,6 +345,10 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             };
             let current = if sel.provider == p.id { sel.model.clone() } else { String::new() };
             let mut out = json!({"provider": p.id, "models": list, "current": current, "efforts": crate::ai::models::effort_levels(&current), "effort": sel.effort, "base_url": base});
+            // Claude Code: the whole catalog (groups, labels, windows, which one is recommended) so every client shows the same list
+            if p.protocol == providers::Protocol::ClaudeCode {
+                out["catalog"] = crate::ai::models::catalog_json();
+            }
             if let Some(e) = error {
                 out["error"] = json!(e);
             }
@@ -390,7 +394,11 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
                 }
             }
             if let Some(m) = req.get("model").and_then(Value::as_str) {
-                sel.model = m.to_string();
+                // Claude Code takes any id typed by hand ("Other model id..."), but it must look like one
+                if sel.provider == "claude-code" && !m.trim().is_empty() && !crate::ai::models::valid_model_id(m) {
+                    return Err("That is not a model id: use letters, digits and - . _ : / only, for example claude-opus-5-5.".into());
+                }
+                sel.model = if sel.provider == "claude-code" { m.trim().to_string() } else { m.to_string() };
             }
             if let Some(e) = req.get("effort").and_then(Value::as_str) {
                 sel.effort = Some(e.to_string()).filter(|e| !e.is_empty());
@@ -970,6 +978,10 @@ fn send(req: &Value, mut reader: BufReader<UnixStream>, out: Arc<Mutex<UnixStrea
             Event::Steps(n) => {
                 line(&o, &json!({"event": "steps", "n": n}));
             }
+            Event::Model(m) => {
+                // which model really answered; "label" is what to show when it differs from the choice
+                line(&o, &json!({"event": "model", "model": m, "label": crate::ai::models::catalog_label(&m), "differs": crate::ai::models::answered_by(&sel.model, &m).is_some()}));
+            }
             Event::Stuck { n, tool } => {
                 line(&o, &json!({"event": "stuck", "n": n, "tool": tool}));
             }
@@ -1401,6 +1413,43 @@ mod tenant_tests {
         assert_eq!(r[0]["ok"], true);
         assert!(dir.join("data/zohara-agent/memory.json").exists());
         assert!(!t.data.join("memory.json").exists());
+        match old.0 {
+            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+        match old.1 {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claude_code_models_carry_the_catalog_and_a_typed_id_is_checked() {
+        let _g = lock();
+        let dir = std::env::temp_dir().join(format!("zo-service-cmodels-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = (std::env::var_os("XDG_DATA_HOME"), std::env::var_os("XDG_CONFIG_HOME"));
+        std::env::set_var("XDG_DATA_HOME", dir.join("data"));
+        std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
+        let r = talk(json!({"op": "models", "provider": "claude-code"}), false);
+        let ids: Vec<String> = r[0]["models"].as_array().unwrap().iter().filter_map(|m| m.as_str().map(str::to_string)).collect();
+        assert!(ids.contains(&"claude-opus-5-5".into()) && ids.contains(&"claude-opus-4-8".into()) && ids[0] == "default", "{ids:?}");
+        let groups = r[0]["catalog"].as_array().expect("catalog is sent");
+        assert_eq!(groups[0]["title"], "Shortcuts");
+        let opus = groups.iter().find(|g| g["title"] == "Opus").unwrap();
+        assert_eq!(opus["models"][0]["id"], "claude-opus-5-5");
+        assert_eq!(opus["models"][0]["recommended"], true);
+        // other providers get no catalog
+        let r = talk(json!({"op": "models", "provider": "openai"}), false);
+        assert!(r[0].get("catalog").is_none());
+        // a model id typed by hand is kept; a bad one is refused
+        assert_eq!(talk(json!({"op": "select", "provider": "claude-code", "model": " claude-opus-9-9 "}), false)[0]["ok"], true);
+        assert_eq!(Selection::load().model, "claude-opus-9-9");
+        let bad = talk(json!({"op": "select", "provider": "claude-code", "model": "a b;c"}), false);
+        assert!(bad[0]["error"].as_str().unwrap().contains("not a model id"), "{bad:?}");
+        assert_eq!(Selection::load().model, "claude-opus-9-9");
         match old.0 {
             Some(v) => std::env::set_var("XDG_DATA_HOME", v),
             None => std::env::remove_var("XDG_DATA_HOME"),

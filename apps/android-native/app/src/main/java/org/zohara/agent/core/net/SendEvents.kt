@@ -30,6 +30,8 @@ sealed interface SendEvent {
   /** the agent repeats the same call ([n] times, tool [tool]); the person may stop it, nothing stops by itself */
   data class Stuck(val n: Int, val tool: String) : SendEvent
   data class Usage(val input: Long, val output: Long) : SendEvent
+  /** the model that really answered ([label] is its name); [differs] when it is not the one chosen (a shortcut or Default resolved) */
+  data class Model(val model: String, val label: String, val differs: Boolean) : SendEvent
   /** [code] is the raw `error` field (for example `desktop_offline`), [message] what to show */
   data class Error(val code: String, val message: String) : SendEvent
   data object Stopped : SendEvent
@@ -64,6 +66,7 @@ object SendEventParser {
       "question" -> SendEvent.Question(obj.long("id") ?: 0, parseQuestions(obj["questions"]))
       "steps" -> SendEvent.Steps((obj.long("n") ?: 0).coerceIn(0, Int.MAX_VALUE.toLong()).toInt())
       "stuck" -> SendEvent.Stuck((obj.long("n") ?: 0).coerceIn(0, Int.MAX_VALUE.toLong()).toInt(), obj.str("tool").orEmpty())
+      "model" -> SendEvent.Model(obj.str("model").orEmpty(), obj.str("label").orEmpty(), obj.bool("differs") ?: false)
       "usage" -> SendEvent.Usage(obj.long("input") ?: 0, obj.long("output") ?: 0)
       "error" -> {
         val code = obj.str("error").orEmpty()

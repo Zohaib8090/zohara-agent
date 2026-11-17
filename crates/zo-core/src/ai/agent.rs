@@ -187,6 +187,9 @@ pub enum Event {
     ToolDone { name: String, ok: bool, output: String },
     /// What the last request used (tokens in, out, from the provider's cache).
     Usage(Usage),
+    /// The model that really answered, as the provider reported it (Claude Code: the id its stream names). Sent once per answer
+    /// and again only when it changes.
+    Model(String),
     /// The number of tool calls made so far in this answer (on every tool start).
     Steps(usize),
     /// The agent keeps making the same call: `n` calls in the repeating pattern, the tool of the latest one. Only a notice for the
@@ -791,7 +794,14 @@ pub fn list_models(p: &Provider, base_url: &str, key: Option<&str>) -> Result<Ve
         if let (Some(k), Some(a)) = (super::profiles::get_key(&sel, "anthropic"), providers::find("anthropic")) {
             let _ = super::models::refresh(&sel.base_url_for(a), &k);
         }
-        return Ok(super::models::claude_models().into_iter().map(|m| m.id).collect());
+        // the catalog first (Default, the shortcuts, then every model by family, newest first), then whatever else was found
+        let mut ids: Vec<String> = super::models::catalog().into_iter().map(|m| m.id).collect();
+        for m in super::models::claude_models() {
+            if !ids.contains(&m.id) {
+                ids.push(m.id);
+            }
+        }
+        return Ok(ids);
     }
     if p.id == "anthropic" {
         if let Some(k) = key {
@@ -1134,6 +1144,7 @@ mod tests {
             Event::Usage(_) => "usage".to_string(),
             Event::Steps(n) => format!("steps:{n}"),
             Event::Stuck { n, .. } => format!("stuck:{n}"),
+            Event::Model(m) => format!("model:{m}"),
         })).unwrap();
         assert_eq!(events, ["text:Checking.", "start:zohara_shell", "steps:1", "done:true:zo-loop-ok", "text:It printed zo-loop-ok."]);
         assert_eq!(history.len(), 4);
@@ -1224,6 +1235,7 @@ mod tests {
             Event::Usage(_) => "usage".to_string(),
             Event::Steps(n) => format!("steps:{n}"),
             Event::Stuck { n, .. } => format!("stuck:{n}"),
+            Event::Model(m) => format!("model:{m}"),
         })).unwrap();
         assert_eq!(events, ["delta:Checking ", "delta:now.", "text:Checking now.", "start:zohara_shell", "steps:1", "done:true:stream-ok", "delta:It said ", "delta:stream-ok.", "text:It said stream-ok."]);
         let seen = server.join().unwrap();

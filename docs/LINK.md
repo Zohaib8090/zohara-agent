@@ -144,6 +144,9 @@ link pass every event of a send job on; they are not saved in the chat):
 | `steps` | `n` | the number of tool calls made so far in this answer, sent right after each `tool_start` ("Step 7") |
 | `stuck` | `n`, `tool` | the agent made the identical call (same tool name and same arguments) 8 times in a row, or alternated between the same two identical calls for 12 calls; `tool` is the latest one. A notice for the person ("Repeating the same step. Stop?" with a Stop button). It never stops anything by itself, the model is not told, it is sent at most once per answer and again only after 10 more calls in the same pattern |
 
+A third event of the same kind, `model` (`model`, `label`, `differs`), names the model that really answered a Claude Code turn; it is passed
+on the same way. See `docs/PROVIDERS.md` (Claude Code: every model a subscription can use).
+
 Clients that do not know these events ignore them. Restricted (cloud) accounts get them too; no new permission is involved.
 Detector: `StepWatch` in `crates/zo-core/src/ai/agent.rs` (pure, unit tested). Claude Code answers get the counter and the notice too
 (the tool summary stands in for the arguments).

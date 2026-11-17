@@ -135,6 +135,34 @@ class GapCloseSettingsTest {
     rule.onNodeWithText("claude-opus-4-8").assertExists()
   }
 
+  private val ccCatalog = listOf(
+    org.zohara.agent.core.net.CatalogGroup("Shortcuts", listOf(org.zohara.agent.core.net.CatalogModel("default", "Default (what Claude Code picks)", "default", note = "Claude Code chooses the model for your plan"))),
+    org.zohara.agent.core.net.CatalogGroup("Opus", listOf(
+      org.zohara.agent.core.net.CatalogModel("claude-opus-5-5", "Opus 5.5", family = "opus", context = 1_000_000, recommended = true, note = "Most capable"),
+      org.zohara.agent.core.net.CatalogModel("claude-opus-4-8", "Opus 4.8", family = "opus", context = 1_000_000, note = "Earlier Opus"),
+    )),
+  )
+
+  @Test fun claudeCodeShowsTheCatalogByFamilyWithRecommendedAndATypedIdRow() {
+    var chosen = ""
+    themed(sheet = true) { Column(Modifier.background(ZoTheme.colors.sheet)) { SheetContent("Model and API key", {}) { ModelSheetBody(claudeState.copy(catalog = ccCatalog), false, ModelSheetActions(onChoose = { chosen = it })) } } }
+    rule.onNodeWithText("SHORTCUTS").assertExists()
+    rule.onNodeWithText("OPUS").assertExists()
+    rule.onNodeWithText("Default (what Claude Code picks)").assertExists()
+    rule.onNodeWithText("Recommended").assertExists()
+    rule.onNodeWithText("Opus 4.8").assertExists()
+    rule.onNodeWithText("OTHER MODEL ID").assertExists()
+    rule.onNodeWithText("Opus 4.8").performClick()
+    assertEquals("claude-opus-4-8", chosen)
+  }
+
+  @Test fun aTypedModelIdIsOfferedInTheCatalogList() {
+    var chosen = ""
+    themed(sheet = true) { Column(Modifier.background(ZoTheme.colors.sheet)) { SheetContent("Model and API key", {}) { ModelSheetBody(claudeState.copy(catalog = ccCatalog, filter = "claude-opus-9-9"), false, ModelSheetActions(onChoose = { chosen = it })) } } }
+    rule.onNodeWithText("Use “claude-opus-9-9” as the model id").performClick()
+    assertEquals("claude-opus-9-9", chosen)
+  }
+
   @Test fun aSearchShowsEveryModelAndOtherProvidersKeepAFlatList() {
     themed(sheet = true) { ClaudeSheet(claudeState.copy(filter = "opus")) }
     rule.onNodeWithText("claude-opus-4-8").assertExists()

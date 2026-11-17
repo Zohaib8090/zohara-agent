@@ -577,7 +577,7 @@ pub fn models_sheet(ui: &Rc<Ui>) {
             *ml.pinned.borrow_mut() = pins_of(&s, p);
             ml.search.set_text("");
             status.set_text(if p.protocol == Protocol::ClaudeCode {
-                if zo_core::ai::claude_code::binary().is_some() { "Uses the Claude Code program you installed and signed in to yourself (claude auth login). Zohara Agent never sees your login. Experimental. The full model list is read with an Anthropic API key (add one under the Anthropic provider or in a profile); without one you get Claude Code's own names for the newest models." } else { "Claude Code is not installed. Install it with: npm install -g @anthropic-ai/claude-code, then sign in with: claude auth login" }
+                if zo_core::ai::claude_code::binary().is_some() { "Uses the Claude Code program you installed and signed in to yourself (claude auth login). Zohara Agent never sees your login. Experimental. Every model a subscription can use is listed (Default, the shortcuts, then each family, newest first). Type any other model id in the Model box." } else { "Claude Code is not installed. Install it with: npm install -g @anthropic-ai/claude-code, then sign in with: claude auth login" }
             } else if p.local { "Runs on this computer. No key, and nothing leaves it." } else if keys::available() { "The key is stored in the system keyring." } else { "The keyring tool (secret-tool) is missing, so keys cannot be saved." });
             cc_block.set_visible(p.protocol == Protocol::ClaudeCode);
             if p.protocol == Protocol::ClaudeCode {
@@ -636,6 +636,10 @@ pub fn models_sheet(ui: &Rc<Ui>) {
                     status.set_text(&e);
                     return;
                 }
+            }
+            if p.protocol == Protocol::ClaudeCode && !model.text().trim().is_empty() && !zo_core::ai::models::valid_model_id(&model.text()) {
+                status.set_text("That is not a model id: use letters, digits and - . _ : / only, for example claude-opus-5-5.");
+                return;
             }
             sel.provider = p.id.to_string();
             sel.model = model.text().trim().to_string();
@@ -819,6 +823,26 @@ pub fn add_endpoint_sheet(ui: &Rc<Ui>, done: impl Fn() + 'static) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_code_lists_show_default_the_shortcuts_and_the_recommended_first_and_the_rest_under_more() {
+        let main = chat::cc_main_choices();
+        let ids: Vec<&str> = main.iter().map(|(i, _, _)| i.as_str()).collect();
+        assert_eq!(ids[0], "default");
+        for want in ["sonnet", "opus", "haiku", "claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"] {
+            assert!(ids.contains(&want), "{want} in {ids:?}");
+        }
+        assert!(!ids.contains(&"claude-opus-4-8"));
+        assert!(main.iter().find(|(i, _, _)| i == "claude-opus-5-5").unwrap().1.contains("Recommended"));
+        let more = chat::cc_more_choices();
+        let mids: Vec<&str> = more.iter().map(|(i, _, _)| i.as_str()).collect();
+        assert!(mids.contains(&"claude-opus-4-8") && mids.contains(&"claude-sonnet-4-6") && !mids.contains(&"claude-opus-5-5"));
+        // newest first inside a family
+        assert!(mids.iter().position(|i| *i == "claude-opus-4-8") < mids.iter().position(|i| *i == "claude-opus-4-6"));
+        assert_eq!(chat::nice_name("default"), "Default (what Claude Code picks)");
+        assert_eq!(chat::nice_name("claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(chat::nice_name("gpt-4o"), "gpt-4o");
+    }
 
     #[test]
     fn the_three_custom_endpoint_formats_are_offered_and_alike() {

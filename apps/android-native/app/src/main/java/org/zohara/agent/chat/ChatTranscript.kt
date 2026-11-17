@@ -70,6 +70,11 @@ object Transcript {
   /** Claude model ids shown the way the desktop does ("claude-opus-5-5" -> "Opus 5.5"); other models as they are (COMP-08). */
   fun niceName(model: String): String {
     val m = model.trim()
+    if (m.equals("default", ignoreCase = true)) return "Default"
+    if (m.equals("opusplan", ignoreCase = true)) return "Opus plan"
+    // the long-context shortcuts and ids: "sonnet[1m]" -> "Sonnet (1M)"
+    val long = m.endsWith("[1m]")
+    if (long) return niceName(m.removeSuffix("[1m]")) + " (1M)"
     val family = listOf("sonnet", "opus", "haiku", "fable")
     if (m in family) return m.replaceFirstChar { it.uppercase() }
     if (!m.startsWith("claude-")) return m

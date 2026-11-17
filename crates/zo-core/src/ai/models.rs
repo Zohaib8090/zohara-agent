@@ -193,6 +193,195 @@ pub fn split_main(models: &[ModelInfo]) -> (Vec<ModelInfo>, Vec<ModelInfo>) {
     (main, more)
 }
 
+// ---------------------------------------------------------------------------------------------------------------------------
+// The Claude Code catalog: every model the subscription can use, kept in one data file (data/claude-models.json) so it can be
+// updated without touching code. A copy named `claude-code-models.json` in the data folder, when it is valid, replaces it.
+// ---------------------------------------------------------------------------------------------------------------------------
+
+/// The curated list that ships with the program.
+const CATALOG_JSON: &str = include_str!("../../data/claude-models.json");
+
+/// What Claude Code does with "no model chosen": it picks by itself, so no `--model` is passed.
+pub const DEFAULT_ID: &str = "default";
+
+/// One entry of the catalog: an alias (`sonnet`, `opusplan`...) or a full model id.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct CatalogModel {
+    pub id: String,
+    pub label: String,
+    /// "default", "alias" or "model".
+    pub kind: String,
+    /// opus, sonnet, haiku, fable; empty for entries that belong to no family (Default, opusplan).
+    #[serde(default)]
+    pub family: String,
+    /// "5.5", "4.8"...; empty for aliases that follow the newest.
+    #[serde(default)]
+    pub version: String,
+    /// The size of its window in tokens (0: not known).
+    #[serde(default)]
+    pub context: u64,
+    /// When it was released, `YYYY-MM` or `YYYY-MM-DD` (empty: not known); newest first is how a family is ordered.
+    #[serde(default)]
+    pub released: String,
+    /// Other names the program accepts for the same model.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub note: String,
+    /// true: a real call with this id was answered on the maintainer's laptop; false: taken from the docs, not tried.
+    #[serde(default)]
+    pub verified: bool,
+    /// Set by `catalog()`: the newest model of its family.
+    #[serde(default)]
+    pub recommended: bool,
+}
+
+#[derive(Deserialize)]
+struct CatalogFile {
+    #[serde(default)]
+    updated: String,
+    models: Vec<CatalogModel>,
+}
+
+/// Reads a catalog file's text. Every entry needs an id and a label, ids are unique, kinds are known.
+pub fn parse_catalog(text: &str) -> Result<Vec<CatalogModel>, String> {
+    let f: CatalogFile = serde_json::from_str(text).map_err(|e| format!("claude-models.json: {e}"))?;
+    let _ = &f.updated;
+    let mut seen = std::collections::HashSet::new();
+    for m in &f.models {
+        if m.id.trim().is_empty() || m.label.trim().is_empty() {
+            return Err("claude-models.json: every model needs an id and a label".into());
+        }
+        if !["default", "alias", "model"].contains(&m.kind.as_str()) {
+            return Err(format!("claude-models.json: {} has an unknown kind {:?}", m.id, m.kind));
+        }
+        if !seen.insert(m.id.clone()) {
+            return Err(format!("claude-models.json: {} is listed twice", m.id));
+        }
+    }
+    let mut v = f.models;
+    mark_recommended(&mut v);
+    Ok(v)
+}
+
+/// "5.5" > "4.8" > "4"; compares the numbers, not the text.
+fn version_key(v: &str) -> Vec<u32> {
+    v.split('.').map(|p| p.parse().unwrap_or(0)).collect()
+}
+
+/// Sets `recommended` on the newest model of each family (full ids only; aliases and Default are never marked).
+fn mark_recommended(v: &mut [CatalogModel]) {
+    for i in 0..v.len() {
+        v[i].recommended = false;
+    }
+    let mut best: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, m) in v.iter().enumerate() {
+        if m.kind != "model" {
+            continue;
+        }
+        let better = best.get(&m.family).map_or(true, |&j| (version_key(&m.version), &m.released) > (version_key(&v[j].version), &v[j].released));
+        if better {
+            best.insert(m.family.clone(), i);
+        }
+    }
+    for i in best.into_values() {
+        v[i].recommended = true;
+    }
+}
+
+/// The catalog: the person's own copy in the data folder when it is valid, else the one that ships with the program.
+pub fn catalog() -> Vec<CatalogModel> {
+    let own = std::fs::read_to_string(crate::audit::data_dir().join("claude-code-models.json")).ok().and_then(|t| parse_catalog(&t).ok());
+    own.unwrap_or_else(|| parse_catalog(CATALOG_JSON).unwrap_or_default())
+}
+
+/// The order families are shown in: the most capable first.
+pub const FAMILY_ORDER: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
+
+/// The catalog for a picker: Default and the aliases first, then each family with the newest model first.
+/// Entries are `(group title, models)`; groups with no model are left out.
+pub fn catalog_groups(c: &[CatalogModel]) -> Vec<(String, Vec<CatalogModel>)> {
+    let mut out: Vec<(String, Vec<CatalogModel>)> = Vec::new();
+    let top: Vec<CatalogModel> = c.iter().filter(|m| m.kind == "default").cloned().chain(c.iter().filter(|m| m.kind == "alias").cloned()).collect();
+    if !top.is_empty() {
+        out.push(("Shortcuts".into(), top));
+    }
+    let mut fams: Vec<String> = FAMILY_ORDER.iter().map(|s| s.to_string()).collect();
+    for m in c.iter().filter(|m| m.kind == "model") {
+        if !fams.contains(&m.family) {
+            fams.push(m.family.clone());
+        }
+    }
+    for f in fams {
+        let mut g: Vec<CatalogModel> = c.iter().filter(|m| m.kind == "model" && m.family == f).cloned().collect();
+        g.sort_by(|a, b| (version_key(&b.version), &b.released).cmp(&(version_key(&a.version), &a.released)));
+        if !g.is_empty() {
+            out.push((pretty_family(&f), g));
+        }
+    }
+    out
+}
+
+fn pretty_family(f: &str) -> String {
+    let mut c = f.chars();
+    c.next().map(|x| x.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+}
+
+/// The catalog as the clients receive it (`models` answer for Claude Code): groups with their models.
+pub fn catalog_json() -> Value {
+    let groups = catalog_groups(&catalog());
+    serde_json::json!(groups.into_iter().map(|(title, models)| serde_json::json!({ "title": title, "models": models })).collect::<Vec<_>>())
+}
+
+/// Finds an entry by its id or by one of its other names (case-insensitive; a `[1m]` ending is part of the id).
+pub fn catalog_find(id: &str) -> Option<CatalogModel> {
+    let q = id.trim().to_lowercase();
+    catalog().into_iter().find(|m| m.id.to_lowercase() == q || m.aliases.iter().any(|a| a.to_lowercase() == q))
+}
+
+/// The label for a Claude Code model id: from the catalog, else made from the id ("claude-opus-4-9" -> "Opus 4.9").
+pub fn catalog_label(id: &str) -> String {
+    catalog_find(id).map(|m| m.label).unwrap_or_else(|| pretty_name(id))
+}
+
+/// The window size of a Claude Code model: from the catalog; a `[1m]` ending means a million tokens; None when not known.
+pub fn catalog_context(id: &str) -> Option<u64> {
+    if let Some(n) = catalog_find(id).map(|m| m.context).filter(|n| *n > 0) {
+        return Some(n);
+    }
+    if id.to_lowercase().ends_with("[1m]") {
+        return Some(1_000_000);
+    }
+    None
+}
+
+/// What is passed to `--model`: nothing for Default, an id typed by hand as it is.
+pub fn model_argument(id: &str) -> Option<String> {
+    let t = id.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case(DEFAULT_ID) { None } else { Some(t.to_string()) }
+}
+
+/// A model id typed by hand must look like one: letters, digits and `. _ - : /` with an optional `[1m]`, at most 100 characters.
+pub fn valid_model_id(id: &str) -> bool {
+    let t = id.trim();
+    let core = t.strip_suffix("[1m]").unwrap_or(t);
+    !core.is_empty() && t.len() <= 100 && core.chars().all(|c| c.is_ascii_alphanumeric() || "._-:/".contains(c))
+}
+
+/// "Answered by Opus 5.5" when the model the program reports is not the one chosen (a shortcut or Default resolves to something);
+/// None when it is the same one.
+pub fn answered_by(chosen: &str, reported: &str) -> Option<String> {
+    let r = reported.trim();
+    if r.is_empty() {
+        return None;
+    }
+    let base = |s: &str| s.split('[').next().unwrap_or(s).to_lowercase();
+    if base(chosen) == base(r) {
+        return None;
+    }
+    Some(catalog_label(r))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +408,69 @@ mod tests {
         let (main, more) = split_main(&all);
         assert_eq!(main.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);
         assert_eq!(more.len(), 2);
+    }
+
+    #[test]
+    fn the_shipped_catalog_is_valid_and_complete() {
+        let c = parse_catalog(CATALOG_JSON).expect("the shipped claude-models.json is valid");
+        let ids: Vec<&str> = c.iter().map(|m| m.id.as_str()).collect();
+        for want in ["default", "sonnet", "opus", "haiku", "claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"] {
+            assert!(ids.contains(&want), "{want} missing");
+        }
+        for m in &c {
+            assert!(!m.label.is_empty() && !m.note.is_empty(), "{} needs a label and a note", m.id);
+            if m.kind == "model" {
+                assert!(FAMILY_ORDER.contains(&m.family.as_str()) && !m.version.is_empty() && m.context > 0 && [0, 7, 10].contains(&m.released.len()), "{} is incomplete", m.id);
+                assert!(m.id.starts_with("claude-"), "{}", m.id);
+            }
+        }
+    }
+
+    #[test]
+    fn the_newest_of_each_family_is_recommended_and_groups_run_newest_first() {
+        let c = parse_catalog(CATALOG_JSON).unwrap();
+        let rec: Vec<&str> = c.iter().filter(|m| m.recommended).map(|m| m.id.as_str()).collect();
+        for want in ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"] {
+            assert!(rec.contains(&want), "{want} should be recommended, got {rec:?}");
+        }
+        assert_eq!(rec.len(), 4);
+        let g = catalog_groups(&c);
+        assert_eq!(g[0].0, "Shortcuts");
+        assert_eq!(g[0].1[0].id, "default");
+        let opus = g.iter().find(|(t, _)| t == "Opus").unwrap();
+        assert_eq!(opus.1[0].id, "claude-opus-5-5");
+        assert!(opus.1.windows(2).all(|w| version_key(&w[0].version) >= version_key(&w[1].version)));
+        assert!(g.iter().position(|(t, _)| t == "Fable").unwrap() < g.iter().position(|(t, _)| t == "Haiku").unwrap());
+    }
+
+    #[test]
+    fn a_bad_catalog_is_refused() {
+        assert!(parse_catalog("{").is_err());
+        assert!(parse_catalog(r#"{"models":[{"id":"a","label":"A","kind":"x"}]}"#).unwrap_err().contains("unknown kind"));
+        assert!(parse_catalog(r#"{"models":[{"id":"a","label":"A","kind":"alias"},{"id":"a","label":"B","kind":"alias"}]}"#).unwrap_err().contains("twice"));
+        assert!(parse_catalog(r#"{"models":[{"id":"","label":"A","kind":"alias"}]}"#).is_err());
+    }
+
+    #[test]
+    fn ids_labels_windows_and_the_argument_follow_the_catalog() {
+        assert_eq!(model_argument("default"), None);
+        assert_eq!(model_argument(""), None);
+        assert_eq!(model_argument(" claude-opus-5-5 ").as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(catalog_label("claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(catalog_label("claude-opus-9-9"), "Opus 9.9");
+        assert_eq!(catalog_context("claude-opus-4-5"), Some(200_000));
+        assert_eq!(catalog_context("claude-whatever-1[1m]"), Some(1_000_000));
+        assert_eq!(catalog_context("claude-whatever-1"), None);
+        assert!(valid_model_id("claude-opus-4-9") && valid_model_id("sonnet[1m]") && valid_model_id("vendor/model:tag"));
+        assert!(!valid_model_id("") && !valid_model_id("a b") && !valid_model_id("a;rm -rf") && !valid_model_id(&"x".repeat(101)));
+    }
+
+    #[test]
+    fn the_answering_model_is_shown_only_when_it_differs() {
+        assert_eq!(answered_by("claude-opus-5-5", "claude-opus-5-5"), None);
+        assert_eq!(answered_by("opus[1m]", "claude-opus-5-5[1m]"), Some("Opus 5.5".into()));
+        assert_eq!(answered_by("sonnet", "claude-sonnet-5-5"), Some("Sonnet 5.5".into()));
+        assert_eq!(answered_by("default", "claude-haiku-5-5"), Some("Haiku 5.5".into()));
+        assert_eq!(answered_by("sonnet", ""), None);
     }
 }

@@ -61,6 +61,49 @@ When a request to a custom endpoint fails because of the format, the error says 
 answers, returns `{"works": false, "message": "This server speaks the ... format: pick ..."}`. A refused key (401), a busy server (429, 5xx) or
 a server that cannot be reached is never retried in other formats.
 
+## Claude Code: every model a subscription can use
+
+With the Anthropic subscription login (provider `claude-code`, the installed `claude` program) the model choice is not limited to
+`sonnet`, `opus` and `haiku`. The list lives in one data file, `crates/zo-core/data/claude-models.json`, compiled into the program; to
+update it without a release, put a valid copy named `claude-code-models.json` in the data folder (it replaces the shipped one while it
+parses; a broken copy is ignored). Each entry has `id`, `label`, `kind` (`default`, `alias` or `model`), `family` (fable, opus, sonnet,
+haiku), `version`, `context` (window in tokens, 0 when not known), `released`, `aliases`, `note` and `verified`.
+
+What is in it:
+
+* **Default (what Claude Code picks)**: id `default`. No `--model` is passed; the program chooses for the plan.
+* **Shortcuts** (aliases the installed program accepts): `sonnet`, `opus`, `haiku`, `fable`, `opusplan` (Opus while planning, Sonnet
+  otherwise) and the long-context `sonnet[1m]` and `opus[1m]`.
+* **Full ids by family, newest first**: Fable 5.2 `claude-fable-5-2`, 5.1; Opus 5.5 `claude-opus-5-5`, 4.8, 4.7, 4.6, 4.5; Sonnet 5.5
+  `claude-sonnet-5-5`, 4.6, 4.5; Haiku 5.5 `claude-haiku-5-5`, 4.5. The newest of each family carries **Recommended** (computed from
+  `version`, never stored). Shortcuts and Default are never marked.
+* **Other model id...**: any id typed by hand (letters, digits and `. _ - : /`, an optional `[1m]`, at most 100 characters; the service
+  refuses anything else with a sentence). It is passed to `--model` as typed.
+
+`verified: true` means a real one-line call with that id (`claude -p "say ok" --model <id> --output-format json`) was answered on the
+maintainer's laptop on the date at the top of the file, and the id the program reported matched. The file's `not_listed` section names
+ids that were tried and left out (one the program silently answers with another model, one it refuses). Ids with `verified: false`
+are taken from the documentation and are marked that way: update them when they are tried.
+
+**Which model answered.** The `claude` stream names the model in its start line and in every message. The agent loop sends it as the
+event `model`; the service sends `{"event":"model","model":"claude-opus-5-5","label":"Opus 5.5","differs":true}` (once per answer, again
+only when it changes) and `differs` is true when it is not the choice (a shortcut or Default resolved to a real model). Desktop shows
+"Answered by Opus 5.5" under the answer, the web page and Android do the same; nothing is shown when they agree.
+
+**Context bar.** `context::window_for` reads the window from the same file for Claude Code (a typed id ending in `[1m]` is 1M).
+
+**In the three clients.** The `models` op answers for `claude-code` with `models` (ids, catalog order) and `catalog`
+(`[{"title":"Shortcuts","models":[...]}, {"title":"Fable",...}, ...]`, newest first, with `recommended`), so desktop, web and Android show
+the same list, grouped by family. Pins, profiles and `select {model}` work with these ids like with any other model; the pill and the
+pinned list show the label ("Opus 5.5"), not the id.
+
+Tests: `cargo test -p zo-core ai::models` (file schema: ids unique, kinds known, every full id has a family, version, window and a
+release date of an allowed shape, the Claude 5 ids are present; recommended and newest-first ordering; bad files refused; labels, windows,
+the `--model` argument, typed ids, the answering model), `ai::claude_code` (the stream names the model once and again on a change),
+`service::tenant_tests::claude_code_models_carry_the_catalog_and_a_typed_id_is_checked`, the desktop list tests in `modelpick.rs`, Android
+`ModelLogicTest`, `SendEventParserTest`, `ChatSessionTest`, `GapCloseSettingsTest` (Compose, Robolectric), and the web sheet checked in the
+in-app browser against a sandbox `zo-server`.
+
 ## Tests
 
 `cargo test -p zo-core ai::` covers request shapes (golden), parsing of recorded and router-style bodies, streaming reassembly (including

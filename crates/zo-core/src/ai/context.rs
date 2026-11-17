@@ -39,6 +39,11 @@ pub fn window_for(p: &Provider, model: &str) -> u64 {
     if let Some(n) = super::models::claude_models().into_iter().find(|m| m.id == model).and_then(|m| m.max_input_tokens) {
         return n;
     }
+    if p.id == "claude-code" {
+        if let Some(n) = super::models::catalog_context(model) {
+            return n;
+        }
+    }
     let m = model.to_lowercase();
     match p.id {
         "anthropic" | "claude-code" => if m.contains("[1m]") || m.contains("-5") || m.contains("opus-4-6") || m.contains("opus-4-7") || m.contains("opus-4-8") { 1_000_000 } else { 200_000 },

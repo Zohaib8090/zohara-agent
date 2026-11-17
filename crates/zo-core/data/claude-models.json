@@ -1,0 +1,256 @@
+{
+ "updated": "2026-11-14",
+ "about": "Models a Claude subscription can use through Claude Code. 'verified' means a real one-line call with that id was answered on the maintainer's laptop on the date above (the id the program reported matched). Edit this file to add or change models; a copy named claude-code-models.json in the data folder overrides it. Windows and release months not known are 0 or empty.",
+ "not_listed": [
+  {
+   "id": "claude-opus-4-1",
+   "why": "Claude Code accepts it but answers with Opus 5.5 instead (checked 2026-11-14)"
+  },
+  {
+   "id": "claude-sonnet-4",
+   "why": "Claude Code refused it: not a model (checked 2026-11-14)"
+  }
+ ],
+ "models": [
+  {
+   "id": "default",
+   "label": "Default (what Claude Code picks)",
+   "kind": "default",
+   "family": "",
+   "version": "",
+   "context": 0,
+   "released": "",
+   "aliases": [],
+   "note": "Claude Code chooses the model for your plan",
+   "verified": true
+  },
+  {
+   "id": "sonnet",
+   "label": "Sonnet (latest)",
+   "kind": "alias",
+   "family": "sonnet",
+   "version": "",
+   "context": 0,
+   "released": "",
+   "aliases": [],
+   "note": "Always the newest Sonnet",
+   "verified": true
+  },
+  {
+   "id": "opus",
+   "label": "Opus (latest)",
+   "kind": "alias",
+   "family": "opus",
+   "version": "",
+   "context": 0,
+   "released": "",
+   "aliases": [],
+   "note": "Always the newest Opus",
+   "verified": true
+  },
+  {
+   "id": "haiku",
+   "label": "Haiku (latest)",
+   "kind": "alias",
+   "family": "haiku",
+   "version": "",
+   "context": 0,
+   "released": "",
+   "aliases": [],
+   "note": "Always the newest Haiku, the fastest",
+   "verified": true
+  },
+  {
+   "id": "fable",
+   "label": "Fable (latest)",
+   "kind": "alias",
+   "family": "fable",
+   "version": "",
+   "context": 0,
+   "released": "",
+   "aliases": [],
+   "note": "Always the newest Fable",
+   "verified": true
+  },
+  {
+   "id": "opusplan",
+   "label": "Opus plans, Sonnet writes",
+   "kind": "alias",
+   "family": "",
+   "version": "",
+   "context": 0,
+   "released": "",
+   "aliases": [],
+   "note": "Opus while planning, Sonnet for the rest (answers as Sonnet outside plan mode)",
+   "verified": true
+  },
+  {
+   "id": "sonnet[1m]",
+   "label": "Sonnet, long context",
+   "kind": "alias",
+   "family": "sonnet",
+   "version": "",
+   "context": 1000000,
+   "released": "",
+   "aliases": [],
+   "note": "Newest Sonnet with the 1M window",
+   "verified": true
+  },
+  {
+   "id": "opus[1m]",
+   "label": "Opus, long context",
+   "kind": "alias",
+   "family": "opus",
+   "version": "",
+   "context": 1000000,
+   "released": "",
+   "aliases": [],
+   "note": "Newest Opus with the 1M window",
+   "verified": true
+  },
+  {
+   "id": "claude-fable-5-2",
+   "label": "Fable 5.2",
+   "kind": "model",
+   "family": "fable",
+   "version": "5.2",
+   "context": 1000000,
+   "released": "",
+   "aliases": [],
+   "note": "Newest Fable",
+   "verified": true
+  },
+  {
+   "id": "claude-fable-5-1",
+   "label": "Fable 5.1",
+   "kind": "model",
+   "family": "fable",
+   "version": "5.1",
+   "context": 1000000,
+   "released": "",
+   "aliases": [],
+   "note": "Earlier Fable",
+   "verified": true
+  },
+  {
+   "id": "claude-opus-5-5",
+   "label": "Opus 5.5",
+   "kind": "model",
+   "family": "opus",
+   "version": "5.5",
+   "context": 1000000,
+   "released": "",
+   "aliases": [],
+   "note": "Most capable for hard work",
+   "verified": true
+  },
+  {
+   "id": "claude-opus-4-8",
+   "label": "Opus 4.8",
+   "kind": "model",
+   "family": "opus",
+   "version": "4.8",
+   "context": 1000000,
+   "released": "",
+   "aliases": [],
+   "note": "Earlier Opus",
+   "verified": true
+  },
+  {
+   "id": "claude-opus-4-7",
+   "label": "Opus 4.7",
+   "kind": "model",
+   "family": "opus",
+   "version": "4.7",
+   "context": 1000000,
+   "released": "",
+   "aliases": [],
+   "note": "Earlier Opus",
+   "verified": true
+  },
+  {
+   "id": "claude-opus-4-6",
+   "label": "Opus 4.6",
+   "kind": "model",
+   "family": "opus",
+   "version": "4.6",
+   "context": 1000000,
+   "released": "2026-02",
+   "aliases": [],
+   "note": "Earlier Opus",
+   "verified": true
+  },
+  {
+   "id": "claude-opus-4-5",
+   "label": "Opus 4.5",
+   "kind": "model",
+   "family": "opus",
+   "version": "4.5",
+   "context": 200000,
+   "released": "2025-11",
+   "aliases": [],
+   "note": "Earlier Opus",
+   "verified": true
+  },
+  {
+   "id": "claude-sonnet-5-5",
+   "label": "Sonnet 5.5",
+   "kind": "model",
+   "family": "sonnet",
+   "version": "5.5",
+   "context": 1000000,
+   "released": "",
+   "aliases": [],
+   "note": "Balanced speed and skill",
+   "verified": true
+  },
+  {
+   "id": "claude-sonnet-4-6",
+   "label": "Sonnet 4.6",
+   "kind": "model",
+   "family": "sonnet",
+   "version": "4.6",
+   "context": 200000,
+   "released": "2026-02",
+   "aliases": [],
+   "note": "Earlier Sonnet",
+   "verified": true
+  },
+  {
+   "id": "claude-sonnet-4-5",
+   "label": "Sonnet 4.5",
+   "kind": "model",
+   "family": "sonnet",
+   "version": "4.5",
+   "context": 200000,
+   "released": "2025-09",
+   "aliases": [],
+   "note": "Earlier Sonnet",
+   "verified": true
+  },
+  {
+   "id": "claude-haiku-5-5",
+   "label": "Haiku 5.5",
+   "kind": "model",
+   "family": "haiku",
+   "version": "5.5",
+   "context": 1000000,
+   "released": "",
+   "aliases": [],
+   "note": "Fastest and lightest on your limits",
+   "verified": true
+  },
+  {
+   "id": "claude-haiku-4-5",
+   "label": "Haiku 4.5",
+   "kind": "model",
+   "family": "haiku",
+   "version": "4.5",
+   "context": 200000,
+   "released": "2025-10",
+   "aliases": [],
+   "note": "Earlier Haiku",
+   "verified": true
+  }
+ ]
+}

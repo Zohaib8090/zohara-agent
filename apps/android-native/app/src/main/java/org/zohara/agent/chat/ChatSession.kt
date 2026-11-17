@@ -50,6 +50,8 @@ class ChatSession(
   @Volatile private var checking = false
   /** the stream ended with `done` (an answer finished: NOTIF-01) */
   private var answered = false
+  /** the name of the model that answered, when it was not the one chosen: shown under the answer */
+  private var answeredBy: String? = null
 
   val chatId: String? get() = _state.value.chatId
 
@@ -161,7 +163,7 @@ class ChatSession(
     val runOn = env.runOn()
     val before = _state.value
     stepHasDeltas = false
-    answered = false
+    answered = false; answeredBy = null
     chatBegan = before.chatId != null
     activeGroup = null
     _state.update { st ->
@@ -280,6 +282,7 @@ class ChatSession(
         dropTransient(); finalizeLive()
         add(StuckItem(key(), ev.n, ev.tool))
       }
+      is SendEvent.Model -> answeredBy = ev.label.takeIf { ev.differs && it.isNotBlank() }
       is SendEvent.Usage -> _state.update { it.copy(usage = Usage(ev.input, ev.output)) }
       is SendEvent.Error -> {
         mutate {
@@ -293,7 +296,11 @@ class ChatSession(
         mutate { dropTransient(); finalizeLive(); endGroup(); expireCards(); add(ErrorItem(key(), CONNECTION_LOST_TEXT(_state.value.computerName != null), code = "lost", retry = false)) }
         return true
       }
-      SendEvent.Done -> answered = true
+      SendEvent.Done -> {
+        answered = true
+        answeredBy?.let { name -> mutate { dropTransient(); finalizeLive(); endGroup(); add(NoticeItem(key(), "Answered by $name")) } }
+        answeredBy = null
+      }
       SendEvent.Ping, is SendEvent.Unknown -> Unit
     }
     return false

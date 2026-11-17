@@ -839,10 +839,13 @@ impl Ctl {
         let prompt = prompt.clone();
         let mut gate = crate::steps::StuckGate::default();
         let mut notice: Option<gtk::Box> = None;
+        // the model that really answered, when it is not the one chosen (a shortcut or Default resolves to a real model)
+        let mut answered: Option<String> = None;
         glib::timeout_add_local(Duration::from_millis(40), move || {
             loop {
                 match rx.try_recv() {
                     Ok(Msg::Ev(Event::Steps(n))) => me.set_steps(n),
+                    Ok(Msg::Ev(Event::Model(m))) => answered = zo_core::ai::models::answered_by(&Selection::load().model, &m),
                     Ok(Msg::Ev(Event::Stuck { n, .. })) => {
                         // never stops anything by itself: it asks, and Stop is the same as the Stop button
                         if gate.should_show(n) {
@@ -916,6 +919,9 @@ impl Ctl {
                     }
                     Ok(Msg::Done(result, history, session)) => {
                         thinking.set_visible(false);
+                        if let Some(label) = answered.take() {
+                            me.add(&format!("Answered by {label}"), "msg-tool-out");
+                        }
                         if let Some(old) = notice.take() {
                             me.thread.remove(&old);
                         }
@@ -961,7 +967,10 @@ impl Ctl {
 /// A friendlier name for the model ids people know.
 pub(crate) fn nice_name(model: &str) -> String {
     // Claude models are named from the list that was read (or made from their id); anything else shows as it is
-    if model.starts_with("claude-") || ["sonnet", "opus", "haiku", "fable"].contains(&model) {
+    if zo_core::ai::models::catalog_find(model).is_some() {
+        // a Claude Code model or shortcut: the name from the catalog ("Default (what Claude Code picks)", "Opus 5.5")
+        zo_core::ai::models::catalog_label(model)
+    } else if model.starts_with("claude-") || ["sonnet", "opus", "haiku", "fable"].contains(&model) {
         zo_core::ai::models::display_name(model)
     } else {
         model.to_string()
@@ -1074,7 +1083,9 @@ fn separator() -> gtk::Box {
 fn model_choices(p: &providers::Provider, sel: &Selection) -> Vec<(String, String, Option<String>)> {
     match p.id {
         // Claude: read from the Models API (or Claude Code's own names); the newest of each kind first, the rest under "More models"
-        "anthropic" | "claude-code" => {
+        // Claude Code: Default, the shortcuts and the newest (Recommended) model of each family; the rest is under "More models"
+        "claude-code" => cc_main_choices(),
+        "anthropic" => {
             let (main, _) = zo_core::ai::models::split_main(&zo_core::ai::models::claude_models());
             main.into_iter().map(|m| (m.id.clone(), m.name.clone(), Some(if m.note.is_empty() { m.id.clone() } else { m.note.clone() }))).collect()
         }
@@ -1088,8 +1099,31 @@ fn model_choices(p: &providers::Provider, sel: &Selection) -> Vec<(String, Strin
     }
 }
 
+/// One row of a Claude Code list: (id, title, description). The newest of each family says so; the window is in the description.
+fn cc_row(m: &zo_core::ai::models::CatalogModel) -> (String, String, Option<String>) {
+    let title = if m.recommended { format!("{} · Recommended", m.label) } else { m.label.clone() };
+    let win = if m.context >= 1_000_000 { format!("{}M window", m.context / 1_000_000) } else if m.context > 0 { format!("{}K window", m.context / 1000) } else { String::new() };
+    let desc = [m.note.as_str(), win.as_str()].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" · ");
+    (m.id.clone(), title, Some(desc).filter(|d| !d.is_empty()))
+}
+
+/// Claude Code, shown first: Default, the shortcuts, the newest model of each family.
+pub(crate) fn cc_main_choices() -> Vec<(String, String, Option<String>)> {
+    let c = zo_core::ai::models::catalog();
+    c.iter().filter(|m| m.kind != "model" || m.recommended).map(cc_row).collect()
+}
+
+/// Claude Code, under "More models": every other model, by family, newest first.
+pub(crate) fn cc_more_choices() -> Vec<(String, String, Option<String>)> {
+    let groups = zo_core::ai::models::catalog_groups(&zo_core::ai::models::catalog());
+    groups.iter().filter(|(t, _)| t != "Shortcuts").flat_map(|(_, ms)| ms.iter()).filter(|m| !m.recommended).map(cc_row).collect()
+}
+
 /// The older Claude models, under "More models".
 fn more_choices() -> Vec<(String, String, Option<String>)> {
+    if Selection::load().provider == "claude-code" {
+        return cc_more_choices();
+    }
     let (_, more) = zo_core::ai::models::split_main(&zo_core::ai::models::claude_models());
     more.into_iter().map(|m| (m.id.clone(), m.name.clone(), Some(if m.note.is_empty() { m.id.clone() } else { m.note.clone() }))).collect()
 }
