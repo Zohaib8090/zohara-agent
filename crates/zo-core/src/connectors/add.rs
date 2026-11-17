@@ -222,9 +222,28 @@ pub(crate) fn preview_entry(entry: &Entry, now: u64, input: &Input, opts: &Opts)
             cfg.command = l.command.clone();
         }
     }
+    // a failed try removes what it stored. An earlier preview under the same name may still be waiting: it uses the same key-store ids,
+    // so its values are put back instead.
+    let tenant = tenant_id();
+    let before: Vec<(String, Option<String>)> = secrets.iter().map(|(id, _)| (id.clone(), crate::ai::keys::get(id))).collect();
+    let drop_try = |cfg: &ServerConfig| {
+        let waiting = PENDING.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|p| p.tenant == tenant && p.cfg.name == cfg.name);
+        if waiting {
+            for (id, v) in &before {
+                match v {
+                    Some(v) => {
+                        let _ = crate::ai::keys::set(id, v);
+                    }
+                    None => crate::ai::keys::clear(id),
+                }
+            }
+        } else {
+            mcp_client::clear_secrets(cfg);
+        }
+    };
     for (id, v) in &secrets {
         if let Err(e) = crate::ai::keys::set(id, v) {
-            mcp_client::clear_secrets(&cfg);
+            drop_try(&cfg);
             return Err(e);
         }
     }
@@ -232,12 +251,11 @@ pub(crate) fn preview_entry(entry: &Entry, now: u64, input: &Input, opts: &Opts)
     let tools = match tried {
         Ok(t) => t,
         Err(e) => {
-            mcp_client::clear_secrets(&cfg);
+            drop_try(&cfg);
             return Err(e);
         }
     };
     let p = Preview { id: entry.id.clone(), name: name.clone(), kind, target: cfg.command.clone(), tools, publisher: entry.publisher.clone(), trust: if entry.featured { super::FEATURED_LABEL } else { super::NOT_REVIEWED }.to_string() };
-    let tenant = tenant_id();
     let mut all = PENDING.lock().unwrap_or_else(|e| e.into_inner());
     // old previews (nobody saved them) are dropped with what they stored
     let (keep, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut *all).into_iter().partition(|p| now.saturating_sub(p.at) < PENDING_SECS && !(p.tenant == tenant && p.cfg.name == name));
@@ -282,13 +300,17 @@ pub fn commit(name: &str, now: u64) -> Result<String, String> {
         let i = all.iter().position(|p| p.tenant == tenant && p.cfg.name == name && now.saturating_sub(p.at) < PENDING_SECS).ok_or("Nothing is waiting to be added under that name (it may have waited too long): try it again first.")?;
         all.remove(i)
     };
-    let mut servers = mcp_client::load_servers();
-    if servers.iter().any(|s| s.name == p.cfg.name) {
+    let added = mcp_client::update_servers(|servers| {
+        if servers.iter().any(|s| s.name == p.cfg.name) {
+            return false;
+        }
+        servers.push(p.cfg.clone());
+        true
+    });
+    if !added {
         mcp_client::clear_secrets(&p.cfg);
         return Err(format!("A server named \"{}\" is already added.", p.cfg.name));
     }
-    servers.push(p.cfg.clone());
-    mcp_client::save_servers(&servers);
     Ok(format!("Added \"{}\". Its tools ({}) are yours from the next message on.", p.cfg.name, p.preview.tools.join(", ")))
 }
 

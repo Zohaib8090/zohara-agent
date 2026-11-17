@@ -814,28 +814,44 @@ fn same_address(a: &str, b: &str) -> bool {
 /// registry lists is held (it is not started and gets no header or token) and remembers the new address, until the person decides
 /// ([`accept_change`], or the switch in the list, which keeps the old address). A registry that cannot be reached changes nothing.
 pub fn check_changes(src: &Source, cache: &Cache, now: u64) -> Vec<Changed> {
-    let mut all = mcp_client::load_servers();
+    if crate::tenant::is_restricted() {
+        return Vec::new();
+    }
+    // the registry is asked first, with no lock held; the result is then applied to the list as it is by then
+    enum Act {
+        Hold(String),
+        Release,
+    }
+    let mut acts: Vec<(String, String, Act)> = Vec::new(); // (name, address it was judged at, what to do)
     let mut found = Vec::new();
-    let mut dirty = false;
-    for s in all.iter_mut().filter(|s| s.registry.is_some() && mcp_client::is_url(&s.command)) {
+    for s in mcp_client::load_servers().iter().filter(|s| s.registry.is_some() && mcp_client::is_url(&s.command)) {
         let Some(e) = lookup(src, cache, now, s.registry.as_deref().unwrap_or("")) else { continue };
         if e.remotes.is_empty() || e.remotes.iter().any(|r| same_address(&r.url, &s.command)) {
             if s.address_changed.is_some() && e.remotes.iter().any(|r| same_address(&r.url, &s.command)) {
-                s.address_changed = None; // the registry lists the saved address again
-                dirty = true;
+                acts.push((s.name.clone(), s.command.clone(), Act::Release)); // the registry lists the saved address again
             }
             continue;
         }
         let new = e.remotes[0].url.clone();
         if s.address_changed.as_deref() != Some(&new) || !s.held {
-            s.address_changed = Some(new.clone());
-            s.held = true;
-            dirty = true;
+            acts.push((s.name.clone(), s.command.clone(), Act::Hold(new.clone())));
         }
         found.push(Changed { name: s.name.clone(), old: s.command.clone(), new });
     }
-    if dirty {
-        mcp_client::save_servers(&all);
+    if !acts.is_empty() {
+        mcp_client::update_servers(|all| {
+            for (name, at, act) in acts {
+                // a server that was removed, or whose address was changed in the meantime, is left alone
+                let Some(s) = all.iter_mut().find(|s| s.name == name && s.command == at && s.registry.is_some()) else { continue };
+                match act {
+                    Act::Release => s.address_changed = None,
+                    Act::Hold(new) => {
+                        s.address_changed = Some(new);
+                        s.held = true;
+                    }
+                }
+            }
+        });
     }
     found
 }
@@ -844,29 +860,36 @@ pub fn check_changes(src: &Source, cache: &Cache, now: u64) -> Vec<Changed> {
 /// saved for the old address (sign-in, header values, a registered client) is forgotten, because it must not go to the new one: the
 /// person signs in or types the keys again. The server is switched on again.
 pub fn accept_change(name: &str) -> Result<String, String> {
-    accept_change_with(name, false)
+    accept_change_with(name, false, &Source::from_env(), &CACHE, now_secs())
 }
 
-pub(crate) fn accept_change_with(name: &str, allow_private: bool) -> Result<String, String> {
+pub(crate) fn accept_change_with(name: &str, allow_private: bool, src: &Source, cache: &Cache, now: u64) -> Result<String, String> {
     if crate::tenant::is_restricted() {
         return Err(RESTRICTED_MESSAGE.into());
     }
-    let mut all = mcp_client::load_servers();
-    let s = all.iter_mut().find(|s| s.name == name && s.registry.is_some()).ok_or("There is no connector with that name.")?;
-    let new = s.address_changed.clone().ok_or("The address of this connector has not changed.")?;
+    let cur = mcp_client::load_servers().into_iter().find(|s| s.name == name && s.registry.is_some()).ok_or("There is no connector with that name.")?;
+    let new = cur.address_changed.clone().ok_or("The address of this connector has not changed.")?;
     add::check_public(&new, allow_private)?;
-    let old_cfg = s.clone();
-    mcp_client::clear_secrets(&old_cfg);
-    s.command = new.clone();
-    s.address_changed = None;
-    s.held = false;
-    s.enabled = true;
-    s.headers.clear();
-    s.secret_headers.clear();
-    s.client_id = None;
-    s.client_secret = None;
-    mcp_client::save_servers(&all);
-    Ok(format!("\"{name}\" now uses {new}. Its sign-in and keys were forgotten: sign in again, or add the key again if it needs one."))
+    // the public header values the registry gives for the new address (not asked for when adding) are put back; keys are not
+    let fixed: Vec<(String, String)> = lookup(src, cache, now, cur.registry.as_deref().unwrap_or(""))
+        .and_then(|e| e.remotes.into_iter().find(|r| same_address(&r.url, &new)))
+        .map(|r| r.headers.into_iter().filter_map(|h| h.value.map(|v| (h.name, v))).collect())
+        .unwrap_or_default();
+    mcp_client::update_servers(|all| {
+        let s = all.iter_mut().find(|s| s.name == name && s.registry.is_some()).ok_or("There is no connector with that name.")?;
+        let new = s.address_changed.clone().ok_or("The address of this connector has not changed.")?;
+        let old_cfg = s.clone();
+        mcp_client::clear_secrets(&old_cfg);
+        s.command = new.clone();
+        s.address_changed = None;
+        s.held = false;
+        s.enabled = true;
+        s.headers = fixed.iter().cloned().collect();
+        s.secret_headers.clear();
+        s.client_id = None;
+        s.client_secret = None;
+        Ok::<_, String>(format!("\"{name}\" now uses {new}. Its sign-in and keys were forgotten: sign in again, or add the key again if it needs one."))
+    })
 }
 
 #[cfg(test)]
