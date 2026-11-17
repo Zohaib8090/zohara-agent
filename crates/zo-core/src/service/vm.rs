@@ -222,13 +222,10 @@ mod tests {
     #[test]
     fn the_handler_refuses_a_restricted_account_even_if_the_check_before_it_is_skipped() {
         let _g = crate::store::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("zo-vm-restricted-{}", std::process::id()));
-        std::env::set_var("ZO_TENANT_ROOT", &dir);
+        crate::tenant::testkit::env_once();
         let t = tenant::Tenant::open(&"ab".repeat(16), true).unwrap();
         let r = tenant::scope(&t, || handle("machine_status", &json!({})));
         assert!(r.unwrap_err().contains("not available"));
-        std::env::remove_var("ZO_TENANT_ROOT");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
