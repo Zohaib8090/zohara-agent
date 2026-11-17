@@ -55,6 +55,10 @@ pub struct ServerConfig {
     /// to every request. Never synced.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_headers: Vec<String>,
+    /// Names of environment variables whose values are in the key store (a key brought in by the Migrate page): they are added to the
+    /// environment of the program when it starts. Never synced.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_env: Vec<String>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -204,6 +208,7 @@ pub fn import_json(text: &str) -> Result<Vec<ServerConfig>, String> {
             registry: None,
             address_changed: None,
             secret_headers: Vec::new(),
+            secret_env: Vec::new(),
         })
     };
     let mut out = Vec::new();
@@ -295,11 +300,19 @@ pub fn header_id(server: &str, header: &str) -> String {
     format!("mcp-{}-header-{}", clean_name(server), header.trim().to_ascii_lowercase())
 }
 
-/// Forgets everything a server left in the key store: its access token or sign-in and its secret header values.
+/// The keyring id under which the value of one of a program's environment variables is kept (`ServerConfig::secret_env`).
+pub fn env_id(server: &str, var: &str) -> String {
+    format!("mcp-{}-env-{}", clean_name(server), var.trim().to_ascii_lowercase())
+}
+
+/// Forgets everything a server left in the key store: its access token or sign-in, its secret header values and secret environment values.
 pub fn clear_secrets(cfg: &ServerConfig) {
     crate::ai::keys::clear(&token_id(&cfg.name));
     for h in &cfg.secret_headers {
         crate::ai::keys::clear(&header_id(&cfg.name, h));
+    }
+    for v in &cfg.secret_env {
+        crate::ai::keys::clear(&env_id(&cfg.name, v));
     }
 }
 
@@ -349,6 +362,12 @@ impl Connection {
         let (program, args) = words.split_first().ok_or("The command is empty.")?;
         let mut cmd = Command::new(program);
         crate::exec::scrub(&mut cmd);
+        // environment values that live in the key store
+        for v in &cfg.secret_env {
+            if let Some(val) = crate::ai::keys::get(&env_id(&cfg.name, v)) {
+                cmd.env(v, val);
+            }
+        }
         let mut child = cmd
             .args(args)
             .envs(&cfg.env)

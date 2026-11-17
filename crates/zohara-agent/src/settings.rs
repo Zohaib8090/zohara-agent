@@ -131,7 +131,7 @@ pub fn show(ui: &Rc<Ui>) {
     }
     content.set_spacing(0);
     let page = PAGE.with(|p| p.borrow().clone());
-    let pages: [(&str, &str, &str); 9] = [
+    let pages: [(&str, &str, &str); 10] = [
         ("model", "Model and profiles", "Which AI answers, its key, and saved presets."),
         ("personality", "Personality", "How Zohara Agent talks to you."),
         ("memory", "Memory", "What Zohara Agent remembers about you between chats."),
@@ -139,6 +139,7 @@ pub fn show(ui: &Rc<Ui>) {
         ("apps", "Connected apps", "Other programs that use Zohara Agent, and tools Zohara Agent can use."),
         ("sync", "Account and sync", "Optional: sign in to keep chats, memory and personalities in step with the web version."),
         ("machines", "Machines", "Other computers Zohara Agent can work on over SSH."),
+        ("import", "Import", "Bring MCP servers and instructions from Claude Code, Cursor and other tools."),
         ("data", "Data", "Saved chats."),
         ("about", "About", "Version and updates."),
     ];
@@ -708,6 +709,12 @@ pub fn show(ui: &Rc<Ui>) {
         card.append(&r);
     }
     content.append(&sec);
+    }
+
+    // ---- import: the settings of other tools (docs/MIGRATE.md) ----
+    if page == "import" {
+        let ui2 = ui.clone();
+        crate::migrate_ui::page(ui, content, Rc::new(move || show(&ui2)));
     }
 
     // ---- machines: other computers over SSH ----

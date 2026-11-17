@@ -30,6 +30,7 @@ object Routes {
   const val SETTINGS_GENERAL = "settings/general"
   const val SETTINGS_APPS = "settings/apps"
   const val SETTINGS_MACHINES = "settings/machines"
+  const val SETTINGS_IMPORT = "settings/import"
   const val SETTINGS_SYNC = "settings/sync"
   const val SETTINGS_COMPUTERS = "settings/computers"
   const val SETTINGS_NOTIFICATIONS = "settings/notifications"
@@ -71,6 +72,7 @@ object Routes {
     Def(SETTINGS_GENERAL, "Appearance and permissions", Owner.Settings),
     Def(SETTINGS_APPS, "Connected apps", Owner.Settings),
     Def(SETTINGS_MACHINES, "Machines", Owner.Settings),
+    Def(SETTINGS_IMPORT, "Import", Owner.Settings),
     Def(SETTINGS_SYNC, "Desktop sync", Owner.Settings),
     Def(SETTINGS_COMPUTERS, "My computers", Owner.Link),
     Def(SETTINGS_NOTIFICATIONS, "Notifications", Owner.Settings),

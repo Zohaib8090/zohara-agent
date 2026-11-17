@@ -16,10 +16,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// The operations of this module.
-pub const OPS: &[&str] = &["sys_info", "fs_list", "fs_read", "screenshot"];
+pub const OPS: &[&str] = &["sys_info", "fs_list", "fs_read", "screenshot", "migrate_scan", "migrate_apply", "migrate_undo"];
 /// Operations that ask the person on this computer first.
 pub fn needs_approval(op: &str) -> bool {
-    matches!(op, "fs_list" | "fs_read" | "screenshot")
+    matches!(op, "fs_list" | "fs_read" | "screenshot" | "migrate_scan" | "migrate_apply" | "migrate_undo")
+}
+
+/// The Migrate operations (docs/MIGRATE.md): they take lists instead of a path.
+pub fn is_migrate(op: &str) -> bool {
+    op.starts_with("migrate_")
 }
 
 pub const MAX_PATH_CHARS: usize = 1024;

@@ -851,6 +851,11 @@ fn handle(op: &str, req: &Value) -> Result<Value, String> {
             })?;
             Ok(json!({}))
         }
+        // Migrate (docs/MIGRATE.md): look for the MCP servers and instruction files of other tools, then import what was ticked
+        "migrate_scan" => Ok(crate::migrate::Origin::from_request(req)?.scan()?.view()),
+        "migrate_apply" => crate::migrate::apply_scan(&crate::migrate::Origin::from_request(req)?.scan()?, &crate::migrate::Request::from_json(req)?),
+        "migrate_undo" => crate::migrate::undo(s(req, "batch")),
+        "migrate_history" => Ok(crate::migrate::history()),
         // the connectors directory (docs/MCP.md "Browse connectors"); adding is two steps: try it, then save what was tried
         "connectors" => {
             let q = crate::connectors::Query::parse(req.get("q").and_then(Value::as_str), req.get("cursor").and_then(Value::as_str), req.get("kind").and_then(Value::as_str), req.get("category").and_then(Value::as_str))?;
@@ -1636,6 +1641,41 @@ mod tenant_tests {
         assert_eq!(r[0]["ok"], true, "{r:?}");
         let r = talk(json!({"op": "machines", "tenant": {"id": t.id}}), true);
         assert!(failed(&r).unwrap().contains("not available"), "{r:?}");
+    }
+
+    #[test]
+    fn migrate_ops_run_per_person_and_a_restricted_one_gets_notes_only() {
+        let _g = lock();
+        let (t, other, admin) = (fresh(true), fresh(true), fresh(false));
+        let files = json!([{"name": "CLAUDE.md", "text": "# Rules\n\n- Always answer in short sentences.\n"}, {"name": "mcp.json", "text": r#"{"servers": {"remote": {"type": "http", "url": "https://r.example/mcp"}}}"#}]);
+        let scan = talk(with_tenant(json!({"op": "migrate_scan", "source": "paste", "files": files}), &t), true);
+        assert_eq!(scan[0]["ok"], true, "{scan:?}");
+        assert_eq!(scan[0]["can"]["servers"], false);
+        let (iid, sid) = (scan[0]["instructions"][0]["id"].clone(), scan[0]["servers"][0]["id"].clone());
+        // the server's disk and the machines of the server are not this person's
+        for src in [json!({"op": "migrate_scan"}), json!({"op": "migrate_scan", "source": "computer"}), json!({"op": "migrate_scan", "source": "machine", "machine": "vm"})] {
+            assert!(failed(&talk(with_tenant(src.clone(), &t), true)).is_some(), "{src}");
+        }
+        // a server is refused, notes are written to this person's memory only
+        let r = talk(with_tenant(json!({"op": "migrate_apply", "source": "paste", "files": files, "select": [sid]}), &t), true);
+        assert!(failed(&r).unwrap().contains("not available"), "{r:?}");
+        let r = talk(with_tenant(json!({"op": "migrate_apply", "source": "paste", "files": files, "select": [iid]}), &t), true);
+        assert_eq!(r[0]["notes"]["added"], 1, "{r:?}");
+        let batch = r[0]["batch"].clone();
+        let mem = |who: &crate::tenant::Tenant| talk(with_tenant(json!({"op": "memory"}), who), true)[0]["items"].to_string();
+        assert!(mem(&t).contains("short sentences") && !mem(&other).contains("short sentences"));
+        // history and undo
+        let h = talk(with_tenant(json!({"op": "migrate_history"}), &t), true);
+        assert_eq!(h[0]["batches"][0]["id"], batch);
+        assert!(!talk(with_tenant(json!({"op": "migrate_history"}), &other), true)[0]["batches"].as_array().unwrap().iter().any(|b| b["id"] == batch));
+        assert!(failed(&talk(with_tenant(json!({"op": "migrate_undo", "batch": batch}), &other), true)).is_some(), "another person cannot undo it");
+        assert_eq!(talk(with_tenant(json!({"op": "migrate_undo", "batch": batch}), &t), true)[0]["ok"], true);
+        assert!(!mem(&t).contains("short sentences"));
+        // an unrestricted account may import a remote server on the server, and gets past the gate for machines
+        let r = talk(with_tenant(json!({"op": "migrate_apply", "source": "paste", "files": files, "select": [sid]}), &admin), true);
+        assert_eq!(r[0]["servers"]["added"], json!(["remote"]), "{r:?}");
+        let e = failed(&talk(with_tenant(json!({"op": "migrate_scan", "source": "machine", "machine": "vm"}), &admin), true)).unwrap();
+        assert!(e.contains("no machine called"), "{e}");
     }
 
     #[test]

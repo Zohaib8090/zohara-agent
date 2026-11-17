@@ -23,6 +23,7 @@ import org.zohara.agent.settings.SettingsAppsScreen
 import org.zohara.agent.settings.SettingsDataScreen
 import org.zohara.agent.settings.SettingsGeneralScreen
 import org.zohara.agent.settings.SettingsHomeScreen
+import org.zohara.agent.settings.SettingsImportScreen
 import org.zohara.agent.settings.SettingsMachinesScreen
 import org.zohara.agent.settings.SettingsMemoryScreen
 import org.zohara.agent.settings.SettingsModelScreen
@@ -44,6 +45,7 @@ object ScreenRegistry {
     Routes.SETTINGS_GENERAL to { SettingsGeneralScreen() },
     Routes.SETTINGS_APPS to { SettingsAppsScreen() },
     Routes.SETTINGS_MACHINES to { SettingsMachinesScreen() },
+    Routes.SETTINGS_IMPORT to { SettingsImportScreen() },
     Routes.SETTINGS_SYNC to { SettingsSyncScreen() },
     Routes.SETTINGS_COMPUTERS to { MyComputersScreen() },
     Routes.SETTINGS_NOTIFICATIONS to { SettingsNotificationsScreen() },
@@ -76,6 +78,7 @@ object ScreenRegistry {
     Routes.SETTINGS_GENERAL to settings(Routes.SETTINGS_GENERAL) { SettingsGeneralScreen() },
     Routes.SETTINGS_APPS to settings(Routes.SETTINGS_APPS) { SettingsAppsScreen() },
     Routes.SETTINGS_MACHINES to settings(Routes.SETTINGS_MACHINES) { SettingsMachinesScreen() },
+    Routes.SETTINGS_IMPORT to settings(Routes.SETTINGS_IMPORT) { SettingsImportScreen() },
     Routes.SETTINGS_SYNC to settings(Routes.SETTINGS_SYNC) { SettingsSyncScreen() },
     Routes.SETTINGS_COMPUTERS to settings(Routes.SETTINGS_COMPUTERS) { MyComputersScreen() },
     Routes.SETTINGS_NOTIFICATIONS to settings(Routes.SETTINGS_NOTIFICATIONS) { SettingsNotificationsScreen() },

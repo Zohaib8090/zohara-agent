@@ -1987,6 +1987,14 @@ fn settings_questions_for_the_computer_are_whitelisted_cleaned_and_answered() {
     assert_eq!(link::clean_inner(&json!({"op": "fs_read", "path": "a.txt"})).unwrap(), json!({"op": "fs_read", "path": "a.txt"}));
     assert_eq!(link::clean_inner(&json!({"op": "screenshot", "path": "/etc/passwd"})).unwrap(), json!({"op": "screenshot"}));
     assert_eq!(link::clean_inner(&json!({"op": "sys_info"})).unwrap(), json!({"op": "sys_info"}));
+    // Migrate: lists of ids and place names only; a request for keys, a path or a tenant never reaches the computer
+    assert_eq!(link::clean_inner(&json!({"op": "migrate_apply", "select": ["s1", "i2"], "targets": {"i2": "notes"}, "secrets": ["s1"], "confirm": ["x"], "path": "/etc", "tenant": {"id": "t"}})).unwrap(), json!({"op": "migrate_apply", "select": ["s1", "i2"], "targets": {"i2": "notes"}}));
+    assert_eq!(link::clean_inner(&json!({"op": "migrate_scan", "source": "machine", "machine": "vm", "files": [{"text": "x"}]})).unwrap(), json!({"op": "migrate_scan"}));
+    assert_eq!(link::clean_inner(&json!({"op": "migrate_undo", "batch": "mg123"})).unwrap(), json!({"op": "migrate_undo", "batch": "mg123"}));
+    for bad in [json!({"op": "migrate_apply", "select": "s1"}), json!({"op": "migrate_apply", "select": [1]}), json!({"op": "migrate_apply", "select": ["a\nb"]}), json!({"op": "migrate_apply", "targets": {"a": ["x"]}}), json!({"op": "migrate_undo", "batch": "a b"}), json!({"op": "migrate_apply", "select": (0..401).map(|i| i.to_string()).collect::<Vec<_>>()})] {
+        assert!(link::clean_inner(&bad).is_err(), "{bad}");
+    }
+    assert!(link::is_control("migrate_scan") && link::is_control("migrate_apply") && link::is_control("migrate_undo"));
     assert_eq!(link::clean_inner(&json!({"op": "models", "provider": "p", "path": "/etc"})).unwrap(), json!({"op": "models", "provider": "p"}));
     for bad in [json!({"op": "fs_list", "path": ["a"]}), json!({"op": "fs_read", "path": "a\u{0}b"}), json!({"op": "fs_read", "path": "x".repeat(2000)}), json!({"op": "fs_write", "path": "a"}), json!({"op": "fs_rm", "path": "a"}), json!({"op": "term_open"}), json!({"op": "power", "set": "off"}), json!({"op": "app_launch"})] {
         let a = call(&r, "tok", "/api/op", json!({"op": "desktop_op", "inner": bad}));

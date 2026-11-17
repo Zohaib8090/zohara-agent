@@ -511,6 +511,12 @@ Page list in the web and the desktop. Desktop (9): Model and profiles, Personali
 | SET-GEN-04 | "Tray and startup": Keep running in the tray when the window is closed; Start with the computer | settings.rs "Tray and startup" | none | n/a (D2) | n/a | — | [ ] |
 | SET-GEN-05 | Text size | zoom | browser zoom | n/a (system, THEME-10) | n/a | — | [ ] |
 
+### Import (SET-IMP) NEW
+
+| ID | Feature | Desktop | Web | Phone | P | Mod | Done |
+|---|---|---|---|---|---|---|---|
+| SET-IMP-01 | Settings > Import page: find other tools' settings (Claude Code, Claude Desktop, Codex, Gemini, Cursor, VS Code, Zed) from this computer / a machine over SSH / pasted or opened files; checklist of servers and instruction files, per-file target (memory notes or a project instruction), result with what was left out and what is still needed, Undo (docs/MIGRATE.md) | migrate_ui.rs | `pageImport` | `SettingsImportScreen` (paste, system file picker, linked computer, machine for admins; no keys) | must | settings | [x] |
+
 ### Connected apps / MCP (SET-APP) NEW
 
 | ID | Feature | Desktop | Web | Phone | P | Mod | Done |
