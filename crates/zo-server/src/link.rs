@@ -873,9 +873,13 @@ pub fn clean_inner(inner: &Value) -> Result<Value, &'static str> {
     };
     match op {
         "profile_use" => put("id", 100),
-        "models" => put("provider", 100),
+        "models" => {
+            put("provider", 100);
+            put("account", 100);
+        }
         "select" => {
             put("provider", 100);
+            put("account", 100);
             put("model", 200);
             put("effort", 20);
         }

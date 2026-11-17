@@ -1212,6 +1212,7 @@ async function send(opts) {
           case "tool_start": clearWait(); ai = null; acc = ""; if (!group) group = newGroup(true); groupAdd(group, ev.summary || ev.name); scrollEnd(); break;
           case "steps": if (Number.isSafeInteger(ev.n) && ev.n > 0) { stepsN = ev.n; stepsPaint(group); } break;
           case "stuck": stuckNotice(); break;
+          case "notice": if (ev.text) { const m = document.createElement("div"); m.className = "pc-meta"; m.textContent = "\u2139 " + String(ev.text).slice(0, 300); thread().appendChild(m); scrollEnd(); } break;
           case "tool_done": clearWait(); if (ev.name === "zohara_ask_user") closeQuestionCards(); if (group && ev.output) groupOut(group, ev.output); break;
           case "approval": if (dsk && !dcaps(curDev()).approvals_from_web) waitApproval(ev.summary || ev.tool); else ask(ev); break;
           case "approval_wait": case "waiting_approval": if (dsk) waitApproval(ev.summary); break;
@@ -1891,7 +1892,7 @@ async function modelPopover(a) {
   if (!p.isConnected) return;
   const groups = prof.profiles.map(x => {
     const ms = (x.pinned && x.pinned.length) ? x.pinned : (x.model ? [x.model] : []);
-    return `<div class="pop-group">${esc(x.name)}</div>` + ms.map(m => `<button class="pop-row" data-p="${esc(x.id)}" data-m="${esc(m)}"><div class="c"><div class="pop-title">${esc(m)}</div><div class="pop-sub">${esc(x.provider)}</div></div><span class="pop-check">${prof.active === x.id && status.model === m ? icon("check") : ""}</span></button>`).join("");
+    return `<div class="pop-group">${esc(x.name)}</div>` + ms.map(m => `<button class="pop-row" data-p="${esc(x.id)}" data-m="${esc(m)}"><div class="c"><div class="pop-title">${esc(m)}</div><div class="pop-sub">${esc((x.provider_name || x.provider) + (x.account_name ? " · " + x.account_name : ""))}</div></div><span class="pop-check">${prof.active === x.id && status.model === m ? icon("check") : ""}</span></button>`).join("");
   }).join("");
   p.innerHTML = (groups || '<div class="pop-empty">Nothing pinned yet. Open the full list and tap the star next to a model.</div>') + `<button class="pop-row pop-more" data-more><div class="c"><div class="pop-title">More…</div><div class="pop-sub">All models, API key, address</div></div></button>`;
   paint(p);
@@ -1901,6 +1902,77 @@ async function modelPopover(a) {
     catch (e) { toast(e.message); }
   });
   p.querySelector("[data-more]").onclick = () => { p.remove(); modelSheet(); };
+}
+
+/* ---- named custom providers and several API key accounts per provider (the forms are shared by the model sheet and Settings > Model) ---- */
+const fmtOptions = (prov, sel) => ((prov.formats && prov.formats.length) ? prov.formats : [fmtOf(prov, "chat")]).map(x => `<option value="${esc(x.id)}"${x.id === sel ? " selected" : ""}>${esc(x.name)} (${esc(x.path)})</option>`).join("");
+/* "Groq · Groq 1": the provider with the account, as the pickers name it; just the provider when it has one account */
+const acctLabel = (p, aid) => { const l = (p.accounts || []).filter(a => !a.hidden || a.active); if (!l.length || (p.accounts || []).length < 2) return p.name; const a = (p.accounts || []).find(x => x.id === (aid || "default")) || p.accounts[0]; return p.name + " · " + a.name; };
+function customForm(prov, c, done) {
+  const w = document.createElement("div");
+  w.innerHTML = `<div class="field-label">Name</div><input class="field-input" id="cName" maxlength="40" placeholder="My router, Work gateway, Home Ollama" autocomplete="off">
+    <div class="field-label" style="margin-top:8px">API format</div><select id="cFmt">${fmtOptions(prov, c ? c.format : "chat")}</select>
+    <div class="field-label" style="margin-top:8px">Address (endpoint URL)</div><input class="field-input" id="cUrl" type="url" inputmode="url" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="https://my-host.example/v1">
+    <div class="field-hint" id="cHint"></div>
+    <div class="field-label" style="margin-top:8px">API key ${c ? '<span class="chip ' + (c.has_key ? "ok" : "warn") + '">' + (c.has_key ? "Key saved" : "No key") + "</span>" : ""}</div><input class="field-input" id="cKey" type="password" autocomplete="off" placeholder="${c ? "Empty keeps the saved key" : "Leave empty if the server needs none"}">
+    <div class="field-hint">${restricted() ? "Stored encrypted on our server and only sent to this address." : "Stored on the server, and only sent to this address."} Changing the address removes the saved key.</div>
+    <div class="field-label" style="margin-top:8px">Model to start with (optional)</div><input class="field-input" id="cModel" maxlength="200" autocomplete="off" spellcheck="false">
+    <div class="inline" style="margin-top:8px"><button class="btn" id="cTest" type="button">Test</button><span class="field-hint" id="cMsg" role="status"></span></div>`;
+  const q = id => w.querySelector("#" + id);
+  q("cName").value = c ? c.name : ""; q("cUrl").value = c ? c.base_url : ""; q("cModel").value = c && c.default_model ? c.default_model : "";
+  const hint = () => { const f = fmtOf(prov, q("cFmt").value); q("cHint").textContent = "Requests go to the address plus " + f.path.replace(/^\/v1/, "") + " (" + f.name + "). " + (restricted() ? "Only public https addresses work here." : ""); };
+  hint(); q("cFmt").onchange = hint;
+  const body = () => ({ name: q("cName").value.trim(), format: q("cFmt").value, base_url: q("cUrl").value.trim(), key: q("cKey").value.trim(), default_model: q("cModel").value.trim() });
+  q("cTest").onclick = async () => {
+    const b = body(), m = q("cMsg"), bad = validAddr(b.base_url, true); if (bad) { m.className = "field-hint bad"; m.textContent = bad; return; }
+    q("cTest").disabled = true; m.className = "field-hint"; m.innerHTML = '<span class="spin"></span> Testing…';
+    try { const r = await op("custom_provider_test", { id: c ? c.id : undefined, format: b.format, base_url: b.base_url, key: b.key || undefined, model: b.default_model || undefined }); m.className = "field-hint " + (r.works !== false ? "ok" : "bad"); m.textContent = r.message || (r.works !== false ? "Connected." : "The test failed."); }
+    catch (e) { m.className = "field-hint bad"; m.textContent = e.message; }
+    q("cTest").disabled = false;
+  };
+  const go = btn(c ? "Save" : "Add provider", "primary", async () => {
+    const b = body(), bad = validAddr(b.base_url, true); if (!b.name) return toast("Give the provider a name."); if (bad) return toast(bad);
+    go.disabled = true;
+    try {
+      const r = c ? await op("custom_provider_update", { id: c.id, ...b, default_model: b.default_model }) : await op("custom_provider_add", b);
+      dropCache("providers"); dropCache("profiles"); dlg.close(); done && done(r);
+    } catch (e) { toast(e.message); go.disabled = false; }
+  });
+  const dlg = sheet(c ? "Edit custom provider" : "Add custom provider", w, [btn("Cancel", "", () => dlg.close()), go]); q("cName").focus();
+}
+function removeCustomBox(c, done) {
+  confirmBox("Delete " + c.name + "?", "The provider, its API key, its accounts and the profiles that use it are removed. Chats stay.", "Delete", async () => { try { await op("custom_provider_remove", { id: c.id, confirm: true }); dropCache("providers"); dropCache("profiles"); done && done(); } catch (e) { toast(e.message); } });
+}
+/* add or rename an account of a provider (a custom provider's accounts and a hosted provider's alike) */
+function accountForm(p, a, done) {
+  const w = document.createElement("div");
+  w.innerHTML = `<div class="field-label">Name</div><input class="field-input" id="aName" maxlength="40" placeholder="${esc(p.name)} 1" autocomplete="off">
+    <div class="field-label" style="margin-top:8px">API key ${a ? '<span class="chip ' + (a.has_key ? "ok" : "warn") + '">' + (a.has_key ? "Key saved" : "No key") + "</span>" : ""}</div><input class="field-input" id="aKey" type="password" autocomplete="off" placeholder="${a ? "Empty keeps the saved key" : "Paste the key"}">
+    <div id="aUrlBox"${p.custom || (a && a.default) ? " hidden" : ""}><div class="field-label" style="margin-top:8px">Address (optional)</div><input class="field-input" id="aUrl" type="url" spellcheck="false" autocomplete="off" placeholder="${esc(p.default_url || "")}"><div class="field-hint">Only if this account uses another address of ${esc(p.name)}.</div></div>
+    <div class="inline" style="margin-top:8px"><button class="btn" id="aTest" type="button"${a ? "" : " hidden"}>Test</button><span class="field-hint" id="aMsg" role="status"></span></div>`;
+  const q = id => w.querySelector("#" + id);
+  q("aName").value = a ? a.name : ""; if (a && a.base_url) q("aUrl").value = a.base_url;
+  if (a) q("aTest").onclick = async () => {
+    const m = q("aMsg"); q("aTest").disabled = true; m.className = "field-hint"; m.innerHTML = '<span class="spin"></span> Testing…';
+    try { const r = await op("account_test", { provider: p.id, id: a.id }); m.className = "field-hint " + (r.works !== false ? "ok" : "bad"); m.textContent = r.message || (r.works !== false ? "Connected." : "The test failed."); }
+    catch (e) { m.className = "field-hint bad"; m.textContent = e.message; }
+    q("aTest").disabled = false;
+  };
+  const go = btn(a ? "Save" : "Add account", "primary", async () => {
+    const name = q("aName").value.trim(), key = q("aKey").value.trim(), url = q("aUrl").value.trim(); if (!name) return toast("Give the account a name.");
+    if (url) { const bad = validAddr(url, false); if (bad) return toast(bad); }
+    if (!a && !key) return toast("Paste the account's API key.");
+    go.disabled = true;
+    try {
+      if (a) await op("account_rename", { provider: p.id, id: a.id, name, key: key || undefined, ...(a.default ? {} : { base_url: url }) });
+      else await op("account_add", { provider: p.id, name, key, base_url: url || undefined });
+      dropCache("providers"); dropCache("profiles"); dlg.close(); done && done();
+    } catch (e) { toast(e.message); go.disabled = false; }
+  });
+  const dlg = sheet(a ? "Edit account" : "Add account", w, [btn("Cancel", "", () => dlg.close()), go]); q("aName").focus();
+}
+function removeAccountBox(p, a, done) {
+  confirmBox("Delete " + p.name + " · " + a.name + "?", "The account and its API key are removed from this server. Profiles that used it go back to the Default account.", "Delete", async () => { try { await op("account_remove", { provider: p.id, id: a.id, confirm: true }); dropCache("providers"); dropCache("profiles"); done && done(); } catch (e) { toast(e.message); } });
 }
 
 /* the full sheet: provider, address, key, models with search and pins */
@@ -1922,7 +1994,8 @@ async function modelSheet() {
     if (!ccAllowed(cc)) list = list.filter(p => p.id !== "claude-code");
     else if (!list.some(p => p.id === "claude-code")) { const cp = { id: "claude-code", name: "Claude Code (your subscription)", local: false, has_key: false, needs_url: false, synthetic: true }; prov.providers.push(cp); list.push(cp); }
   }
-  wrap.innerHTML = `<div class="field-label">Provider</div><select id="mProv"></select><div class="field-hint hide" id="mCC"></div>
+  wrap.innerHTML = `<div class="field-label">Provider${dsk ? "" : ' <button class="btn mini" id="mAddCustom" type="button">Add custom provider</button>'}</div><select id="mProv"></select><div class="field-hint hide" id="mCC"></div>
+    <div id="mAcctBox" class="hide"><div class="field-label" style="margin-top:8px">Account</div><select id="mAcct"></select></div>
     <details class="adv" id="mAdv"${dsk ? " hidden" : ""}><summary id="mAdvT">Advanced: address</summary>
       <div class="field-label" id="mUrlL" style="margin-top:8px">Address (endpoint URL)</div><input class="field-input" id="mUrl" type="url" inputmode="url" spellcheck="false" autocomplete="off" autocapitalize="off">
       <div class="field-hint" id="mUrlHint"></div>
@@ -1947,13 +2020,17 @@ async function modelSheet() {
     else { const b = btn(cc && cc.present && cc.source === "own" ? "Log in again" : "Log in", cc && cc.present ? "mini" : "mini primary", () => claudeLogin(() => { sh.close(); modelSheet(); })); h.appendChild(b); }
   };
   const majorIds = new Set(["anthropic", "openai", "gemini"]), opt = p => `<option value="${esc(p.id)}"${p.id === prov.current ? " selected" : ""}>${esc(p.name)}${p.has_key || p.local ? " ✓" : ""}</option>`;
-  const groups = [["Your subscription", p => p.id === "claude-code"], ["Popular Providers", p => majorIds.has(p.id)], ["Cloud & Open-Weight", p => !majorIds.has(p.id) && !isCustomProv(p) && !isLocalProv(p)], ["Local Models (This Computer)", p => !isCustomProv(p) && p.id !== "claude-code" && !majorIds.has(p.id) && isLocalProv(p)], ["Custom endpoints", isCustomProv]];
+  const groups = [["Your subscription", p => p.id === "claude-code"], ["Popular Providers", p => majorIds.has(p.id)], ["Cloud & Open-Weight", p => !majorIds.has(p.id) && !isCustomProv(p) && !isLocalProv(p)], ["Local Models (This Computer)", p => !isCustomProv(p) && p.id !== "claude-code" && !majorIds.has(p.id) && isLocalProv(p)], ["Custom providers", isCustomProv]];
   if (!prov.current) sp.insertAdjacentHTML("afterbegin", '<option value="" selected>Choose…</option>');
   groups.forEach(([lbl, f]) => { const g = list.filter(f); if (g.length) sp.insertAdjacentHTML("beforeend", `<optgroup label="${lbl}">${g.map(opt).join("")}</optgroup>`); });
   let models = [], chosen = st.model || "", effort = "", loading = false, error = "", seq = 0, dirty = false, filter = "";
   const cur = () => prov.providers.find(p => p.id === sp.value);
+  /* the account of the provider: the one in use for the provider in use, else the Default one */
+  let acct = prov.current_account || "default";
+  const acctNow = () => { const p = cur(); if (!p || !p.takes_accounts || dsk) return undefined; const l = p.accounts || []; return l.some(a => a.id === acct) ? acct : "default"; };
+  const acctBody = () => { const a = acctNow(); return a && a !== "default" ? { account: a } : {}; };
   /* the address saved for the provider in use (the providers answer carries it; it is empty when the normal address is used) */
-  const saved = p => (p && p.id === prov.current && p.base_url && p.base_url !== p.default_url) ? p.base_url : "";
+  const saved = p => (p && /^custom:/.test(p.id)) ? p.base_url || "" : (p && p.id === prov.current && p.base_url && p.base_url !== p.default_url) ? p.base_url : "";
   const pinned = () => new Set(activePins(prof));
   /* the API format picked for a hosted provider ("default" = its normal one); only sent when the provider takes one */
   const fmtBody = p => (p && p.takes_format && !dsk && !$$("mFmtBox").classList.contains("hide")) ? { api_format: $$("mFmt").value || "default" } : {};
@@ -1968,7 +2045,11 @@ async function modelSheet() {
     $$("mUrlHint").textContent = needs ? "The base address of the service, for example https://api.example.com/v1. " + (isCustomProv(p) ? "Requests go to the address plus " + f.path.replace(/^\/v1/, "") + " (" + f.name + "). " : "") + (restricted() ? "Only public https addresses work here." : "") : (p && p.default_url ? "Leave it as it is to use the normal address: " + p.default_url : "Only change this for a proxy or your own gateway.");
     url.placeholder = (p && p.default_url) || "https://";
     $$("mKeyBox").classList.toggle("hide", !p || isLocalProv(p));
-    const has = p && (p.has_key || isLocalProv(p)); const k = $$("mKeySt"); k.textContent = has ? "Key saved" : "No key yet"; k.className = "chip " + (has ? "ok" : "warn");
+    const ab = $$("mAcctBox"), al = p && p.takes_accounts && !dsk ? (p.accounts || []).filter(a => !a.hidden || a.id === acct) : [];
+    ab.classList.toggle("hide", !al.length);
+    if (al.length) $$("mAcct").innerHTML = al.map(a => `<option value="${esc(a.id)}"${a.id === acctNow() ? " selected" : ""}>${esc(p.name)} · ${esc(a.name)}${a.has_key ? " ✓" : ""}</option>`).join("") + '<option value="+">Add an account…</option>';
+    const curA = p && (p.accounts || []).find(a => a.id === acctNow());
+    const has = p && (curA && p.takes_accounts && !dsk ? curA.has_key : (p.has_key || isLocalProv(p))); const k = $$("mKeySt"); k.textContent = has ? "Key saved" : "No key yet"; k.className = "chip " + (has ? "ok" : "warn");
     $$("mTest").textContent = ""; $$("mTest").className = "field-hint";
     ccHint();
   }
@@ -1996,7 +2077,7 @@ async function modelSheet() {
     if (bad) { models = []; error = bad; loading = false; renderList(); return; }
     loading = true; error = ""; renderList();
     try {
-      const r = await mop("models", dsk ? { provider: p.id } : { provider: p.id, base_url: url.value.trim(), ...fmtBody(p) });
+      const r = await mop("models", dsk ? { provider: p.id } : { provider: p.id, base_url: url.value.trim(), ...fmtBody(p), ...acctBody() });
       if (my !== seq) return;
       models = r.models || []; error = r.error || "";
       if (r.base_url && !dirty && !url.value.trim() && p.needs_url) url.value = r.base_url;
@@ -2012,8 +2093,8 @@ async function modelSheet() {
     try {
       const ap = prof.profiles.find(x => x.id === prof.active); let id = prof.active, on = !pinned().has(m), note = on ? "Pinned" : "Unpinned";
       if (on && (!ap || ap.provider !== p.id)) {
-        await op("select", { provider: p.id, model: m, base_url: url.value.trim(), ...fmtBody(p) });
-        const c = await op("profile_create", { name: p.name }); id = c.id; note = "Pinned to a new profile, " + p.name;
+        await op("select", { provider: p.id, model: m, base_url: url.value.trim(), ...fmtBody(p), ...acctBody() });
+        const c = await op("profile_create", { name: acctLabel(p, acctNow()) }); id = c.id; note = "Pinned to a new profile, " + p.name;
       }
       await op("profile_pin", { id, model: m, on });
       dropCache("profiles"); prof = await getProfiles(true); renderList(); toast(note); refreshModel();
@@ -2026,26 +2107,32 @@ async function modelSheet() {
     try {
       const body = { provider: p.id, model: chosen, base_url: url.value.trim() };
       if (!$$("mEffBox").classList.contains("hide")) body.effort = $$("mEff").value;
-      if (dsk) { delete body.base_url; } else Object.assign(body, fmtBody(p));
+      if (dsk) { delete body.base_url; } else Object.assign(body, fmtBody(p), p.takes_accounts && !dsk ? { account: acctNow() || "default" } : {});
       await mop("select", body); dropCache("profiles"); sh.close(); await refreshModel(); toast("Using " + chosen);
     } catch (e) { toast(e.message); useBtn.disabled = false; }
   }
-  sp.onchange = () => { dirty = false; const p = cur(); url.value = saved(p); chosen = p && p.id === prov.current ? st.model || "" : ""; models = []; filter = ""; $$("mQ").value = ""; setAddrUi(); if (p && p.needs_url && !url.value) { error = ""; renderList(); $$("mUrl").focus(); } else fetchModels(); };
+  sp.onchange = () => { dirty = false; acct = cur() && cur().id === prov.current ? (prov.current_account || "default") : "default"; const p = cur(); url.value = saved(p); chosen = p && p.id === prov.current ? st.model || "" : ""; models = []; filter = ""; $$("mQ").value = ""; setAddrUi(); if (p && p.needs_url && !url.value) { error = ""; renderList(); $$("mUrl").focus(); } else fetchModels(); };
   url.oninput = () => { dirty = true; };
+  $$("mAcct").onchange = () => {
+    const v = $$("mAcct").value, p = cur();
+    if (v === "+") { setAddrUi(); accountForm(p, null, () => { sh.close(); modelSheet(); }); return; }
+    acct = v; models = []; setAddrUi(); fetchModels();
+  };
+  if ($$("mAddCustom")) $$("mAddCustom").onclick = () => customForm(prov, null, () => { sh.close(); modelSheet(); });
   $$("mFmt").onchange = () => { $$("mTest").textContent = ""; fetchModels(); };
   url.onchange = () => { const p = cur(); const bad = (dsk ? () => "" : validAddr)(url.value, p && p.needs_url); $$("mUrlHint").textContent = bad; if (!bad) fetchModels(); };
   $$("mTestB").onclick = async () => {
     const p = cur(), t = $$("mTest"), b = $$("mTestB"); if (!p) return;
     const bad = (dsk ? () => "" : validAddr)(url.value, p.needs_url); if (bad) { t.className = "field-hint bad"; t.textContent = bad; return; }
     b.disabled = true; t.className = "field-hint"; t.innerHTML = '<span class="spin"></span> Testing…';
-    try { const r = await op("model_test", { provider: p.id, base_url: url.value.trim(), model: chosen || undefined, ...fmtBody(p) }); const good = r.works !== false; t.className = "field-hint " + (good ? "ok" : "bad"); t.textContent = r.message || (good ? "Connected." : "The test failed."); }
+    try { const r = await op("model_test", { provider: p.id, base_url: url.value.trim(), model: chosen || undefined, ...fmtBody(p), ...acctBody() }); const good = r.works !== false; t.className = "field-hint " + (good ? "ok" : "bad"); t.textContent = r.message || (good ? "Connected." : "The test failed."); }
     catch (e) { t.className = "field-hint bad"; t.textContent = /unknown request/i.test(e.message) ? "This server cannot test connections yet." : e.message; }
     b.disabled = false;
   };
   $$("mKeyB").onclick = async () => {
     const p = cur(), k = $$("mKey").value.trim(); if (!p) return; if (!k) return toast("Paste the key first.");
     const b = $$("mKeyB"); b.disabled = true;
-    try { await op("set_key", { provider: p.id, key: k }); $$("mKey").value = ""; p.has_key = true; dropCache("providers"); setAddrUi(); toast("Key saved"); fetchModels(); }
+    try { await op("set_key", { provider: p.id, key: k, ...acctBody() }); $$("mKey").value = ""; p.has_key = true; { const ca = (p.accounts || []).find(a => a.id === acctNow()); if (ca) ca.has_key = true; } dropCache("providers"); setAddrUi(); toast("Key saved"); fetchModels(); }
     catch (e) { toast(e.message); }
     b.disabled = false;
   };
@@ -2855,7 +2942,7 @@ async function pageModel(b) {
   const [s, prof, prov, hid] = await Promise.all([op("status"), getProfiles(true), getProviders(true), getSettings(true)]); b.innerHTML = "";
   const refresh = () => { dropCache("profiles"); settingsPage("model"); refreshModel(); };
   b.appendChild(head("Model"));
-  b.appendChild(cardOf(row("Provider and model", s.ready ? (s.provider + " · " + (s.model || "no model chosen")) : "Nothing chosen yet", btn("Change", "primary", modelSheet))));
+  b.appendChild(cardOf(row("Provider and model", s.ready ? ((p => p ? (p.takes_accounts ? acctLabel(p, prov.current_account) : p.name) : s.provider)(prov.providers.find(x => x.id === s.provider)) + " · " + (s.model || "no model chosen")) : "Nothing chosen yet", btn("Change", "primary", modelSheet))));
   b.appendChild(head("Profiles"));
   const rows = prof.profiles.map(p => {
     const on = prof.active === p.id, c = document.createElement("div"); c.className = "acts";
@@ -2865,7 +2952,7 @@ async function pageModel(b) {
       const dlg = sheet("Rename profile", w, [btn("Cancel", "", () => dlg.close()), go]); i.focus(); i.select(); });
     const dl = btn("Delete", "danger", () => confirmBox("Delete " + p.name + "?", "The profile and its pinned models are removed. Chats stay.", "Delete", async () => { try { await op("profile_delete", { id: p.id }); refresh(); } catch (e) { toast(e.message); } }));
     c.append(u, rn, dl);
-    const r = row(p.name, [p.provider, p.model, p.base_url].filter(Boolean).join(" · "), c);
+    const r = row(p.name, [(p.provider_name || p.provider) + (p.account_name ? " · " + p.account_name : ""), p.model, p.base_url].filter(Boolean).join(" · "), c);
     const pins = p.pinned || [];
     if (pins.length) {
       const d = document.createElement("div"); d.className = "chips";
@@ -2881,6 +2968,39 @@ async function pageModel(b) {
   b.appendChild(cardOf(...rows, row(rows.length ? "Add another" : "No profiles yet", "A profile is a preset: a provider, a model, its address, how hard it thinks and the models you pinned. Switch between them in one click from the model button.", nw)));
   b.insertAdjacentHTML("beforeend", '<div class="note" id="syncNote">Profiles, pinned models and MCP addresses sync from your desktop when you are signed in there. <a href="#" id="toSync">Open Desktop sync</a></div>');
   $("toSync").onclick = e => { e.preventDefault(); settingsPage("sync"); };
+  b.appendChild(head("Custom providers"));
+  const cps = prov.providers.filter(p => p.custom);
+  const cpRows = cps.map(p => {
+    const c = document.createElement("div"); c.className = "acts";
+    const full = { id: p.id, name: p.name, format: p.format, base_url: p.base_url, default_model: p.default_model, has_key: p.has_key };
+    const ed = btn("Edit", "", () => customForm(prov, full, refresh));
+    const ts = btn("Test", "", async () => { ts.disabled = true; try { const r = await op("custom_provider_test", { id: p.id, model: p.default_model || undefined }); toast(r.message || (r.works !== false ? "Connected." : "The test failed.")); } catch (e) { toast(e.message); } ts.disabled = false; });
+    const dl = btn("Delete", "danger", () => removeCustomBox(full, refresh));
+    c.append(ed, ts, dl);
+    return row(p.name, fmtOf(prov, p.format).name + " (" + fmtOf(prov, p.format).path + ") · " + p.base_url + (p.has_key ? " · key saved" : " · no key"), c);
+  });
+  const addCp = btn("Add custom provider…", "primary", () => customForm(prov, null, refresh));
+  b.appendChild(cardOf(...cpRows, row(cps.length ? "Add another" : "No custom providers yet", "Your own server or a router: give it a name, pick the API format (OpenAI Chat, OpenAI Responses or Claude), its address and a key. It appears in the model list under its name. Add as many as you like.", addCp)));
+  b.appendChild(head("API key accounts"));
+  const keyed = prov.providers.filter(p => p.takes_accounts);
+  const asel = document.createElement("select"); asel.setAttribute("aria-label", "Provider");
+  asel.innerHTML = keyed.map(p => `<option value="${esc(p.id)}"${p.id === pageModel.acctProv ? " selected" : ""}>${esc(p.name)}</option>`).join("");
+  const accBox = document.createElement("div"), accCard = cardOf(row("Provider", "Several accounts (API keys) of one provider, for example Groq 1 and Groq 2. The key you have now is the Default account.", asel), accBox); accCard.className += " accounts";
+  const paintAcc = () => {
+    const p = keyed.find(x => x.id === asel.value) || keyed[0]; accBox.innerHTML = ""; if (!p) return; pageModel.acctProv = p.id;
+    (p.accounts || []).forEach(a => {
+      const c = document.createElement("div"); c.className = "acts";
+      const ed = btn("Edit", "", () => accountForm(p, a, refresh));
+      const hd = btn(a.hidden ? "Show" : "Hide", "", async () => { try { await op("account_hide", { provider: p.id, id: a.id, hidden: !a.hidden }); refresh(); } catch (e) { toast(e.message); } });
+      c.append(ed, hd); if (!a.default) c.append(btn("Delete", "danger", () => removeAccountBox(p, a, refresh)));
+      accBox.appendChild(row(p.name + " · " + a.name, [a.has_key ? "Key saved" : "No key", a.base_url, a.active ? "in use" : "", a.hidden ? "hidden" : ""].filter(Boolean).join(" · "), c));
+    });
+    accBox.appendChild(row("Add an account", "", btn("Add account…", "primary", () => accountForm(p, null, refresh))));
+  };
+  asel.onchange = paintAcc; paintAcc(); b.appendChild(accCard);
+  const rot = document.createElement("input"); rot.type = "checkbox"; rot.className = "switch"; rot.checked = !!prov.rotate_on_limit; rot.setAttribute("aria-label", "Switch to the next account at a rate limit");
+  rot.onchange = async () => { try { await op("settings_set", { rotate_on_limit: rot.checked }); dropCache("providers"); dropCache("settings"); toast(rot.checked ? "Will switch accounts at a rate limit" : "Will not switch accounts"); } catch (e) { rot.checked = !rot.checked; toast(e.message); } };
+  b.appendChild(cardOf(row("When an account hits its rate limit, switch to the next account", "On a rate limit (HTTP 429) or a quota error the next account of the same provider is tried once, and the chat says so. Never another provider. Off by default.", rot)));
   b.appendChild(head("Providers shown in the picker"));
   const hidden = new Set(hid.hidden_providers || []);
   const provRows = shownProviders(prov, [], null).map(p => {

@@ -494,7 +494,7 @@ pub fn shape_of(v: &Value) -> Option<Protocol> {
 /// The sentence that tells a person which provider to pick when the server answered in another wire format.
 pub fn wrong_format_hint(speaks: Protocol) -> String {
     use super::providers::format_label;
-    format!("This server speaks the {} format: pick \"Custom endpoint: {}\" (or set the API format to {}).", format_label(speaks), format_label(speaks), format_label(speaks))
+    format!("This server speaks the {0} format: set the API format of this provider to {0}.", format_label(speaks))
 }
 
 /// Anything in an error that points at another wire format: the server says which endpoint it wants.
@@ -1298,7 +1298,7 @@ mod responses_tests {
     }
 
     fn req(turns: &[Turn], system: &str, tools: &[ToolSpec]) -> Request {
-        build(find("custom-responses").unwrap(), "https://router.example/v1/", Some("sk-1"), "gpt-5", system, turns, tools)
+        build(find("custom:t-responses").unwrap(), "https://router.example/v1/", Some("sk-1"), "gpt-5", system, turns, tools)
     }
 
     // ---- request shape (golden)
@@ -1316,7 +1316,7 @@ mod responses_tests {
 
     #[test]
     fn no_system_prompt_means_no_instructions_and_no_key_means_no_header() {
-        let r = build(find("custom-responses").unwrap(), "http://127.0.0.1:1/v1", None, "m", "", &[Turn::User("x".into())], &[]);
+        let r = build(find("custom:t-responses").unwrap(), "http://127.0.0.1:1/v1", None, "m", "", &[Turn::User("x".into())], &[]);
         assert!(r.body.get("instructions").is_none() && r.body.get("tools").is_none() && r.headers.is_empty());
     }
 
@@ -1394,7 +1394,7 @@ mod responses_tests {
 
     #[test]
     fn the_claude_format_of_a_custom_endpoint_sends_the_key_both_ways_and_no_cache_field() {
-        let r = build(find("custom-claude").unwrap(), "https://router.example/v1", Some("k"), "m", "s", &[Turn::User("hi".into())], &[]);
+        let r = build(find("custom:t-claude").unwrap(), "https://router.example/v1", Some("k"), "m", "s", &[Turn::User("hi".into())], &[]);
         assert_eq!(r.url, "https://router.example/v1/messages");
         assert!(r.headers.contains(&("x-api-key".to_string(), "k".to_string())) && r.headers.contains(&("authorization".to_string(), "Bearer k".to_string())));
         assert!(r.body.get("cache_control").is_none());
@@ -1406,7 +1406,7 @@ mod responses_tests {
 
     #[test]
     fn the_chat_format_of_a_custom_endpoint_is_what_it_was() {
-        let r = build(find("custom").unwrap(), "https://x/v1", Some("k"), "m", "s", &[Turn::User("hi".into())], &[]);
+        let r = build(find("custom:t-chat").unwrap(), "https://x/v1", Some("k"), "m", "s", &[Turn::User("hi".into())], &[]);
         assert_eq!(r.url, "https://x/v1/chat/completions");
         assert_eq!(r.body["messages"][0], json!({"role": "system", "content": "s"}));
     }
@@ -1505,7 +1505,7 @@ mod responses_tests {
         let responses = openai_text();
         let claude = json!({"type": "message", "role": "assistant", "content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"});
         let e = parse(Protocol::OpenAi, &responses).unwrap_err();
-        assert!(e.starts_with("This server speaks the OpenAI Responses format") && e.contains("Custom endpoint: OpenAI Responses"), "{e}");
+        assert!(e.starts_with("This server speaks the OpenAI Responses format") && e.contains("set the API format of this provider to OpenAI Responses"), "{e}");
         let e = parse(Protocol::OpenAi, &claude).unwrap_err();
         assert!(e.contains("Claude format"), "{e}");
         let e = parse(Protocol::OpenAiResponses, &chat).unwrap_err();

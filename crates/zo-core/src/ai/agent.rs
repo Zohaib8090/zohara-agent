@@ -192,6 +192,8 @@ pub enum Event {
     /// The agent keeps making the same call: `n` calls in the repeating pattern, the tool of the latest one. Only a notice for the
     /// person (who may press Stop); nothing is stopped and the model is not told.
     Stuck { n: usize, tool: String },
+    /// A short notice for the person, not part of the answer (for example "Switched to Groq 2 (Groq 1 hit its limit)").
+    Notice(String),
 }
 
 /// Identical calls in a row that make a notice.
@@ -397,12 +399,35 @@ pub(crate) fn with_format_hint(p: &Provider, err: String) -> String {
             Protocol::Anthropic => ("/messages", ["OpenAI Chat", "OpenAI Responses"]),
             _ => ("/chat/completions", ["OpenAI Responses", "Claude format"]),
         };
-        return format!("The server does not take {path} ({err}). It may speak another API format: try \"Custom endpoint: {}\" or \"Custom endpoint: {}\".", others[0], others[1]);
+        return format!("The server does not take {path} ({err}). It may speak another API format: try {} or {} as the API format of this provider.", others[0], others[1]);
     }
     err
 }
 
+/// One request. When the account hits its rate limit and the person turned the setting on, the next account of the same provider
+/// (never another provider) is tried once, with a notice.
 fn ask(cfg: &Config, turns: &[Turn], specs: &[wire::ToolSpec], cancel: &AtomicBool, on_event: &mut dyn FnMut(Event)) -> Result<Reply, String> {
+    let first = ask_once(cfg, turns, specs, cancel, on_event);
+    let Err(e) = &first else { return first };
+    if !cfg.provider.takes_accounts() || cancel.load(Ordering::Relaxed) || !super::accounts::is_limit_error(e) || !super::accounts::rotate_on_limit() {
+        return first;
+    }
+    let Some((next, key)) = super::accounts::next_after(cfg.provider.id, cfg.key.as_deref()) else { return first };
+    let current = super::accounts::name_for_key(cfg.provider.id, cfg.key.as_deref());
+    on_event(Event::Notice(format!("Switched to {} ({current} hit its limit)", next.name)));
+    // the next account's own address, else the one in use unless that was the previous account's own (then the provider's)
+    let base_url = super::accounts::address_of(cfg.provider.id, &next.id).unwrap_or_else(|| {
+        if super::accounts::list(cfg.provider.id).iter().any(|a| a.base_url.as_deref() == Some(cfg.base_url.as_str()) && a.name == current) {
+            Selection::load().base_urls.get(cfg.provider.id).filter(|u| !u.trim().is_empty()).cloned().unwrap_or_else(|| cfg.provider.base_url.to_string())
+        } else {
+            cfg.base_url.clone()
+        }
+    });
+    let retry = Config { provider: cfg.provider, base_url, model: cfg.model.clone(), key: Some(key), system: cfg.system.clone(), vision: cfg.vision };
+    ask_once(&retry, turns, specs, cancel, on_event)
+}
+
+fn ask_once(cfg: &Config, turns: &[Turn], specs: &[wire::ToolSpec], cancel: &AtomicBool, on_event: &mut dyn FnMut(Event)) -> Result<Reply, String> {
     if crate::tenant::is_restricted() {
         check_restricted_provider(cfg.provider, &cfg.base_url)?;
     }
@@ -1134,6 +1159,7 @@ mod tests {
             Event::Usage(_) => "usage".to_string(),
             Event::Steps(n) => format!("steps:{n}"),
             Event::Stuck { n, .. } => format!("stuck:{n}"),
+            Event::Notice(t) => format!("notice:{t}"),
         })).unwrap();
         assert_eq!(events, ["text:Checking.", "start:zohara_shell", "steps:1", "done:true:zo-loop-ok", "text:It printed zo-loop-ok."]);
         assert_eq!(history.len(), 4);
@@ -1224,6 +1250,7 @@ mod tests {
             Event::Usage(_) => "usage".to_string(),
             Event::Steps(n) => format!("steps:{n}"),
             Event::Stuck { n, .. } => format!("stuck:{n}"),
+            Event::Notice(t) => format!("notice:{t}"),
         })).unwrap();
         assert_eq!(events, ["delta:Checking ", "delta:now.", "text:Checking now.", "start:zohara_shell", "steps:1", "done:true:stream-ok", "delta:It said ", "delta:stream-ok.", "text:It said stream-ok."]);
         let seen = server.join().unwrap();
@@ -1430,7 +1457,7 @@ mod tests {
     #[test]
     fn the_loop_works_against_a_server_that_speaks_only_responses_without_streaming() {
         let m = responses_router(false);
-        let (r, history, events) = run_loop("custom-responses", &m.url);
+        let (r, history, events) = run_loop("custom:t-responses", &m.url);
         assert!(r.is_ok(), "{r:?} {events:?}");
         assert_eq!(history.len(), 4);
         assert!(events.contains(&"done:true:zo-resp-ok".to_string()) && events.contains(&"text:It printed zo-resp-ok.".to_string()), "{events:?}");
@@ -1456,7 +1483,7 @@ mod tests {
     #[test]
     fn the_loop_works_against_a_server_that_speaks_only_responses_and_streams_in_split_chunks() {
         let m = responses_router(true);
-        let (r, history, events) = run_loop("custom-responses", &m.url);
+        let (r, history, events) = run_loop("custom:t-responses", &m.url);
         assert!(r.is_ok(), "{r:?} {events:?}");
         assert_eq!(history.len(), 4);
         let deltas: Vec<&String> = events.iter().filter(|e| e.starts_with("delta:")).collect();
@@ -1471,7 +1498,7 @@ mod tests {
     fn the_chat_provider_against_a_responses_only_server_says_which_provider_to_pick() {
         // a plain 404 on /chat/completions: the server has no such endpoint, so another format is suggested
         let m = responses_router(false);
-        let (r, ..) = run_loop("custom", &m.url);
+        let (r, ..) = run_loop("custom:t-chat", &m.url);
         let e = r.unwrap_err();
         assert!(e.contains("/chat/completions") && e.contains("OpenAI Responses") && e.contains("Claude format"), "{e}");
         assert_eq!(m.paths(), ["POST /v1/chat/completions"]);
@@ -1480,13 +1507,13 @@ mod tests {
     #[test]
     fn an_error_that_names_the_responses_endpoint_becomes_the_plain_hint() {
         let m = Mock::start(|_, _, _| Answer::json(400, json!({"error": {"message": "This model is not supported in the chat completions API. Use /v1/responses instead."}})));
-        let (r, ..) = run_loop("custom", &m.url);
+        let (r, ..) = run_loop("custom:t-chat", &m.url);
         let e = r.unwrap_err();
-        assert!(e.starts_with("This server speaks the OpenAI Responses format: pick \"Custom endpoint: OpenAI Responses\""), "{e}");
+        assert!(e.starts_with("This server speaks the OpenAI Responses format: set the API format of this provider to OpenAI Responses."), "{e}");
         // 405 and "unsupported" are hinted too; a 401 or a 500 are left alone
         for (status, msg, hinted) in [(405, "Method Not Allowed", true), (400, "unsupported operation", true), (401, "bad key", false), (500, "boom", false)] {
             let m = Mock::start(move |_, _, _| Answer::json(status, json!({"error": {"message": msg}})));
-            let e = run_loop("custom", &m.url).0.unwrap_err();
+            let e = run_loop("custom:t-chat", &m.url).0.unwrap_err();
             assert_eq!(e.contains("another API format"), hinted, "{status}: {e}");
         }
     }
@@ -1495,15 +1522,15 @@ mod tests {
     fn a_responses_body_or_stream_sent_to_the_chat_provider_is_recognised() {
         let body = json!({"object": "response", "status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "hi"}]}]});
         let m = Mock::start(move |_, _, _| Answer::json(200, body.clone()));
-        let e = run_loop("custom", &m.url).0.unwrap_err();
+        let e = run_loop("custom:t-chat", &m.url).0.unwrap_err();
         assert!(e.starts_with("This server speaks the OpenAI Responses format"), "{e}");
         let m = Mock::start(|_, _, _| Answer::sse(vec!["data: {\"type\":\"response.created\",\"response\":{}}\n\n".into(), "data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n".into()]));
-        let e = run_loop("custom", &m.url).0.unwrap_err();
+        let e = run_loop("custom:t-chat", &m.url).0.unwrap_err();
         assert!(e.starts_with("This server speaks the OpenAI Responses format"), "{e}");
         // and the Claude shape sent to the Responses provider
         let claude = json!({"type": "message", "role": "assistant", "content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"});
         let m = Mock::start(move |_, _, _| Answer::json(200, claude.clone()));
-        let e = run_loop("custom-responses", &m.url).0.unwrap_err();
+        let e = run_loop("custom:t-responses", &m.url).0.unwrap_err();
         assert!(e.contains("Claude format"), "{e}");
     }
 
@@ -1520,7 +1547,7 @@ mod tests {
                 Answer::json(200, json!({"type": "message", "role": "assistant", "content": [{"type": "text", "text": "Done."}], "stop_reason": "end_turn"}))
             }
         });
-        let (r, history, events) = run_loop("custom-claude", &m.url);
+        let (r, history, events) = run_loop("custom:t-claude", &m.url);
         assert!(r.is_ok(), "{r:?} {events:?}");
         assert_eq!(history.len(), 4);
         let seen = m.seen.lock().unwrap();
@@ -1533,12 +1560,12 @@ mod tests {
         // the pieces of a stream with no content type that says so
         let sse = "data:{\"type\":\"response.output_text.delta\",\"delta\":\"hel\"}\n\ndata:{\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\ndata:[DONE]\n\n";
         let m = Mock::start(move |_, _, _| Answer { status: 200, ctype: "text/plain", pieces: vec![sse.to_string()] });
-        let (r, h, _) = run_loop("custom-responses", &m.url);
+        let (r, h, _) = run_loop("custom:t-responses", &m.url);
         assert!(r.is_ok());
         assert!(matches!(&h[1], Turn::Assistant { text, .. } if text == "hello"), "{h:?}");
         // a page that is not JSON at all
         let m = Mock::start(|_, _, _| Answer { status: 200, ctype: "text/html", pieces: vec!["<html>login</html>".into()] });
-        let e = run_loop("custom-responses", &m.url).0.unwrap_err();
+        let e = run_loop("custom:t-responses", &m.url).0.unwrap_err();
         assert!(e.contains("not valid JSON") && e.contains("<html>"), "{e}");
     }
 }

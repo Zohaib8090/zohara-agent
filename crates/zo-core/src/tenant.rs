@@ -273,14 +273,14 @@ pub(crate) mod testkit {
         (url, h)
     }
 
-    /// Makes the tenant use the fake model server as its "custom" provider, with its own key.
+    /// Makes the tenant use the fake model server as a custom provider (`custom:t-chat`, a test one), with its own key.
     pub fn use_model(t: &Tenant, url: &str) {
         crate::ai::agent::test_allow_local(&t.id);
         scope(t, || {
-            let mut sel = crate::ai::Selection { provider: "custom".into(), model: "m".into(), ..Default::default() };
-            sel.base_urls.insert("custom".into(), url.to_string());
+            let mut sel = crate::ai::Selection { provider: "custom:t-chat".into(), model: "m".into(), ..Default::default() };
+            sel.base_urls.insert("custom:t-chat".into(), url.to_string());
             sel.save();
-            crate::ai::keys::set("custom", "sk-test-bring-your-own-0001").unwrap();
+            crate::ai::keys::set("custom:t-chat", "sk-test-bring-your-own-0001").unwrap();
         });
     }
 }
@@ -523,14 +523,14 @@ mod tests {
             assert!(crate::ai::claude_code::run_in_mode(None, "sonnet", None, &mut s, "hi", "", &std::sync::Arc::new(AtomicBool::new(false)), &mut |_| {}).is_err());
             assert!(crate::ai::claude_code::complete("haiku", "s", "p", &std::sync::Arc::new(AtomicBool::new(false))).is_err());
             for url in ["http://127.0.0.1:11434/v1", "https://127.0.0.1/v1", "https://localhost/v1", "https://10.0.0.5/v1", "https://169.254.169.254/latest", "https://0x7f.1/v1", "https://[::1]/v1", "http://api.openai.com/v1", "https://user:pw@api.openai.com/v1", "https://api.openai.com@127.0.0.1/v1", "https://127.0.0.1\\@api.openai.com/v1", "https://127.1/v1", "https://2130706433/v1", "https://[::ffff:7f00:1]/v1", "https://[::ffff:127.0.0.1]/v1", "https://192.168.1.1/v1", "https://100.64.0.1/v1", "https://intranet/v1", "https://x.internal/v1", "https://nas.local/v1", "ftp://api.openai.com/v1", "", "https://", "https:///v1"] {
-                let mut sel = crate::ai::Selection { provider: "custom".into(), model: "m".into(), ..Default::default() };
-                sel.base_urls.insert("custom".into(), url.into());
-                crate::ai::keys::set("custom", "k").unwrap();
+                let mut sel = crate::ai::Selection { provider: "custom:t-chat".into(), model: "m".into(), ..Default::default() };
+                sel.base_urls.insert("custom:t-chat".into(), url.into());
+                crate::ai::keys::set("custom:t-chat", "k").unwrap();
                 assert!(from_sel(&sel).is_err(), "{url}");
                 assert!(crate::tools::web::public_https_url(url).is_err(), "{url}");
             }
             // the Responses and Claude-format custom endpoints are held to the same rule
-            for id in ["custom-responses", "custom-claude"] {
+            for id in ["custom:t-responses", "custom:t-claude"] {
                 for url in ["http://127.0.0.1:11434/v1", "https://10.0.0.5/v1", "http://api.example.com/v1", "https://169.254.169.254/latest", "https://127.1/v1", ""] {
                     let mut sel = crate::ai::Selection { provider: id.into(), model: "m".into(), ..Default::default() };
                     sel.base_urls.insert(id.into(), url.into());
@@ -542,7 +542,7 @@ mod tests {
             // a local provider keeps its address on the same machine: refused as well
             let sel = crate::ai::Selection { provider: "ollama".into(), model: "m".into(), ..Default::default() };
             assert!(from_sel(&sel).is_err());
-            assert!(agent::list_models(crate::ai::providers::find("custom").unwrap(), "http://127.0.0.1:1/v1", None).is_err());
+            assert!(agent::list_models(crate::ai::providers::find("custom:t-chat").unwrap(), "http://127.0.0.1:1/v1", None).is_err());
             assert!(agent::detect_local().is_empty());
             for ok in ["https://api.openai.com/v1", "https://openrouter.ai/api/v1", "https://example.com:8443/v1/", "https://93.184.216.34/v1", "HTTPS://API.OPENAI.COM/v1"] {
                 assert!(crate::tools::web::public_https_url(ok).is_ok(), "{ok}");
@@ -623,7 +623,7 @@ mod tests {
     }
 
     fn cfg_for(url: &str) -> Config<'static> {
-        Config { provider: crate::ai::providers::find("custom").unwrap(), base_url: url.into(), model: "m".into(), key: Some("k".into()), system: agent::SYSTEM_PROMPT.into(), vision: true }
+        Config { provider: crate::ai::providers::find("custom:t-chat").unwrap(), base_url: url.into(), model: "m".into(), key: Some("k".into()), system: agent::SYSTEM_PROMPT.into(), vision: true }
     }
 
     #[test]

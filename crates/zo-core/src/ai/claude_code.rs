@@ -450,6 +450,7 @@ mod tests {
                 Event::Usage(_) => "usage".to_string(),
                 Event::Steps(n) => format!("steps:{n}"),
                 Event::Stuck { n, .. } => format!("stuck:{n}"),
+                Event::Notice(t) => format!("notice:{t}"),
             })).is_none());
         }
         assert_eq!(out, ["start:zohara_system", "done:zohara_system:true:OS: Linux", "text:Kernel: Linux"]);

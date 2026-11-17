@@ -16,6 +16,9 @@ pub struct Profile {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// The account of the provider this profile was made from (see `accounts`); none = the Default account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision: Option<bool>,
     /// Models of this profile that show in the model menu (so one click switches to that profile and model).
@@ -89,11 +92,12 @@ pub fn update(id: &str, base_url: Option<&str>, effort: Option<&str>) -> Result<
     Ok(())
 }
 
-/// The keyring entry of a provider's key: the profile's own when one is chosen, else the shared one of the provider.
+/// The keyring entry of a provider's key: the profile's own when one is chosen, else the one of the account in use
+/// (the provider's own id for the Default account, `<provider>:<account>` for another one).
 pub fn key_id(sel: &Selection, provider_id: &str) -> String {
     match &sel.profile {
         Some(id) => format!("{provider_id}@{id}"),
-        None => provider_id.to_string(),
+        None => super::accounts::key_id(provider_id, sel.account_for(provider_id)),
     }
 }
 
@@ -101,8 +105,14 @@ pub fn key_id(sel: &Selection, provider_id: &str) -> String {
 pub fn get_key(sel: &Selection, provider_id: &str) -> Option<String> {
     // the shared key of the provider only goes to the provider's own address: a profile (which can arrive by sync) that points
     // somewhere else must have a key of its own
-    let shared_ok = sel.profile.is_some() && super::providers::find(provider_id).is_some_and(|p| p.key_fits(&sel.base_url_for(p)));
-    keys::get(&key_id(sel, provider_id)).or_else(|| if shared_ok { keys::get(provider_id) } else { None })
+    // (a custom provider's key was typed for its own address, so a profile with another address does not get it either)
+    let shared_ok = sel.profile.is_some()
+        && super::providers::find(provider_id).is_some_and(|p| {
+            let base = sel.base_url_for(p);
+            let own = sel.account_for(p.id).and_then(|a| super::accounts::address_of(p.id, a)).unwrap_or_else(|| p.base_url.to_string());
+            p.key_fits(&base) && (!p.is_custom() || super::providers::same_address(&base, &own))
+        });
+    keys::get(&key_id(sel, provider_id)).or_else(|| if shared_ok { keys::get(&super::accounts::key_id(provider_id, sel.account_for(provider_id))) } else { None })
 }
 
 /// Does this profile (or, without one, this provider) have a key of its own?
@@ -116,7 +126,7 @@ fn new_id() -> String {
 
 fn from_selection(id: String, name: &str, sel: &Selection) -> Profile {
     let base_url = sel.base_urls.get(&sel.provider).cloned();
-    Profile { id, name: name.trim().to_string(), provider: sel.provider.clone(), model: sel.model.clone(), base_url, effort: sel.effort.clone(), vision: sel.vision, pinned: Vec::new(), updated: 0 }
+    Profile { id, name: name.trim().to_string(), provider: sel.provider.clone(), model: sel.model.clone(), base_url, effort: sel.effort.clone(), account: sel.account_for(&sel.provider).map(str::to_string), vision: sel.vision, pinned: Vec::new(), updated: 0 }
 }
 
 /// Makes a profile from the current choices. The key currently in use is copied into the new profile, so it works at once.
@@ -230,6 +240,7 @@ impl Selection {
             }
         }
         self.effort = p.effort.clone();
+        self.account = p.account.clone();
         self.vision = p.vision;
         self.profile = Some(p.id.clone());
     }

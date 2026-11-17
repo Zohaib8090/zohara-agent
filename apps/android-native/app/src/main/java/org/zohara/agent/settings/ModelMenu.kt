@@ -93,8 +93,8 @@ class ModelMenuController(
             try { api.models(it).also { r -> modelsCache.put(ModelLogic.cacheKey(it, ""), r) } } catch (e: ApiException) { null }
           }
           _state.value = ModelMenuState(
-            loading = false, groups = ModelLogic.menuGroups(prof, name), activeProfile = prof.active, currentModel = status.model,
-            currentProviderName = name(status.provider), hasProvider = status.ready || status.provider.isNotBlank(),
+            loading = false, groups = ModelLogic.menuGroups(prof, { pr -> ModelLogic.profileProviderLabel(pr, prov.providers) }, name), activeProfile = prof.active, currentModel = status.model,
+            currentProviderName = prov.providers.firstOrNull { it.id == status.provider }?.let { ModelLogic.accountLabel(it, prov.currentAccount) } ?: name(status.provider), hasProvider = status.ready || status.provider.isNotBlank(),
             efforts = models?.efforts.orEmpty(), effort = active?.effort ?: models?.effort.orEmpty(),
           )
         }
@@ -199,7 +199,7 @@ fun ModelMenuBody(
         }
         for (g in s.groups) {
           MenuHeader(g.header)
-          for (m in g.models) MenuRow(m, g.provider, g.profileId == s.activeProfile && m == s.currentModel) { onPick(g.profileId, m) }
+          for (m in g.models) MenuRow(m, g.label, g.profileId == s.activeProfile && m == s.currentModel) { onPick(g.profileId, m) }
         }
         if (s.efforts.isNotEmpty()) EffortRow(s.effort, s.efforts, onEffort)
         MenuLink(

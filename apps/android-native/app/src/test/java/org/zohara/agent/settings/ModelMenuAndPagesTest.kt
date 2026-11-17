@@ -48,6 +48,22 @@ class ModelMenuAndPagesTest {
     assertTrue(s.hasProvider)
   }
 
+  @Test fun theMenuNamesTheProviderWithTheAccountOfEachProfile() {
+    fake.on("providers", """{"ok":true,"current":"groq","current_account":"groq-2","providers":[
+      {"id":"groq","name":"Groq","has_key":true,"takes_accounts":true,"accounts":[{"id":"default","name":"Default","default":true,"has_key":true},{"id":"groq-2","name":"Groq 2","has_key":true,"active":true}]},
+      {"id":"openrouter","name":"OpenRouter","has_key":true}]}""")
+    fake.on("profiles", """{"ok":true,"active":"p1","profiles":[
+      {"id":"p1","name":"Fast","provider":"groq","account":"groq-2","model":"llama","pinned":["llama"]},
+      {"id":"p2","name":"Plain","provider":"groq","model":"mixtral","pinned":["mixtral"]},
+      {"id":"p3","name":"Free","provider":"openrouter","model":"deepseek-chat","pinned":[]}]}""")
+    fake.on("status", """{"ok":true,"mode":"Auto","model":"llama","provider":"groq","ready":true,"version":"0.1.0"}""")
+    val m = menu(); m.start()
+    val s = wait(m.state) { !it.loading }
+    assertEquals(listOf("Fast · Groq · Groq 2", "Plain · Groq · Default", "Free · OpenRouter"), s.groups.map { it.header })
+    assertEquals("Groq · Groq 2", s.groups[0].label)
+    assertEquals("the line of the model in use", "Groq · Groq 2", s.currentProviderName)
+  }
+
   @Test fun inUseNowShowsWhenTheModelIsNotInAnyGroup() {
     fake.on("status", """{"ok":true,"mode":"Auto","model":"claude-opus-5","provider":"anthropic","ready":true,"version":"0.1.0"}""")
     val m = menu(); m.start()

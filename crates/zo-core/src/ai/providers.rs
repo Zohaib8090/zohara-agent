@@ -65,11 +65,6 @@ static ALL: &[Provider] = &[
     local("vllm", "vLLM (this computer)", "http://127.0.0.1:8000/v1"),
     local("sglang", "SGLang (this computer)", "http://127.0.0.1:30000/v1"),
     Provider { id: "claude-code", name: "Claude Code (your subscription, experimental)", protocol: ClaudeCode, base_url: "", local: true, models: &["sonnet", "opus", "haiku"] },
-    // any other OpenAI-compatible server: the person types the address
-    // The three wire formats of a server whose address the person types. The key typed for the address is sent only there.
-    Provider { id: "custom", name: "Custom endpoint: OpenAI Chat (/v1/chat/completions)", protocol: OpenAi, base_url: "http://127.0.0.1:8000/v1", local: false, models: &[] },
-    Provider { id: "custom-responses", name: "Custom endpoint: OpenAI Responses (/v1/responses)", protocol: OpenAiResponses, base_url: "http://127.0.0.1:8000/v1", local: false, models: &[] },
-    Provider { id: "custom-claude", name: "Custom endpoint: Claude format (/v1/messages)", protocol: Anthropic, base_url: "http://127.0.0.1:8000/v1", local: false, models: &[] },
 ];
 
 /// The wire formats a person can pick by name (the "API format" of a provider): `chat`, `responses` and `claude`.
@@ -91,7 +86,7 @@ pub fn format_name(name: &str) -> Option<&'static str> {
     })
 }
 
-/// What the person has to pick for a wire format, in a sentence ("pick Custom endpoint: OpenAI Responses").
+/// What the person has to pick for a wire format, in a sentence ("set the API format to OpenAI Responses").
 pub fn format_label(protocol: Protocol) -> &'static str {
     match protocol {
         OpenAiResponses => "OpenAI Responses",
@@ -115,8 +110,52 @@ fn variants() -> &'static [Provider] {
     })
 }
 
+/// The built-in providers. The named custom providers the person added (see `custom`) are not in it: `listed` has them too.
 pub fn all() -> &'static [Provider] {
     ALL
+}
+
+/// Every provider the person can pick now: the built-in ones, then the custom providers they named.
+pub fn listed() -> Vec<&'static Provider> {
+    ALL.iter().chain(super::custom::providers()).collect()
+}
+
+/// A provider made at run time (a named custom one). It lives as long as the program; the same one is returned for the same
+/// content, so a provider that is edited leaves one small leftover and nothing grows while it stays as it is.
+pub(crate) fn leak(p: Provider) -> &'static Provider {
+    static CACHE: std::sync::Mutex<Vec<&'static Provider>> = std::sync::Mutex::new(Vec::new());
+    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(f) = c.iter().find(|q| q.id == p.id && q.name == p.name && q.protocol == p.protocol && q.base_url == p.base_url && q.local == p.local && q.models == p.models) {
+        return f;
+    }
+    let l: &'static Provider = Box::leak(Box::new(p));
+    c.push(l);
+    l
+}
+
+/// The cache is looked at before anything is leaked: asking again for a provider that is already known costs nothing.
+pub(crate) fn leak_custom(id: &str, name: &str, protocol: Protocol, base_url: &str, model: Option<&str>) -> &'static Provider {
+    static CACHE: std::sync::Mutex<Vec<&'static Provider>> = std::sync::Mutex::new(Vec::new());
+    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(f) = c.iter().find(|q| q.id == id && q.name == name && q.protocol == protocol && q.base_url == base_url && q.models.first().copied() == model && q.models.len() == model.iter().count()) {
+        return f;
+    }
+    let models: &'static [&'static str] = match model {
+        Some(m) => Box::leak(vec![leak_str(m)].into_boxed_slice()),
+        None => &[],
+    };
+    let l: &'static Provider = Box::leak(Box::new(Provider { id: leak_str(id), name: leak_str(name), protocol, base_url: leak_str(base_url), local: false, models }));
+    c.push(l);
+    l
+}
+
+pub(crate) fn leak_str(s: &str) -> &'static str {
+    Box::leak(s.to_string().into_boxed_str())
+}
+
+/// Are these two the same address (a closing slash and surrounding spaces do not count)?
+pub fn same_address(a: &str, b: &str) -> bool {
+    a.trim().trim_end_matches('/') == b.trim().trim_end_matches('/')
 }
 
 /// The host part of an http(s) address, lowercase, without user name or port (`""` when there is none).
@@ -129,9 +168,14 @@ fn host_of(url: &str) -> String {
 }
 
 impl Provider {
-    /// One of the three "Custom endpoint" providers (chat, responses, claude): any address, with a key typed for that address.
+    /// A custom provider the person named (`custom:<slug>`): any address and API format, with a key typed for that address.
     pub fn is_custom(&self) -> bool {
-        self.id == "custom" || self.id.starts_with("custom-")
+        self.id.starts_with("custom:")
+    }
+
+    /// May the person add several named accounts (API keys) for it? Every provider with a key can; a local server and Claude Code have none.
+    pub fn takes_accounts(&self) -> bool {
+        !self.local && self.protocol != Protocol::ClaudeCode
     }
 
     /// This provider speaking `format` (a name from `format_protocol`), when it is a host that can: a hosted provider of the chat kind.
@@ -151,7 +195,8 @@ impl Provider {
             return Some(self);
         }
         if self.is_custom() {
-            return ALL.iter().find(|p| p.is_custom() && p.protocol == protocol);
+            // the same custom provider speaking another format (used to say which format fits when a test fails)
+            return Some(leak(Provider { protocol, ..self.clone() }));
         }
         variants().iter().find(|v| v.id == self.id && v.protocol == protocol)
     }
@@ -170,7 +215,37 @@ impl Provider {
 }
 
 pub fn find(id: &str) -> Option<&'static Provider> {
-    ALL.iter().find(|p| p.id == id)
+    ALL.iter().find(|p| p.id == id).or_else(|| {
+        #[cfg(test)]
+        if let Some(f) = id.strip_prefix("custom:t-").filter(|f| format_protocol(f).is_some()) {
+            return Some(test_custom(f));
+        }
+        if id.starts_with("custom:") { super::custom::resolve(id) } else { None }
+    })
+}
+
+/// A custom provider for tests that need one without saving anything: `custom:t-chat`, `custom:t-responses`, `custom:t-claude`.
+#[cfg(test)]
+pub(crate) fn test_custom(format: &str) -> &'static Provider {
+    let protocol = format_protocol(format).expect("a format");
+    leak(Provider { id: leak_str(&format!("custom:t-{format}")), name: "Test endpoint", protocol, base_url: "http://127.0.0.1:8000/v1", local: false, models: &[] })
+}
+
+/// An address a person typed for a provider: empty (the provider's default), or an http(s) address; a restricted account only a
+/// public https one. The key is only sent to the provider's own host (see `key_fits`).
+pub fn check_base_url(p: &Provider, u: &str) -> Result<(), String> {
+    let u = u.trim();
+    if u.is_empty() || p.protocol == Protocol::ClaudeCode {
+        return Ok(());
+    }
+    super::probe::check_address(u)?;
+    if !p.key_fits(u) {
+        return Err(format!("{} can only be used at its own address (its key would be sent there). For another address add a custom provider.", p.name));
+    }
+    if crate::tenant::is_restricted() {
+        super::agent::check_restricted_provider(p, u)?;
+    }
+    Ok(())
 }
 
 /// Can this model look at pictures? Anthropic and Gemini models can; OpenAI's, apart from a few old and small ones. For the many
@@ -196,22 +271,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_three_custom_endpoints_have_their_labels_and_formats() {
-        let c = find("custom").unwrap();
-        let r = find("custom-responses").unwrap();
-        let m = find("custom-claude").unwrap();
-        assert_eq!(c.name, "Custom endpoint: OpenAI Chat (/v1/chat/completions)");
-        assert_eq!(r.name, "Custom endpoint: OpenAI Responses (/v1/responses)");
-        assert_eq!(m.name, "Custom endpoint: Claude format (/v1/messages)");
+    fn custom_providers_are_named_and_not_in_the_built_in_list() {
+        let c = test_custom("chat");
+        let r = test_custom("responses");
+        let m = test_custom("claude");
         assert_eq!((c.protocol, r.protocol, m.protocol), (Protocol::OpenAi, Protocol::OpenAiResponses, Protocol::Anthropic));
-        assert!([c, r, m].iter().all(|p| p.is_custom() && !p.local && p.models.is_empty() && p.takes_format() == false));
-        assert_eq!(all().iter().filter(|p| p.is_custom()).count(), 3);
+        assert!([c, r, m].iter().all(|p| p.is_custom() && !p.local && p.models.is_empty() && !p.takes_format() && p.takes_accounts()));
+        assert_eq!(all().iter().filter(|p| p.is_custom()).count(), 0, "the built-in list has no custom provider: the person adds them");
+        assert!(!all().iter().any(|p| p.id == "custom" || p.id.starts_with("custom-")));
         assert!(!find("openai").unwrap().is_custom() && !find("ollama").unwrap().is_custom() && !find("anthropic").unwrap().is_custom());
+        assert!(find("custom").is_none() && find("custom:nope").is_none());
+    }
+
+    #[test]
+    fn who_can_have_accounts() {
+        assert!(find("groq").unwrap().takes_accounts() && find("openai").unwrap().takes_accounts() && find("anthropic").unwrap().takes_accounts() && find("gemini").unwrap().takes_accounts());
+        assert!(!find("ollama").unwrap().takes_accounts() && !find("claude-code").unwrap().takes_accounts());
     }
 
     #[test]
     fn a_custom_endpoint_key_goes_to_any_address_and_the_others_only_to_their_own_host() {
-        for id in ["custom", "custom-responses", "custom-claude"] {
+        for id in ["custom:t-chat", "custom:t-responses", "custom:t-claude"] {
             assert!(find(id).unwrap().key_fits("https://router.example/v1"), "{id}");
         }
         assert!(find("openai").unwrap().key_fits("https://api.openai.com/v2") && !find("openai").unwrap().key_fits("https://router.example/v1"));
@@ -242,16 +322,17 @@ mod tests {
         // a local server and a custom endpoint do not change format this way
         let l = find("ollama").unwrap();
         assert!(std::ptr::eq(l.with_format(Some("responses")), l));
-        let c = find("custom").unwrap();
+        let c = find("custom:t-chat").unwrap();
         assert!(std::ptr::eq(c.with_format(Some("responses")), c));
     }
 
     #[test]
     fn siblings_are_the_provider_for_another_format() {
-        let c = find("custom").unwrap();
-        assert_eq!(c.sibling(Protocol::OpenAiResponses).unwrap().id, "custom-responses");
-        assert_eq!(find("custom-responses").unwrap().sibling(Protocol::Anthropic).unwrap().id, "custom-claude");
-        assert_eq!(find("custom-claude").unwrap().sibling(Protocol::OpenAi).unwrap().id, "custom");
+        let c = find("custom:t-chat").unwrap();
+        let sib = c.sibling(Protocol::OpenAiResponses).unwrap();
+        assert_eq!((sib.id, sib.protocol, sib.base_url), ("custom:t-chat", Protocol::OpenAiResponses, c.base_url), "the same custom provider, speaking another format");
+        assert_eq!(find("custom:t-responses").unwrap().sibling(Protocol::Anthropic).unwrap().protocol, Protocol::Anthropic);
+        assert_eq!(find("custom:t-claude").unwrap().sibling(Protocol::OpenAi).unwrap().protocol, Protocol::OpenAi);
         let o = find("openai").unwrap();
         let s = o.sibling(Protocol::OpenAiResponses).unwrap();
         assert_eq!((s.id, s.protocol), ("openai", Protocol::OpenAiResponses));
@@ -260,7 +341,7 @@ mod tests {
 
     #[test]
     fn custom_endpoints_judge_pictures_by_model_name_like_other_hosts() {
-        for id in ["custom", "custom-responses", "custom-claude"] {
+        for id in ["custom:t-chat", "custom:t-responses", "custom:t-claude"] {
             let p = find(id).unwrap();
             assert!(can_see(p, "gpt-5") && !can_see(p, "tiny-text-model"), "{id}");
         }

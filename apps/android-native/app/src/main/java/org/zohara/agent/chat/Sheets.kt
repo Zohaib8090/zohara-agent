@@ -80,7 +80,7 @@ fun ModelSheetContent(ui: PillsUi, onPickModel: (profileId: String?, model: Stri
     val plain = ui.profiles.filter { it.pinned.isEmpty() && it.id != ui.activeProfile }
     if (plain.isNotEmpty()) {
       PopHead("Profiles")
-      for (p in plain) ChoiceRowSheet(p.name, listOf(p.provider, p.model).filter { it.isNotBlank() }.joinToString(" · "), current = false, onClick = { onPickProfile(p.id) })
+      for (p in plain) ChoiceRowSheet(p.name, listOf((p.providerName ?: p.provider) + (p.accountName?.let { " · $it" } ?: ""), p.model).filter { it.isNotBlank() }.joinToString(" · "), current = false, onClick = { onPickProfile(p.id) })
     }
     if (!ui.ready && pinned.isEmpty() && plain.isEmpty()) PopHead("Choose a provider to begin")
     Box(Modifier.fillMaxWidth().padding(vertical = 6.dp).height(1.dp).background(ZoTheme.colors.line8))
