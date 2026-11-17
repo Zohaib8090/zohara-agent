@@ -37,7 +37,7 @@ const MAP: &[(&str, &str)] = &[
 ];
 
 /// Colours that look right in both themes.
-const SAME: &[&str] = &["#22C55E", "#4C9AFF", "#C0392B", "#E5736A", "#3B82F6", "#F97316", "#10B981", "#A78BFA", "#F43F5E", "#EAB308", "#E5484D", "#F06065", "#0F1115", "#D8DEE9", "#1A1D23", "#2A2F38"];
+const SAME: &[&str] = &["#8A8F98", "#3FB57A", "#D9A441", "#22C55E", "#4C9AFF", "#C0392B", "#E5736A", "#3B82F6", "#F97316", "#10B981", "#A78BFA", "#F43F5E", "#EAB308", "#E5484D", "#F06065", "#0F1115", "#D8DEE9", "#1A1D23", "#2A2F38"];
 
 fn is_hex(b: u8) -> bool {
     b.is_ascii_hexdigit()

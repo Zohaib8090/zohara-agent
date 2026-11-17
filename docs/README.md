@@ -66,6 +66,6 @@ https://zohara-agent.duckdns.org, the repository is Zohaib8090/zohara-agent. Eng
 | [HANDOFF-2026-11-13.md](HANDOFF-2026-11-13.md) | The handoff for a new session: state, rules, decisions, open problems, owner steps (newest section at the end) |
 | [MEMORY-AND-SCHEDULE-PLAN.md](MEMORY-AND-SCHEDULE-PLAN.md) | The owner's plan for the memory updates feed, project memory and Scheduled v2 (sections 1 to 3 are built; see MEMORY.md and SCHEDULED.md) |
 | [CONNECTORS-DIRECTORY-PLAN.md](CONNECTORS-DIRECTORY-PLAN.md) | The owner's plan for Browse connectors (built; see the connectors section of MCP.md) |
-| [VM-MIGRATION-PLAN.md](VM-MIGRATION-PLAN.md) | The owner's plan for running tasks on a cloud VM (not built yet) |
+| [VM-MIGRATION-PLAN.md](VM-MIGRATION-PLAN.md) | The owner's plan for running tasks on a cloud VM (built: see RUNNER.md and MIGRATE.md) |
 | [PLAN-WEB-CLI-SYNC.md](PLAN-WEB-CLI-SYNC.md) | The first plan for web, terminal, sync and SSH (historical: those parts are built; read the other documents for the current state) |
 | [design/zohara-agent-design.html](design/zohara-agent-design.html) | The design reference (look and feel) |

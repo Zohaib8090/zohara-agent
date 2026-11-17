@@ -75,7 +75,7 @@ class MachinesUiTest {
     assertTrue(MachineText.copied(MachineStatus("a")).startsWith("Copy your connected apps"))
     assertEquals("Copied: notion (with credentials), files", MachineText.copied(MachineStatus("a", appsCopied = AppsCopied(1, listOf(AppsCopiedServer("notion", true), AppsCopiedServer("files", false))))))
     assertTrue(MachineText.taskDone(true, "vm1").startsWith("Sent to the runner on vm1"))
-    assertTrue(MachineText.taskDone(false, "vm1").contains("asks you first"))
+    assertTrue(MachineText.taskDone(false, "vm1").contains("refused here"))
   }
 
   @Test fun theWizardChecksTheFirstStepBeforeAskingTheServer() {

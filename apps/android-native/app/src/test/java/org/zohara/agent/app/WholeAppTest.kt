@@ -183,7 +183,7 @@ class WholeAppTest {
     launch()
     waitFor("the Terminal pill") { has("Terminal") || hasText("Terminal") }
     val pill = if (has("Terminal")) rule.onAllNodesWithContentDescription("Terminal")[0] else rule.onAllNodesWithText("Terminal")[0]
-    pill.performClick()
+    pill.performScrollTo().performClick()
     waitFor("the Terminal screen") { !has("Message to Zohara Agent") }
     rule.waitForIdle()
   }
