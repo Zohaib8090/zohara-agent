@@ -978,12 +978,13 @@ impl Ctl {
 }
 
 /// A friendlier name for the model ids people know.
-pub(crate) fn nice_name(model: &str) -> String {
-    // Claude models are named from the list that was read (or made from their id); anything else shows as it is
-    if zo_core::ai::models::catalog_find(model).is_some() {
+pub(crate) fn nice_name(provider: &str, model: &str) -> String {
+    // Claude models are named from the list that was read (or made from their id); anything else shows as it is.
+    // The Claude Code catalog applies to that provider only: a custom or local model named "default" or "opus" keeps its own name.
+    if provider == "claude-code" && zo_core::ai::models::catalog_find(model).is_some() {
         // a Claude Code model or shortcut: the name from the catalog ("Default (what Claude Code picks)", "Opus 5.5")
         zo_core::ai::models::catalog_label(model)
-    } else if model.starts_with("claude-") || ["sonnet", "opus", "haiku", "fable"].contains(&model) {
+    } else if model.starts_with("claude-") || (provider == "claude-code" && ["sonnet", "opus", "haiku", "fable"].contains(&model)) {
         zo_core::ai::models::display_name(model)
     } else {
         model.to_string()
@@ -993,7 +994,7 @@ pub(crate) fn nice_name(model: &str) -> String {
 /// What the model button says.
 pub fn pill_text(sel: &Selection) -> String {
     match providers::find(&sel.provider) {
-        Some(_) if !sel.model.is_empty() => nice_name(&sel.model),
+        Some(_) if !sel.model.is_empty() => nice_name(&sel.provider, &sel.model),
         Some(p) if p.protocol == Protocol::ClaudeCode => "Claude".to_string(),
         _ => "Choose a model".to_string(),
     }
@@ -1168,7 +1169,7 @@ pub fn show_model_popover(ui: &Rc<Ui>, btn: &gtk::Button) {
         let provider_name = providers::find(&prof.provider).map(|x| x.name).unwrap_or("?");
         body.append(&lbl(&format!("{} · {}", prof.name, provider_name), "pop-head"));
         for model in &prof.pinned {
-            let row = choice_row(&nice_name(model), None, sel.profile.as_deref() == Some(prof.id.as_str()) && sel.model == *model);
+            let row = choice_row(&nice_name(&prof.provider, model), None, sel.profile.as_deref() == Some(prof.id.as_str()) && sel.model == *model);
             let (ui2, pop2, prof2, model2) = (ui.clone(), pop.clone(), (*prof).clone(), model.clone());
             row.connect_clicked(move |_| {
                 let mut s = Selection::load();
@@ -1187,7 +1188,7 @@ pub fn show_model_popover(ui: &Rc<Ui>, btn: &gtk::Button) {
     let in_pins = pinned_profiles.iter().any(|p| sel.profile.as_deref() == Some(p.id.as_str()) && p.pinned.contains(&sel.model));
     if have_pins && !in_pins && !sel.model.is_empty() {
         body.append(&lbl("In use now", "pop-head"));
-        body.append(&choice_row(&nice_name(&sel.model), providers::find(&sel.provider).map(|x| x.name), true));
+        body.append(&choice_row(&nice_name(&sel.provider, &sel.model), providers::find(&sel.provider).map(|x| x.name), true));
     }
     match providers::find(&sel.provider) {
         Some(p) => {
@@ -1547,7 +1548,7 @@ pub(crate) fn name_sheet(ui: &Rc<Ui>, title: &str, initial: &str, ok_text: &str,
 
 pub(crate) fn describe(p: &profiles::Profile) -> String {
     let provider = providers::find(&p.provider).map(|x| x.name).unwrap_or("?");
-    format!("{provider} · {}", if p.model.is_empty() { "no model yet".to_string() } else { nice_name(&p.model) })
+    format!("{provider} · {}", if p.model.is_empty() { "no model yet".to_string() } else { nice_name(&p.provider, &p.model) })
 }
 
 /// The permission menu above the mode button.

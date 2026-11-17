@@ -281,7 +281,7 @@ pub fn show(ui: &Rc<Ui>) {
                     profiles::unpin(&id, &m);
                     show(&ui2);
                 });
-                card.append(&row(&chat::nice_name(model), &format!("{} · {provider_name}", p.name), Some(&un)));
+                card.append(&row(&chat::nice_name(&p.provider, model), &format!("{} · {provider_name}", p.name), Some(&un)));
             }
         }
         if !any {

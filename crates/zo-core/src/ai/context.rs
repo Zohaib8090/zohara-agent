@@ -101,6 +101,15 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn claude_code_shortcuts_have_the_window_of_what_they_resolve_to() {
+        let p = super::super::providers::find("claude-code").unwrap();
+        for a in ["default", "sonnet", "opus", "haiku", "fable", "opusplan"] {
+            assert_eq!(window_for(p, a), 1_000_000, "{a}");
+        }
+        assert_eq!(window_for(p, "claude-opus-4-5"), 200_000);
+    }
+
+    #[test]
     fn tokens_are_about_a_quarter_of_the_characters_and_pictures_count_more() {
         assert_eq!(tokens(""), 0);
         assert_eq!(tokens("abcd"), 1);

@@ -162,6 +162,8 @@ struct ModelList {
     /// The fill that is adding rows now (a newer fill stops an older one).
     fill_gen: Rc<Cell<u32>>,
     current: Rc<RefCell<String>>,
+    /// The id of the provider whose models are listed (names of Claude Code's shortcuts apply to that one only).
+    provider: Rc<RefCell<String>>,
     on_pick: Rc<RefCell<Option<Rc<dyn Fn(&str)>>>>,
 }
 
@@ -220,6 +222,7 @@ impl ModelList {
             generation: Rc::new(Cell::new(0)),
             fill_gen: Rc::new(Cell::new(0)),
             current: Rc::new(RefCell::new(String::new())),
+            provider: Rc::new(RefCell::new(String::new())),
             on_pick: Rc::new(RefCell::new(None)),
         };
 
@@ -380,7 +383,7 @@ impl ModelList {
             star.set_tooltip_text(Some(if self.pinned.borrow().iter().any(|m| *m == model) { "Unpin from the model menu" } else { "Pin to the model menu" }));
         }
         line.append(&star);
-        let name = lbl(&chat::nice_name(model), "pop-title");
+        let name = lbl(&chat::nice_name(&self.provider.borrow(), model), "pop-title");
         name.set_hexpand(true);
         name.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
         line.append(&name);
@@ -490,6 +493,7 @@ pub fn models_sheet(ui: &Rc<Ui>) {
             ml.generation.set(gen);
             let base = url.text().trim().to_string();
             let typed = Some(key.text().to_string()).filter(|k| !k.trim().is_empty());
+            *ml.provider.borrow_mut() = p.id.to_string();
             ml.fill(&[]);
             ml.set_loading("Loading the model list…");
             let ml2 = ml.clone();
@@ -839,9 +843,13 @@ mod tests {
         assert!(mids.contains(&"claude-opus-4-8") && mids.contains(&"claude-sonnet-4-6") && !mids.contains(&"claude-opus-5-5"));
         // newest first inside a family
         assert!(mids.iter().position(|i| *i == "claude-opus-4-8") < mids.iter().position(|i| *i == "claude-opus-4-6"));
-        assert_eq!(chat::nice_name("default"), "Default (what Claude Code picks)");
-        assert_eq!(chat::nice_name("claude-opus-5-5"), "Opus 5.5");
-        assert_eq!(chat::nice_name("gpt-4o"), "gpt-4o");
+        assert_eq!(chat::nice_name("claude-code", "default"), "Default (what Claude Code picks)");
+        assert_eq!(chat::nice_name("claude-code", "claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(chat::nice_name("openai", "gpt-4o"), "gpt-4o");
+        // a model on another provider that is named like a Claude Code shortcut keeps its own name
+        for n in ["default", "sonnet", "opus", "haiku", "fable", "opusplan"] {
+            assert_eq!(chat::nice_name("ollama", n), n);
+        }
     }
 
     #[test]

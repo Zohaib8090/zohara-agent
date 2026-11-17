@@ -258,6 +258,12 @@ pub fn parse_catalog(text: &str) -> Result<Vec<CatalogModel>, String> {
         if !seen.insert(m.id.clone()) {
             return Err(format!("claude-models.json: {} is listed twice", m.id));
         }
+        if m.kind == "model" && (m.family.trim().is_empty() || m.version.trim().is_empty()) {
+            return Err(format!("claude-models.json: {} needs a family and a version", m.id));
+        }
+    }
+    if !f.models.iter().any(|m| m.kind != "model") || !f.models.iter().any(|m| m.kind == "model") {
+        return Err("claude-models.json: needs at least one default or alias and one model".into());
     }
     let mut v = f.models;
     mark_recommended(&mut v);
@@ -291,8 +297,12 @@ fn mark_recommended(v: &mut [CatalogModel]) {
 
 /// The catalog: the person's own copy in the data folder when it is valid, else the one that ships with the program.
 pub fn catalog() -> Vec<CatalogModel> {
-    let own = std::fs::read_to_string(crate::audit::data_dir().join("claude-code-models.json")).ok().and_then(|t| parse_catalog(&t).ok());
-    own.unwrap_or_else(|| parse_catalog(CATALOG_JSON).unwrap_or_default())
+    catalog_from(std::fs::read_to_string(crate::audit::data_dir().join("claude-code-models.json")).ok().as_deref())
+}
+
+/// The catalog from a copy's text when it is valid, else the shipped one.
+fn catalog_from(own: Option<&str>) -> Vec<CatalogModel> {
+    own.and_then(|t| parse_catalog(t).ok()).unwrap_or_else(|| parse_catalog(CATALOG_JSON).unwrap_or_default())
 }
 
 /// The order families are shown in: the most capable first.
@@ -346,8 +356,23 @@ pub fn catalog_label(id: &str) -> String {
 
 /// The window size of a Claude Code model: from the catalog; a `[1m]` ending means a million tokens; None when not known.
 pub fn catalog_context(id: &str) -> Option<u64> {
-    if let Some(n) = catalog_find(id).map(|m| m.context).filter(|n| *n > 0) {
-        return Some(n);
+    context_in(&catalog(), id)
+}
+
+/// `catalog_context` for a given catalog. An alias with no window of its own (`sonnet`, `opus`, `opusplan`, Default) has the window of
+/// the model it resolves to: the recommended (newest) model of its family; Default and `opusplan` resolve through Opus.
+fn context_in(c: &[CatalogModel], id: &str) -> Option<u64> {
+    let q = id.trim().to_lowercase();
+    if let Some(e) = c.iter().find(|m| m.id.to_lowercase() == q || m.aliases.iter().any(|a| a.to_lowercase() == q)) {
+        if e.context > 0 {
+            return Some(e.context);
+        }
+        if e.kind != "model" {
+            let fam = if e.family.is_empty() { "opus" } else { e.family.as_str() };
+            if let Some(n) = c.iter().find(|m| m.kind == "model" && m.recommended && m.family == fam).map(|m| m.context).filter(|n| *n > 0) {
+                return Some(n);
+            }
+        }
     }
     if id.to_lowercase().ends_with("[1m]") {
         return Some(1_000_000);
@@ -365,7 +390,8 @@ pub fn model_argument(id: &str) -> Option<String> {
 pub fn valid_model_id(id: &str) -> bool {
     let t = id.trim();
     let core = t.strip_suffix("[1m]").unwrap_or(t);
-    !core.is_empty() && t.len() <= 100 && core.chars().all(|c| c.is_ascii_alphanumeric() || "._-:/".contains(c))
+    // not a dash first: the value goes after `--model`, where the claude program would read it as an option
+    !core.is_empty() && t.len() <= 100 && core.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) && core.chars().all(|c| c.is_ascii_alphanumeric() || "._-:/".contains(c))
 }
 
 /// "Answered by Opus 5.5" when the model the program reports is not the one chosen (a shortcut or Default resolves to something);
@@ -449,6 +475,31 @@ mod tests {
         assert!(parse_catalog(r#"{"models":[{"id":"a","label":"A","kind":"x"}]}"#).unwrap_err().contains("unknown kind"));
         assert!(parse_catalog(r#"{"models":[{"id":"a","label":"A","kind":"alias"},{"id":"a","label":"B","kind":"alias"}]}"#).unwrap_err().contains("twice"));
         assert!(parse_catalog(r#"{"models":[{"id":"","label":"A","kind":"alias"}]}"#).is_err());
+        // an empty list, no model, or a model with no family or version would replace the shipped list with nothing useful
+        assert!(parse_catalog(r#"{"models":[]}"#).is_err());
+        assert!(parse_catalog(r#"{"models":[{"id":"a","label":"A","kind":"alias"}]}"#).is_err());
+        assert!(parse_catalog(r#"{"models":[{"id":"a","label":"A","kind":"alias"},{"id":"claude-x","label":"X","kind":"model"}]}"#).unwrap_err().contains("family"));
+    }
+
+    #[test]
+    fn a_copy_of_the_catalog_replaces_the_shipped_one_only_when_it_is_valid() {
+        let own = r#"{"models":[{"id":"mine","label":"Mine","kind":"alias"},{"id":"claude-opus-9","label":"Opus 9","kind":"model","family":"opus","version":"9","context":1000000}]}"#;
+        assert!(catalog_from(Some(own)).iter().any(|m| m.id == "mine"));
+        let shipped: Vec<String> = catalog_from(None).into_iter().map(|m| m.id).collect();
+        assert!(shipped.contains(&"claude-opus-5-5".to_string()));
+        for bad in ["{", r#"{"models":[]}"#, r#"{"models":[{"id":"a","label":"A","kind":"alias"}]}"#] {
+            assert_eq!(catalog_from(Some(bad)).into_iter().map(|m| m.id).collect::<Vec<_>>(), shipped, "{bad} must fall back");
+        }
+    }
+
+    #[test]
+    fn an_alias_has_the_window_of_the_model_it_resolves_to() {
+        let c = parse_catalog(CATALOG_JSON).unwrap();
+        for a in ["default", "sonnet", "opus", "haiku", "fable", "opusplan"] {
+            let want = context_in(&c, match a { "default" | "opusplan" => "claude-opus-5-5", "sonnet" => "claude-sonnet-5-5", "opus" => "claude-opus-5-5", "haiku" => "claude-haiku-5-5", _ => "claude-fable-5-2" });
+            assert!(want.is_some());
+            assert_eq!(context_in(&c, a), want, "{a}");
+        }
     }
 
     #[test]
@@ -462,6 +513,7 @@ mod tests {
         assert_eq!(catalog_context("claude-whatever-1[1m]"), Some(1_000_000));
         assert_eq!(catalog_context("claude-whatever-1"), None);
         assert!(valid_model_id("claude-opus-4-9") && valid_model_id("sonnet[1m]") && valid_model_id("vendor/model:tag"));
+        assert!(!valid_model_id("--help") && !valid_model_id("-p") && !valid_model_id("-x[1m]"));
         assert!(!valid_model_id("") && !valid_model_id("a b") && !valid_model_id("a;rm -rf") && !valid_model_id(&"x".repeat(101)));
     }
 
