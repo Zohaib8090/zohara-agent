@@ -601,3 +601,75 @@ fn a_home_without_any_tool_finds_nothing() {
     assert_eq!(sc.found.len(), TOOLS.len());
     let _ = std::fs::remove_dir_all(home);
 }
+
+// ---- review fixes ----
+
+#[test]
+fn an_address_that_is_not_http_is_never_a_remote_server() {
+    let fx = Fixture::new("badurl");
+    fx.put(".cursor/mcp.json", r#"{"mcpServers": {"evil": {"url": "sh -c 'touch /tmp/x'"}, "fine": {"url": "https://ok.example.com/mcp"}}}"#);
+    let sc = fx.scan();
+    assert!(!sc.servers.iter().any(|s| s.raw.name == "evil"), "left out of the scan");
+    assert!(sc.notes.iter().any(|n| n.contains("evil") && n.contains("not http")), "{:?}", sc.notes);
+    assert!(sc.servers.iter().any(|s| s.raw.name == "fine"));
+    // and apply refuses one that got in some other way
+    sandbox("badurl", |_| {
+        let mut sc = fx.scan();
+        let mut s = sc.servers.iter().find(|s| s.raw.name == "fine").unwrap().clone();
+        s.raw.url = "sh -c 'touch /tmp/x'".into();
+        s.raw.name = "evil2".into();
+        s.id = "sevil".into();
+        sc.servers.push(s);
+        let out = apply_scan(&sc, &req(&["sevil"])).unwrap();
+        assert!(mcp_client::load_servers().iter().all(|x| x.name != "evil2"), "{out}");
+    });
+}
+
+#[test]
+fn a_fragment_or_matrix_parameter_secret_is_hidden_and_not_imported() {
+    for u in ["https://x.example.com/mcp#access_token=abc12345", "https://x.example.com/mcp;key=abc12345", "https://x.example.com/mcp#ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"] {
+        let raw = Raw { name: "x".into(), url: u.into(), ..Default::default() };
+        let p = prepare(&raw, false);
+        assert!(!p.shown.contains("abc12345") && !p.command.contains("abc12345") && !p.shown.contains("ghp_") && !p.command.contains("ghp_"), "{u}: {} / {}", p.shown, p.command);
+        assert!(!p.needs.is_empty(), "{u}");
+    }
+    let raw = Raw { name: "x".into(), url: "https://x.example.com/mcp#section".into(), ..Default::default() };
+    assert_eq!(prepare(&raw, false).command, "https://x.example.com/mcp#section");
+}
+
+#[test]
+fn a_reference_is_only_a_reference() {
+    assert!(is_reference("Bearer ${TOKEN}") && is_reference("${env:X}") && is_reference("$TOKEN"));
+    for bad in ["postgres://user:realpass@host/${DB}", "Bearer sk-live-abcdefghijklmnop${X}", "pre${X}", "${X} tail"] {
+        assert!(!is_reference(bad), "{bad}");
+    }
+}
+
+#[test]
+fn the_log_holds_no_key_even_when_an_argument_key_was_copied() {
+    sandbox("logkey", |_| {
+        let fx = Fixture::new("logkey");
+        let sc = fx.scan();
+        let r = Request { select: ids_of(&sc, &["postgres"]), secrets: ids_of(&sc, &["postgres"]), confirm: vec!["postgres".into()], ..Default::default() };
+        let out = apply_scan(&sc, &r).unwrap();
+        let saved = mcp_client::load_servers();
+        assert!(saved.iter().any(|s| s.name == "postgres" && s.command.contains(PG_PW)), "the key is in the settings file only: {out}");
+        let log = std::fs::read_to_string(log_file()).unwrap();
+        assert!(!log.contains(PG_PW), "{log}");
+        undo(out["batch"].as_str().unwrap()).unwrap();
+        assert!(mcp_client::load_servers().is_empty(), "undo still finds the server");
+    });
+}
+
+#[test]
+fn too_long_folders_are_dropped_not_fatal_and_big_files_are_reported() {
+    let long = format!("/{}", "a".repeat(405));
+    let (f, d) = super::source::plain_paths(&[format!("{long}/.cursor/mcp.json"), "/ok/.cursor/mcp.json".into()], &[long.clone()]).unwrap();
+    assert_eq!(f, vec!["/ok/.cursor/mcp.json".to_string()]);
+    assert!(d.is_empty());
+    let fx = Fixture::new("big");
+    let big = std::fs::File::create(fx.home.join(".claude.json")).unwrap();
+    big.set_len(super::source::MAX_FILE as u64 + 10).unwrap();
+    let sc = fx.scan();
+    assert!(sc.notes.iter().any(|n| n.contains("8 MB")), "{:?}", sc.notes);
+}

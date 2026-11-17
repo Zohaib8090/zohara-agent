@@ -923,7 +923,7 @@ fn control_reply(host: &dyn Host, op: &str, args: &[(String, Value)], received: 
     r
 }
 
-/// The Migrate operations from the web (docs/MIGRATE.md): the person is asked ON THIS COMPUTER before anything is read or changed.
+/// The Migrate operations from the web (docs/MIGRATE.md): the person is asked ON THIS COMPUTER before anything is read (a scan) or changed (an import is read first, so the question can name exactly what will be saved and where).
 /// What the dialog says comes from what is found here (names of tools, servers and files), never from the page's text. What goes back
 /// to the page has no key value in it, and no key is ever copied through this route: a key stays on this computer.
 fn migrate_control(host: &dyn Host, op: &str, args: &[(String, Value)], received: Instant, reader: &dyn crate::migrate::source::Reader) -> Result<Value, String> {
@@ -953,11 +953,11 @@ fn migrate_control(host: &dyn Host, op: &str, args: &[(String, Value)], received
         "migrate_apply" => {
             let req = m::Request::from_json(&json!({"select": arg("select"), "targets": arg("targets")}))?;
             let sc = m::scan(reader, "computer")?;
-            let names = sc.describe(&req.select);
+            let names = sc.describe_for_approval(&req);
             if names.is_empty() {
                 return Err("Nothing that was found matches what was ticked (look again).".into());
             }
-            ask(&format!("import into Zohara Agent on this computer: {}. Servers are only saved, not started. Keys are NOT copied.", names.join("; ")))?;
+            ask(&format!("import into Zohara Agent on this computer: {}. Nothing is overwritten. Keys are NOT copied.", names.join("; ")))?;
             m::apply_scan(&sc, &req)
         }
         "migrate_undo" => {

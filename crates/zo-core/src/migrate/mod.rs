@@ -139,7 +139,15 @@ pub fn secret_line(l: &str) -> bool {
 /// A value that is only a reference to an environment variable or an input (`${GITHUB_TOKEN}`, `${env:X}`, `${input:key}`, `$TOKEN`).
 pub fn is_reference(v: &str) -> bool {
     let t = v.trim();
-    t.contains("${") || (t.starts_with('$') && t.len() > 1 && t[1..].chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+    // an optional scheme word (`Bearer `), then nothing but the reference
+    let t = match t.split_once(' ') {
+        Some((w, rest)) if matches!(w.to_ascii_lowercase().as_str(), "bearer" | "basic" | "token") => rest.trim_start(),
+        _ => t,
+    };
+    if let Some(inner) = t.strip_prefix("${").and_then(|r| r.strip_suffix('}')) {
+        return !inner.is_empty() && inner.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '-' | '.'));
+    }
+    t.starts_with('$') && t.len() > 1 && t[1..].chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// A value that is clearly not a secret (a flag, a number, a plain word, a path, a plain address, a media type).
@@ -229,6 +237,24 @@ fn url_parts(u: &str) -> (String, String, Vec<String>) {
     }
     let (mut s_shown, mut s_imp) = (Vec::new(), Vec::new());
     for (i, s) in segs.iter().enumerate() {
+        // matrix parameters (`/mcp;key=abc`)
+        if let Some((name, params)) = s.split_once(';') {
+            let (mut shown, mut imp) = (name.to_string(), name.to_string());
+            for kv in params.split(';').filter(|p| !p.is_empty()) {
+                let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+                if secret_name(k) || secret_word(v) || secret_word(kv) {
+                    needs.push(k.to_string());
+                    shown.push_str(&format!(";{k}=•••"));
+                    imp.push_str(&format!(";{k}={PLACEHOLDER}"));
+                } else {
+                    shown.push_str(&format!(";{kv}"));
+                    imp.push_str(&format!(";{kv}"));
+                }
+            }
+            s_shown.push(shown);
+            s_imp.push(imp);
+            continue;
+        }
         if secret_word(s) {
             needs.push(format!("part {} of the path", i + 1));
             s_shown.push("•••".to_string());
@@ -249,7 +275,27 @@ fn url_parts(u: &str) -> (String, String, Vec<String>) {
             q_imp.push(format!("{k}={v}"));
         }
     }
-    let build = |head: &str, segs: &[String], q: &[String]| {
+    // the fragment: `#access_token=abc` (or a bare token) is a secret like a query value
+    let (mut f_shown, mut f_imp) = (frag.clone(), frag.clone());
+    if !frag.is_empty() {
+        let pairs: Vec<(&str, &str)> = frag.split('&').map(|p| p.split_once('=').unwrap_or((p, ""))).collect();
+        if pairs.iter().any(|(k, v)| secret_name(k) || secret_word(v) || secret_word(k)) {
+            let (mut sh, mut im) = (Vec::new(), Vec::new());
+            for (k, v) in &pairs {
+                if secret_name(k) || secret_word(v) || secret_word(k) {
+                    needs.push(if v.is_empty() { "fragment".to_string() } else { k.to_string() });
+                    sh.push(if v.is_empty() { "•••".to_string() } else { format!("{k}=•••") });
+                    im.push(if v.is_empty() { PLACEHOLDER.to_string() } else { format!("{k}={PLACEHOLDER}") });
+                } else {
+                    sh.push(format!("{k}={v}"));
+                    im.push(format!("{k}={v}"));
+                }
+            }
+            f_shown = sh.join("&");
+            f_imp = im.join("&");
+        }
+    }
+    let build = |head: &str, segs: &[String], q: &[String], frag: &str| {
         let mut o = head.to_string();
         if !segs.is_empty() {
             o.push('/');
@@ -265,7 +311,7 @@ fn url_parts(u: &str) -> (String, String, Vec<String>) {
         }
         o
     };
-    (build(&head_shown, &s_shown, &q_shown), build(&head_imp, &s_imp, &q_imp), needs)
+    (build(&head_shown, &s_shown, &q_shown, &f_shown), build(&head_imp, &s_imp, &q_imp, &f_imp), needs)
 }
 
 /// Marks which arguments of a program are secret (the value after `--api-key`, `--token=abc`, `KEY=abc`, a key-like word, a bearer header).
@@ -451,6 +497,11 @@ fn tool_static(id: &str) -> &'static str {
 fn read_file(scan: &mut Scan, tool: &'static str, shown: &str, kind: Kind, text: &str, folder: &str, projects_out: &mut Vec<String>) {
     let add_servers = |scan: &mut Scan, list: Vec<Raw>, scope: &str, folder: &str| {
         for mut raw in list {
+            // an address that is not http(s) is not a remote server (and must never be run as a program)
+            if !raw.url.is_empty() && !mcp_client::is_url(&raw.url) {
+                scan.notes.push(format!("{shown}: server \"{}\" has an address that is not http(s); it was left out.", raw.name.chars().take(60).collect::<String>()));
+                continue;
+            }
             if tool == "gemini" && raw.plain_url && !raw.url.is_empty() {
                 raw.notes.push("Gemini CLI's `url` is an older SSE address; it may not connect here.".into());
             }
@@ -514,6 +565,9 @@ pub fn scan(reader: &dyn Reader, kind: &str) -> Result<Scan, String> {
     let files: Vec<String> = FILES.iter().map(|f| f.1.to_string()).collect();
     let dirs: Vec<String> = DIRS.iter().map(|d| d.1.to_string()).collect();
     let got = reader.fetch(&files, &dirs)?;
+    for f in &got.too_big {
+        sc.notes.push(format!("{}: bigger than 8 MB, so it was not read.", reader.shown(f)));
+    }
     let mut found: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
     let mut folders: Vec<String> = Vec::new();
     for (tool, path, k) in FILES {
@@ -543,6 +597,9 @@ pub fn scan(reader: &dyn Reader, kind: &str) -> Result<Scan, String> {
     if !folders.is_empty() {
         let pf: Vec<String> = folders.iter().flat_map(|f| PROJECT_FILES.iter().map(move |p| format!("{f}/{}", p.1))).collect();
         let got = reader.fetch(&pf, &[])?;
+        for f in &got.too_big {
+            sc.notes.push(format!("{f}: bigger than 8 MB, so it was not read."));
+        }
         for f in &folders {
             for (tool, name, k) in PROJECT_FILES {
                 let path = format!("{f}/{name}");
@@ -671,7 +728,7 @@ impl Scan {
             .map(|s| {
                 let p = prepare(&s.raw, false);
                 let name = mcp_client::clean_name(&s.raw.name);
-                let remote = !s.raw.url.is_empty();
+                let remote = mcp_client::is_url(&s.raw.url);
                 let mut dup = String::new();
                 let mut dup_of = String::new();
                 if have.iter().any(|h| h.name == name) {
@@ -733,6 +790,34 @@ impl Scan {
     }
 
     /// Names of the selected items, for a dialog that asks the person to agree (built here, never from what a page says).
+    /// What the person is asked to approve: for every ticked item, where it goes and what it will do (addresses and commands with
+    /// secret parts hidden).
+    pub fn describe_for_approval(&self, req: &Request) -> Vec<String> {
+        let projs = crate::store::memory_io::projects();
+        let mut out = Vec::new();
+        for s in &self.servers {
+            if req.select.contains(&s.id) {
+                let p = prepare(&s.raw, false);
+                let what = if mcp_client::is_url(&s.raw.url) { format!("connects to {}", p.shown) } else { format!("runs the program `{}`", p.shown) };
+                out.push(format!("server {} ({}): {what}; saved {}", mcp_client::clean_name(&s.raw.name), tool_name(s.tool), if s.raw.disabled { "switched off" } else { "switched on, it starts when a chat uses it" }));
+            }
+        }
+        for i in &self.instructions {
+            if req.select.contains(&i.id) {
+                let target = req.targets.get(&i.id).map(String::as_str).unwrap_or("notes");
+                let (kind, pid) = target.split_once(':').unwrap_or((target, ""));
+                let pname = projs.iter().find(|(id, _)| id == pid).map(|(_, n)| n.as_str());
+                let place = match (kind, pname) {
+                    ("instruction", Some(n)) => format!("added to the end of the instruction of project \"{n}\""),
+                    ("notes", Some(n)) => format!("saved as memory notes of project \"{n}\""),
+                    _ => "saved as memory notes".to_string(),
+                };
+                out.push(format!("instructions {} ({}): {place}", i.source, tool_name(i.tool)));
+            }
+        }
+        out
+    }
+
     pub fn describe(&self, select: &[String]) -> Vec<String> {
         let mut out = Vec::new();
         for s in &self.servers {
@@ -780,6 +865,13 @@ struct Log {
 }
 
 const KEEP_BATCHES: usize = 10;
+
+/// A one-way mark of a command, to tell on undo whether the server is still as it was imported.
+fn fingerprint(command: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(command.as_bytes());
+    format!("sha256:{}", h.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>())
+}
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn log_file() -> std::path::PathBuf {
@@ -880,7 +972,11 @@ pub fn apply_scan(sc: &Scan, req: &Request) -> Result<Value, String> {
                 skip(&mut out, "The name has no letters or digits, or is too long.");
                 continue;
             }
-            let remote = !s.raw.url.is_empty();
+            let remote = mcp_client::is_url(&s.raw.url);
+            if !s.raw.url.is_empty() && !remote {
+                skip(&mut out, "The address is not an http(s) address.");
+                continue;
+            }
             if !remote && crate::tenant::multi_tenant() {
                 skip(&mut out, "Programs that run on a computer are added in the desktop app, not on the cloud server.");
                 continue;
@@ -954,7 +1050,8 @@ pub fn apply_scan(sc: &Scan, req: &Request) -> Result<Value, String> {
                 push(&mut out, "servers", "skipped", json!({"name": name, "why": "A server with this name was added meanwhile."}));
                 continue;
             }
-            batch.servers.push((name.clone(), command));
+            // the log keeps a fingerprint, not the command: an argument or an address may hold a key that was copied
+            batch.servers.push((name.clone(), fingerprint(&command)));
             push(&mut out, "servers", "added", json!(name));
             if want_secrets && p.needs.iter().any(|n| n.in_file) {
                 let names: Vec<&str> = p.needs.iter().filter(|n| n.in_file).map(|n| n.name.as_str()).collect();
@@ -1101,7 +1198,7 @@ pub fn undo(batch_id: &str) -> Result<Value, String> {
     let (mut servers, mut kept) = (0usize, Vec::new());
     for (name, command) in &b.servers {
         let removed = mcp_client::update_servers(|all| {
-            let Some(pos) = all.iter().position(|s| &s.name == name && &s.command == command) else { return None };
+            let Some(pos) = all.iter().position(|s| &s.name == name && (&s.command == command || &fingerprint(&s.command) == command)) else { return None };
             Some(all.remove(pos))
         });
         match removed {

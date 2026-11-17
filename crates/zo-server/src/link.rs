@@ -59,10 +59,10 @@ pub const PENDING_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_TEXT_CHARS: usize = 100_000;
 
 /// The settings questions the web page may ask a desktop (everything else is refused here, and again on the desktop).
-/// The last four are the read-only control operations of docs/FULL-CONTROL.md phase 1 (the desktop asks its person before the first
-/// three of them run); they take one argument, a path.
-/// The Migrate operations (docs/MIGRATE.md) are control operations too: the desktop asks its person first, and they take lists of ids
-/// (never a key: the desktop does not copy keys through the web).
+/// `sys_info fs_list fs_read screenshot` are the read-only control operations of docs/FULL-CONTROL.md phase 1 (the desktop asks its
+/// person before the last three of them run); they take one argument, a path.
+/// The Migrate operations (docs/MIGRATE.md) are control operations too, and two of them WRITE (`migrate_apply`, `migrate_undo`): the
+/// desktop always asks its person first, and they take lists of ids (never a key: the desktop does not copy keys through the web).
 pub const OPS: [&str; 14] = ["status", "providers", "profiles", "profile_use", "models", "select", "mode", "sys_info", "fs_list", "fs_read", "screenshot", "migrate_scan", "migrate_apply", "migrate_undo"];
 /// The control operations wait for a person to answer a dialog on their computer, so the page's question waits longer for them.
 pub fn is_control(op: &str) -> bool {

@@ -52,7 +52,7 @@ The same source is read again (so a secret never travels to a screen and back), 
   notes show up in the Memory page and its "Memory updated" feed (source `import`).
 * **Undo** (`migrate_undo {batch}`): takes back the servers it added (only if still as imported), the notes it added (only if not edited) and the text it
   appended (only if the instruction still ends with it), and clears the keys it stored. The last 10 imports are kept in `migrate-log.json` (0600, per person;
-  it holds names, commands without keys, note texts, appended text; no secret).
+  it holds names, a one-way fingerprint of each server's command (never the command, which may hold a key that was copied), note texts, appended text; no secret).
 
 Not imported, only listed: custom commands and skills of Claude Code, and the model/provider of Claude Code, Codex and Gemini (choose the model in Settings >
 Model).

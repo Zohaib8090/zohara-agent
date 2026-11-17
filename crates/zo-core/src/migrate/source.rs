@@ -13,6 +13,8 @@ pub const MAX_DIR: usize = 200;
 pub struct Fetched {
     pub files: HashMap<String, String>,
     pub dirs: HashMap<String, Vec<String>>,
+    /// Files that exist but are bigger than [`MAX_FILE`] (not read).
+    pub too_big: Vec<String>,
 }
 
 /// Reads the named files and lists the named folders. A path is relative to the home folder, or absolute. A missing or unreadable
@@ -54,7 +56,8 @@ impl Local {
         real.starts_with(&self.home).then_some(real)
     }
 
-    fn read(&self, path: &str) -> Option<String> {
+    /// None: absent or unreadable; Some(Err): bigger than [`MAX_FILE`].
+    fn read(&self, path: &str) -> Option<Result<String, ()>> {
         use std::os::unix::fs::OpenOptionsExt;
         let real = self.inside(path)?;
         // O_NONBLOCK so that a pipe with no writer cannot hang the open; the type is checked on the opened file
@@ -64,10 +67,13 @@ impl Local {
         }
         let mut buf = Vec::new();
         f.take(MAX_FILE as u64 + 1).read_to_end(&mut buf).ok()?;
-        if buf.len() > MAX_FILE || buf.contains(&0) {
+        if buf.len() > MAX_FILE {
+            return Some(Err(()));
+        }
+        if buf.contains(&0) {
             return None;
         }
-        String::from_utf8(buf).ok()
+        String::from_utf8(buf).ok().map(Ok)
     }
 }
 
@@ -78,8 +84,12 @@ impl Reader for Local {
     fn fetch(&self, files: &[String], dirs: &[String]) -> Result<Fetched, String> {
         let mut out = Fetched::default();
         for f in files {
-            if let Some(t) = self.read(f) {
-                out.files.insert(f.clone(), t);
+            match self.read(f) {
+                Some(Ok(t)) => {
+                    out.files.insert(f.clone(), t);
+                }
+                Some(Err(())) => out.too_big.push(f.clone()),
+                None => {}
             }
         }
         for d in dirs {
@@ -176,12 +186,7 @@ impl Reader for Ssh {
         self.machine.clone()
     }
     fn fetch(&self, files: &[String], dirs: &[String]) -> Result<Fetched, String> {
-        // a path from a remote file (a project folder) is data: only plain absolute paths are asked for
-        for f in files.iter().chain(dirs) {
-            if f.chars().any(char::is_control) || f.contains("..") || f.len() > 400 {
-                return Err("A path to read is not valid.".into());
-            }
-        }
+        let (files, dirs) = &plain_paths(files, dirs)?;
         let mark = format!("zo{}", random_hex());
         let sh = Self::script(files, dirs, &mark)?;
         let d = crate::tools::ssh::run_on(&self.machine, &sh, None, 90, 3 * MAX_FILE)?;
@@ -189,8 +194,27 @@ impl Reader for Ssh {
             let why = d.stderr.trim();
             return Err(format!("Could not use {} over SSH: {}", self.machine, if why.is_empty() { "ssh failed".to_string() } else { why.chars().take(300).collect::<String>() }));
         }
-        Ok(Self::parse(&d.stdout, &mark))
+        let mut got = Self::parse(&d.stdout, &mark);
+        // `head -c` cut these at the limit: they are not whole files
+        let cut: Vec<String> = got.files.iter().filter(|(_, t)| t.len() >= MAX_FILE).map(|(n, _)| n.clone()).collect();
+        for n in cut {
+            got.files.remove(&n);
+            got.too_big.push(n);
+        }
+        Ok(got)
     }
+}
+
+/// A path from a remote file (a project folder) is data: only plain paths are asked for. A path with control characters or `..`
+/// refuses the whole call; one that is merely too long is left out (the rest of the scan still works).
+pub(crate) fn plain_paths(files: &[String], dirs: &[String]) -> Result<(Vec<String>, Vec<String>), String> {
+    for f in files.iter().chain(dirs) {
+        if f.chars().any(char::is_control) || f.contains("..") {
+            return Err("A path to read is not valid.".into());
+        }
+    }
+    let ok = |l: &[String]| l.iter().filter(|f| f.len() <= 400).cloned().collect::<Vec<_>>();
+    Ok((ok(files), ok(dirs)))
 }
 
 fn random_hex() -> String {
