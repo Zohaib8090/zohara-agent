@@ -183,7 +183,15 @@ class SettingsScreenshotTest {
   @Test fun appsDark() = shot("apps", true) { Apps() }
   @Test fun appsLight() = shot("apps", false) { Apps() }
 
-  @Composable private fun Machines() = MachinesContent(listOf(Machine("home-server", "192.168.1.20", "zohaib", 22, "the NAS", true), Machine("vm1", "203.0.113.7", "ubuntu", 2222, "", false)), "vm1", {}, {}, {})
+  @Composable private fun Machines() = MachinesContent(
+    listOf(Machine("home-server", "192.168.1.20", "zohaib", 22, "the NAS", true), Machine("vm1", "203.0.113.7", "ubuntu", 2222, "", false), Machine("old-box", "198.51.100.9", "pi", 22, "", true)), "vm1", {}, {}, {},
+    status = mapOf(
+      "home-server" to org.zohara.agent.core.net.MachineStatus("home-server", reachable = true, installed = true, runner = org.zohara.agent.core.net.RunnerInfo(version = "0.1.0", enabledTasks = 2, lastRun = 1_794_000_000_000, lastStatus = "ok")),
+      "vm1" to org.zohara.agent.core.net.MachineStatus("vm1", reachable = true),
+      "old-box" to org.zohara.agent.core.net.MachineStatus("old-box", reachable = false, error = "Connection timed out."),
+    ),
+    checked = true, onTerminal = {}, onManage = {}, onOwnKey = {},
+  )
   @Test fun machinesDark() = shot("machines", true) { Machines() }
   @Test fun machinesLight() = shot("machines", false) { Machines() }
 

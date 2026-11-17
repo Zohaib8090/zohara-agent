@@ -16,6 +16,17 @@ Settings > Machines > Add machine. Give it:
 "Test" on a machine runs `echo ok` there and shows the answer or the error. The same exists as service ops: `machines`,
 `machine_add`, `machine_remove`, `machine_test`.
 
+**Easier: let Zohara Agent make the key.** The Add machine wizard (and the tool `zohara_ssh_add_machine`) makes a new ed25519 key for the
+machine, keeps the private half in the key store, and shows the public line and the one command that puts it in `authorized_keys`
+(`machine_new`, `machine_pubkey`). With a one-time password it can put the key there for you (`machine_authorize`: `ssh` is run once with
+the password given through a private askpass helper, the password is never stored, never put in an argument and never logged). "Use my own
+key" is the older paste-a-key form above.
+
+**Machines popup.** A Machines pill next to the model pill on the chat screen (desktop, web, Android) lists the machines with a status dot,
+Test, Terminal, Manage and Add machine; Settings > Machines is the full page. What Manage does (install the runner, copy the model key,
+copy connected apps, run a task there) is in docs/RUNNER.md. Terminals: desktop = a tab in the window; web = the terminal panel of the cloud
+server running `ssh` to the machine (administrator only); Android = the terminal page.
+
 ## What the AI may do
 
 | Tool | What | Asks first? |
@@ -24,6 +35,8 @@ Settings > Machines > Add machine. Give it:
 | `zohara_ssh_read_file` | read a file (first 100 KB) | no |
 | `zohara_ssh_write_file` | write or append a file (1 MB at most) | yes, unless Bypass |
 | `zohara_ssh_run` | run a command (timeout up to 600 s) | yes, unless Bypass |
+| `zohara_ssh_add_machine` | add a machine with a NEW key (host, user, port; no password) | yes, unless Bypass; never for a restricted account |
+| `zohara_ssh_test` | check that a machine answers | no |
 
 `zohara_ssh_run` is classified like `zohara_shell`; the "safe read-only command" shortcut of Auto mode does not apply to it, so
 it always asks outside Bypass. Reading a file never asks, like `zohara_fs_read`, so a machine's files are readable by the AI

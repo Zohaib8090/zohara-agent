@@ -537,75 +537,14 @@ pub fn show(ui: &Rc<Ui>) {
     content.append(&sec);
     }
 
-    // ---- machines: other computers over SSH ----
+    // ---- machines: other computers over SSH (the list, wizard and runner are in machines_ui.rs) ----
     if page == "machines" {
-        let (sec, card) = section("Machines");
-        let add = secondary("Add machine");
+        crate::machines_ui::page(ui, &content);
+        let (sec, card) = section("Already have a key?");
+        let add = secondary("Add with my own key");
         let ui2 = ui.clone();
         add.connect_clicked(move |_| add_machine_sheet(&ui2));
-        card.append(&row(
-            "Let Zohara Agent work on another computer",
-            "A cloud VM or a server you can reach with SSH. Zohara Agent can run commands there and read and write files, asking you first unless the mode is Bypass. The private key is kept in the system keyring.",
-            Some(&add),
-        ));
-        for m in zo_core::store::machines::load() {
-            let r = hbox(12);
-            r.add_css_class("settings-row");
-            let col = vbox(3);
-            col.set_hexpand(true);
-            col.append(&lbl(&m.name, "pc-name"));
-            let mut meta = format!("{}@{}:{}", m.user, m.host, m.port);
-            if !m.note.is_empty() {
-                meta.push_str(&format!("  ·  {}", m.note));
-            }
-            if !m.has_key() {
-                meta.push_str("  ·  no key saved");
-            }
-            let meta = lbl(&meta, "pc-meta");
-            meta.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            col.append(&meta);
-            let status = lbl("", "field-hint");
-            status.set_wrap(true);
-            status.set_xalign(0.0);
-            status.set_max_width_chars(60);
-            col.append(&status);
-            r.append(&col);
-            let test = secondary("Test");
-            {
-                let (name, status) = (m.name.clone(), status.clone());
-                test.connect_clicked(move |b| {
-                    b.set_sensitive(false);
-                    status.set_text("Connecting…");
-                    let (tx, rx) = mpsc::channel();
-                    let n = name.clone();
-                    std::thread::spawn(move || {
-                        let _ = tx.send(zo_core::tools::ssh::test(&n));
-                    });
-                    let (b, status) = (b.clone(), status.clone());
-                    gtk::glib::timeout_add_local(std::time::Duration::from_millis(150), move || match rx.try_recv() {
-                        Ok(r) => {
-                            status.set_text(&r.unwrap_or_else(|e| e));
-                            b.set_sensitive(true);
-                            gtk::glib::ControlFlow::Break
-                        }
-                        Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
-                        Err(_) => gtk::glib::ControlFlow::Break,
-                    });
-                });
-            }
-            r.append(&test);
-            let del = crate::icon_button("edit-delete-symbolic", "Remove this machine", "icon-btn");
-            let (ui2, name) = (ui.clone(), m.name.clone());
-            del.connect_clicked(move |_| {
-                let (ui3, name3) = (ui2.clone(), name.clone());
-                crate::confirm_delete(&ui2, &format!("Remove \"{name}\"?"), "Zohara Agent forgets this machine and its private key. Nothing changes on the machine itself.", move || {
-                    let _ = zo_core::store::machines::remove(&name3);
-                    show(&ui3);
-                });
-            });
-            r.append(&del);
-            card.append(&r);
-        }
+        card.append(&row("Add a machine with a key you made yourself", "Paste a private key that has no passphrase. Use this only if you do not want Zohara Agent to make a new key.", Some(&add)));
         content.append(&sec);
     }
 

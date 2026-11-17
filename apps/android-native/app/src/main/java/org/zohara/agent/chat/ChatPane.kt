@@ -105,6 +105,7 @@ fun ChatPane(session: ChatSession, hub: ChatHub.Instance, greetingText: String?,
     onMode = { sheet = "mode" },
     onContext = { sheet = "context" },
     onTerminal = if (container.session.admin && hub.env.runOn().isCloud) ({ nav.terminal() }) else null,
+    onMachines = if (container.session.admin && hub.env.runOn().isCloud) ({ sheet = "machines" }) else null,
     steps = state.steps,
   )
 
@@ -146,6 +147,7 @@ fun ChatPane(session: ChatSession, hub: ChatHub.Instance, greetingText: String?,
         org.zohara.agent.link.ModeRows(org.zohara.agent.link.LinkModes.available(true, container.session.restricted), pills.mode.api, true) { m -> hub.pills.setMode(PermMode.parse(m)) { err -> if (err != null) toast(err) }; sheet = "" }
       } else ModeSheet(pills.mode, hub.pills.bypassAllowed(), { sheet = "" }, onPick = { m -> hub.pills.setMode(m) { err -> if (err != null) toast(err) }; sheet = "" })
       "memory" -> MemoryChangesSheet({ sheet = "" }, latestOnly = true, onOpenPage = { nav.settings(Routes.SETTINGS_MEMORY) })
+      "machines" -> org.zohara.agent.settings.MachinesSheet { sheet = "" }
       "context" -> if (wide && pinnedPanel) sheet = "" else ContextSheet(
         contextView, { sheet = "" }, onRefresh = refresh, onCompact = compact,
         onPin = if (wide) ({ pinnedPanel = true; sheet = "" }) else null,

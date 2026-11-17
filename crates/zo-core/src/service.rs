@@ -39,6 +39,16 @@ fn socket_for(name: &str) -> PathBuf {
 }
 
 /// Where this version listens.
+/// A machine operation for the desktop window, which lives in the same process as the service: the same code as the operation `op`
+/// (docs/SSH.md), without the socket. Only the `machine_*` operations of the VM features are reachable this way.
+pub fn machine_call(op: &str, req: &Value) -> Result<Value, String> {
+    if vm::handles(op) {
+        vm::handle(op, req)
+    } else {
+        Err("Unknown machine operation.".into())
+    }
+}
+
 pub fn socket_path() -> PathBuf {
     socket_for(crate::legacy::NAME)
 }

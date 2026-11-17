@@ -69,6 +69,8 @@ class ComposerModel(
   val onContext: () -> Unit,
   /** the Terminal pill (COMP-12): admin accounts on the cloud only */
   val onTerminal: (() -> Unit)? = null,
+  /** the Machines pill (docs/VM-MIGRATION-PLAN.md section 6): administrators only, it opens the popup of machines */
+  val onMachines: (() -> Unit)? = null,
   /** tool calls made so far in the running answer; "Step n" shows next to Stop while busy */
   val steps: Int = 0,
 )
@@ -141,6 +143,7 @@ fun Composer(text: String, onText: (String) -> Unit, m: ComposerModel, modifier:
       Pill(m.modelText, "Model: ${m.modelText}", m.onModel, chevron = true)
       Pill(m.mode.label, "Permission mode: ${m.mode.label}", m.onMode, chevron = true)
       if (m.showContext) Pill("Context", "Context window", m.onContext, icon = ZoIcons.Context)
+      m.onMachines?.let { Pill("Machines", "Machines you can reach over SSH", it) }
       m.onTerminal?.let { Pill("Terminal", "Terminal", it, icon = ZoIcons.Terminal) }
     }
     Text(
