@@ -52,6 +52,10 @@ class ChatSession(
   private var answered = false
   /** the name of the model that answered, when it was not the one chosen: shown under the answer */
   private var answeredBy: String? = null
+  /** the time of the newest memory change this session has seen (null: not asked yet) */
+  private var memorySince: Long? = null
+  private var memoryJob: Job? = null
+  private var memoryShown = 0
 
   val chatId: String? get() = _state.value.chatId
 
@@ -158,7 +162,48 @@ class ChatSession(
     else startSend(t, Taken.plain(t), edit = null, keepUser = false)
   }
 
+  // ------------------------------------------------------------------ the memory feed
+
+  /** The chip "Memory updated · View" shows for [MEMORY_CHIP_MS], then fades; a newer change replaces it. */
+  private fun showMemory(summary: String, time: Long) {
+    if (time > (memorySince ?: 0)) memorySince = time
+    val n = ++memoryShown
+    _state.update { it.copy(memoryNote = MemoryNote(summary, time)) }
+    scope.launch {
+      delay(MEMORY_CHIP_MS)
+      if (memoryShown == n) _state.update { it.copy(memoryNote = null) }
+    }
+  }
+
+  fun dismissMemory() {
+    memoryShown++
+    _state.update { it.copy(memoryNote = null) }
+  }
+
+  /** Before a message goes out: remember where the change log stands, so only later changes count. */
+  private fun markMemory() {
+    if (memorySince != null) return
+    memorySince = 0
+    scope.launch { backend.memoryChanges(0, 1)?.let { r -> if ((memorySince ?: 0) < r.latest) memorySince = r.latest } }
+  }
+
+  /** The memory agent works after the answer, on the server: ask a few times whether it changed something. */
+  private fun watchMemory() {
+    memoryJob?.cancel()
+    memoryJob = scope.launch {
+      for (wait in MEMORY_POLLS_MS) {
+        delay(wait)
+        val r = try { backend.memoryChanges(memorySince ?: 0, 50) } catch (e: CancellationException) { throw e } catch (_: Exception) { null } ?: return@launch
+        if (r.changes.isNotEmpty()) {
+          if (r.showUpdates) showMemory(r.summary, r.latest) else memorySince = r.latest
+          return@launch
+        }
+      }
+    }
+  }
+
   private fun startSend(text: String, taken: Taken, edit: Int?, keepUser: Boolean, typed: String = text) {
+    markMemory()
     val atts = taken.attachments
     val runOn = env.runOn()
     val before = _state.value
@@ -296,12 +341,13 @@ class ChatSession(
         mutate { dropTransient(); finalizeLive(); endGroup(); expireCards(); add(ErrorItem(key(), CONNECTION_LOST_TEXT(_state.value.computerName != null), code = "lost", retry = false)) }
         return true
       }
+      is SendEvent.MemoryUpdated -> showMemory(ev.summary, ev.time)
       SendEvent.Done -> {
         answered = true
         answeredBy?.let { name -> mutate { dropTransient(); finalizeLive(); endGroup(); add(NoticeItem(key(), "Answered by $name")) } }
         answeredBy = null
       }
-      SendEvent.Ping, is SendEvent.Unknown -> Unit
+      SendEvent.Ping, is SendEvent.Unknown, is SendEvent.Test, is SendEvent.Notify, is SendEvent.Result -> Unit // the last three belong to the Test of a scheduled task (ScheduledScreen)
     }
     return false
   }
@@ -314,6 +360,7 @@ class ChatSession(
     val id = _state.value.chatId
     env.chatsChanged()
     if (!env.runOn().isCloud) env.chatsChanged(6000)
+    if (answered) watchMemory()
     if (answered && id != null) env.answerFinished(id, _state.value.title, _state.value.items.filterIsInstance<AiItem>().lastOrNull()?.text.orEmpty())
     if (id != null) {
       // the takes numbers (and, after a lost connection, the whole chat) come from the server
@@ -518,6 +565,10 @@ class ChatSession(
   }
 
   companion object {
+    /** how long the "Memory updated" chip stays */
+    const val MEMORY_CHIP_MS = 12_000L
+    /** waits between the asks after an answer (4, 10, 20, 40 and 70 s after it) */
+    val MEMORY_POLLS_MS = listOf(4_000L, 6_000L, 10_000L, 20_000L, 30_000L)
     fun CONNECTION_LOST_TEXT(onComputer: Boolean) = if (onComputer)
       "The connection to your computer was lost. The task may still be running there: check Running now on your computer."
     else "The connection was lost. The answer may still be finishing on the server: open the chat again in a moment."

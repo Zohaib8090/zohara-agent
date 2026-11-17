@@ -28,6 +28,11 @@ class SendEventParserTest {
     assertEquals(SendEvent.Ping, p("""{"event":"ping"}"""))
   }
 
+  @Test fun memoryUpdatedEvent() {
+    assertEquals(SendEvent.MemoryUpdated("Added 2 notes, updated 1 note", 1794509131852), p("""{"event":"memory_updated","summary":"Added 2 notes, updated 1 note","counts":{"added":2,"updated":1,"deleted":0},"ids":["g1","g2","g3"],"time":1794509131852}"""))
+    assertEquals(SendEvent.MemoryUpdated("", 0), p("""{"event":"memory_updated"}"""))
+  }
+
   @Test fun questionCard() {
     val ev = p("""{"event":"question","id":4,"questions":[{"question":"Which?","header":"Pick","multi_select":true,"options":[{"label":"A","description":"first"},{"label":"B"}]}]}""")
     ev as SendEvent.Question
@@ -99,5 +104,13 @@ class SendEventParserTest {
     val b = NdjsonLineBuffer()
     assertEquals(emptyList<String>(), b.feed("""{"event":"done"}""".toByteArray()))
     assertEquals(listOf("""{"event":"done"}"""), b.finish())
+  }
+
+  @Test fun testOfAScheduledTaskHasItsOwnEvents() {
+    assertEquals(SendEvent.Test("Stretch", "reminder", "the cloud server"), p("""{"event":"test","title":"Stretch","kind":"reminder","place":"the cloud server"}"""))
+    assertEquals(SendEvent.Notify("Test: Stretch", "Stand up", "reminder", true), p("""{"event":"notify","title":"Test: Stretch","body":"Stand up","kind":"reminder","ok":true}"""))
+    val r = p("""{"event":"result","result":{"ok":false,"status":"skipped","summary":"No model is chosen.","tools":["zohara_web_search"],"ms":1500,"chat":"c9"}}""")
+    assertEquals(SendEvent.Result(false, "skipped", "No model is chosen.", listOf("zohara_web_search"), 1500, "c9"), r)
+    assertEquals(SendEvent.Result(false, "", "", emptyList(), 0, null), p("""{"event":"result"}"""))
   }
 }

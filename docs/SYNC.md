@@ -43,6 +43,11 @@ turns on sync with the web. Nobody copies or pastes a token (see `LOGIN.md` for 
   so a pin only travels with the next edit (a chat already on both sides keeps its own local pin).
 * Personalities: only the person's own (built-in ones are in the program). They are never edited, so their time is the one in their id (`p<ms>`).
 * Memory also has one pseudo item, `memory:_state` (memory on/off and how often the agent reads a chat), newest change wins.
+* And one more, `memory:_changes` (added 2026-11-14): the **memory change log** behind "Memory updated · View" (`store/memory_log.rs`, doc `{changes:[...], updated}`, the newest 200
+  entries, each with the text before and after). The newest log wins by `updated`, and when one is taken in the entries of both sides are **merged** by id (an entry undone on either side counts as undone), so a change
+  made by the server's agent shows in the desktop's list and the other way round; an entry that was made in the last two minutes also shows the chip on the receiving side. Entries with a secret in them are dropped,
+  fields are cut to a size, and the other side can never delete the item. The "Show memory updates" switch is per device and not synced. Project notes (`scope` = a project id) sync like any note; the projects themselves are not synced, so on a side
+  that has no such project the note is simply never read by a chat.
 * Only the newest 100 chats are kept on each side (the store's own limit): a chat older than all 100 of the other side is not copied, and
   that refusal is remembered so it is not retried every 30 seconds.
 * **Clocks**: the server's manifest carries its `now`. The computer measures how far its clock is off (ignored under 5 seconds), compares

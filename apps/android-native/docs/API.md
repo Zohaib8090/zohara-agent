@@ -119,6 +119,7 @@ Errors that happen inside the service arrive as an `error` event followed by `do
 | `model` | `model` (text), `label` (text), `differs` (bool) | the model that really answered (Claude Code: named by its stream); `differs` is true when it is not the one chosen (a shortcut or Default resolved). Show "Answered by <label>" under the answer only then. Parsed as `SendEvent.Model` |
 | `question` | `id` (u64), `questions:[{question, header, multi_select, options:[{label, description}]}]` | **contract**: the model asks the person. Answer with `/api/reply` `{"op":"answer",...}` (3.5). Not sent by any server yet | contract |
 | `error` | `error` (text); relay errors also `message` | the answer failed; `desktop_offline`, `desktop_busy`, `limit`, `desktop_timeout`, `desktop_lost`, `job_timeout`, `too_much_output`, `desktop_revoked`, `account_deleted` are the relay codes (use `message`) | live (`desktop_offline`) |
+| `memory_updated` | `summary` ("Added 2 notes, updated 1 note"), `counts` `{added, updated, deleted}`, `ids` (change ids), `time` (ms of the newest change) | the memory agent changed notes while this stream was open (rare: it normally works after `done`, so the apps also ask `memory_changes` a few times after an answer); unknown to older apps, which ignore it | "Memory updated · View" chip |
 | `stopped` | none | the answer was stopped (by `/api/reply stop`, Activity Stop, or a desktop that ignored a stop for 20 s); `done` follows | code |
 | `ping` | none | computer relay only: every 15 s of silence; ignore | code |
 | `done` | none | the stream is over | live |
@@ -260,13 +261,18 @@ limits (2 at once, 8 server-wide): `compact`, `memory_edit`, `personality_genera
 
 | Op | Request | Response |
 |---|---|---|
-| `memory` | `{"op":"memory"}` | live: `{"ok":true,"enabled":true,"every":3,"items":[{"id":"m1794509148940000","kind":"preference","text":"I prefer short answers","title":"","chat":"","pinned":false,"updated":1794509148940}]}`; kinds person, preference, project, fact, episode (chat summary, `title` set); up to 300 items, pinned first |
-| `memory_add` | `{"op":"memory_add","text":"I prefer short answers","kind":"preference"}` (`kind` default `fact`) | live: `{"ok":true,"new":true}`; too short: "That note is too short." |
+| `memory` | `{"op":"memory"}` (optional `"scope"`: `all` default, `global` = notes for every chat, or a project id) | also (added 2026-11-14) `"min_every":2,"show_updates":true,"projects":[{"id":"p1","name":"Atlas"}]` and on each item `"scope":""` / `"scope_name":""` (a project id and its name for a project note); an older server leaves them out. Live before that change: `{"ok":true,"enabled":true,"every":3,"items":[{"id":"m1794509148940000","kind":"preference","text":"I prefer short answers","title":"","chat":"","pinned":false,"updated":1794509148940}]}`; kinds person, preference, project, fact, episode (chat summary, `title` set); up to 300 items, pinned first |
+| `memory_add` | `{"op":"memory_add","text":"I prefer short answers","kind":"preference"}` (`kind` default `fact`; optional `"scope"`: a project id, default the whole memory) | live: `{"ok":true,"new":true}`; too short: "That note is too short."; unknown project (or a restricted account): "There is no such project." |
 | `memory_update` | `{"op":"memory_update","id":"m...","text":"..."}` | `{"ok":true}`; "That note is gone or the text is too short." (live) |
 | `memory_pin` | `{"op":"memory_pin","id":"m...","on":true}` | `{"ok":true}` |
 | `memory_forget` | `{"op":"memory_forget","id":"m..."}` | `{"ok":true}` |
 | `memory_enable` | `{"op":"memory_enable","on":true}` | `{"ok":true}` |
 | `memory_clear` | `{"op":"memory_clear"}` | `{"ok":true}` |
+| `memory_changes` | `{"op":"memory_changes","since":0,"limit":60}` (`since` ms: only newer entries; `limit` 1 to 200) | `{"ok":true,"changes":[{"id":"g1794509131852001","time":1794509131852,"batch":"b1794509131852","source":"engine","chat":"c1","title":"Phone","scope":"p1","scope_name":"Atlas","action":"updated","note":"m1","kind":"fact","before":"Uses an A22","after":"Uses an A26","undone":false}],"latest":1794509131852,"running":false,"show_updates":true,"summary":"updated 1 note"}`; newest first; `action` is added, updated or deleted; `batch` groups the entries of one job (the "latest update" is the newest batch); only this person's own log; never holds a secret |
+| `memory_undo` | `{"op":"memory_undo","id":"g..."}` | `{"ok":true,"message":"The note has its earlier text again."}`; errors: "That change was already undone.", "That note is already gone.", "That note is gone, so its old text cannot be put back.", "The project this note belonged to is gone.", "That change is not in the list any more." |
+| `memory_settings` | `{"op":"memory_settings","every":4,"show_updates":false}` (both optional) | `{"ok":true,"every":4,"min_every":2,"show_updates":false}`; `every` is kept between `min_every` (2) and 20 |
+| `memory_export` | `{"op":"memory_export","scope":"all"}` (`all` default, `global`, or a project id) | `{"ok":true,"format":"zo-memory-1","exported_at":...,"projects":[{"id","name"}],"notes":[{"text","kind","scope","pinned","created","updated"}]}`; chat summaries are not part of it |
+| `memory_import` | `{"op":"memory_import","data":{...the export...}}` | `{"ok":true,"added":2,"already_there":1,"skipped":1}`; a note of a project goes to the project with the same id or name here, else it is skipped (never moved into the whole memory); text that looks like a secret is skipped; at most 2000 notes; "That is not a memory export." |
 | `memory_edit` | `{"op":"memory_edit","text":"join my preferences into one note"}` | `{"ok":true,"message":"..."}`; counts as an answer |
 | `personalities` | `{"op":"personalities"}` | live: `{"ok":true,"active":"friend","items":[{"id":"friend","name":"Friendly buddy","prompt":"Sound like a warm ...","generated":false,"builtin":true}, ...]}`; built-in ids: friend, engineer, mentor, sharp; own ones `p<ms>`; `active:""` = Plain |
 | `personality_use` | `{"op":"personality_use","id":"friend"}` (`""` = Plain) | `{"ok":true}` |
@@ -277,16 +283,23 @@ limits (2 at once, 8 server-wide): `compact`, `memory_edit`, `personality_genera
 ### 4.4 Projects, artifacts, schedules, machines, MCP (admin only)
 
 For a restricted account every op in this block except `artifacts` answers `{"ok":false,"error":"<refusal>"}` (live): machines "Machines (SSH) are not available to this account."; `mcp_*` "MCP servers are not available to this account.";
-`schedule*` "Scheduled tasks are not available to this account."; `scheduled` and `project*` "Projects and scheduled tasks are not available to this account.".
+`project*` "Projects are not available to this account.". **Scheduled tasks (changed 2026-11-14, Scheduled v2, see `docs/SCHEDULED.md`)** are available to a restricted account too, on the server only: reminders and web search tasks, 5 tasks, repeats of at least 60 minutes, 24 runs a day; the operator's `ZO_CLOUD_TASKS=admins|off` can narrow it, then `scheduled` and `schedule*` answer "Scheduled tasks are not available to this account.".
 
 | Op | Request | Response |
 |---|---|---|
 | `projects` | `{"op":"projects"}` | live: `{"ok":true,"text":"p1794509093697 \| Demo \| g \| 0 memory notes"}` (one line per project: id, name, goal, "N memory notes", separated by vertical bars; none: `"There are no projects."`) |
+| `project_delete` | `{"op":"project_delete","id":"p...","confirm":true}` | `{"ok":true,"notes_removed":3}`; without `"confirm":true`: "Confirm first: deleting a project also deletes its memory notes."; unknown: "There is no such project."; the project's notes and their log entries go, its chats stay |
 | `project_create` | `{"op":"project_create","name":"Demo","goal":"g"}` | live: `{"ok":true,"message":"Created the project \"Demo\" (id p1794509093697). It is on the Projects page."}`; duplicate name: error |
 | `artifacts` | `{"op":"artifacts"}` | live: `{"ok":true,"items":[]}`; items `{id, kind ("code"/"screenshot"/"file"), title, path, text (<= 20,000 characters or null), chat, created}`, at most 100 (code) |
-| `scheduled` | `{"op":"scheduled"}` | live: `{"ok":true,"tasks":[{"id":"t17945090995370","title":"t","prompt":"t","next_run":1794512699000,"repeat":"once","enabled":true}]}` |
-| `schedule_add` | `{"op":"schedule_add","task":"check disk","when":"tomorrow 9am","repeat":"daily","title":"Disk"}` (`repeat`, `title` optional; `repeat` is once, hourly, daily, weekly, monthly or "every 3 days"/"every 90 minutes"/"every 2 months", at least 5 minutes) | live: `{"ok":true,"message":"Scheduled \"t\" for ... (once). It is on the Scheduled page, id t17945090995431."}`. **Known server bug (live)**: `when` is parsed with GNU `date -d`, so `"in 2 hours"` fails with `{"ok":false,"error":"I couldn't read \"in 2 hours\" as a time. Try \"tomorrow 9am\", \"in 2 hours\" or \"2026-11-05 18:30\"."}` while `"now + 1 hour"`, `"tomorrow 9am"`, `"2026-11-20 18:30"` work; the app rewrites a leading "in " to "now + " |
+| `scheduled` | `{"op":"scheduled"}` | `{"ok":true,"tasks":[{"id","title","prompt","next_run","repeat","enabled","kind" (task/reminder/browser),"run_on" ("this"/"cloud"/"machine:<name>"),"tz","day","last_run","last_chat","last_status" (ok/failed/skipped),"last_output","history_count","running","place"}],"host":"cloud","run_on":[{"id","label","note"}],"kinds":["reminder","task"],"limits":{"max_tasks","min_repeat_minutes","runs_per_day","runs_today"},"now"}`; every field after `enabled` is new and optional (an older server gives the first six only) |
+| `schedule_add` | `{"op":"schedule_add","task":"check disk","when":"every weekday at 9","title":"Disk","kind":"task","run_on":"cloud","tz":"Asia/Karachi"}` (`repeat` optional: once, hourly, daily, weekdays, weekly, monthly or "every 3 days"/"every 90 minutes"/"every 2 months"; it wins over a repeat in the words; the account's limits apply) | `{"ok":true,"task":{...},"message":"Scheduled ..."}`. `when` is plain words: "tomorrow 9am", "**in 2 hours**" (works since 2026-11-14; the old "GNU date" bug is fixed on the server, the app still rewrites a leading "in " to "now + " for older servers), "every weekday at 9", "on the 1st of each month" |
+| `schedule_update` | `{"op":"schedule_update","id":"t..","task":"...","kind":"reminder","when":"..."}` (every field optional; no `when` keeps the time) | `{"ok":true,"task":{...}}` |
+| `schedule_enable` | `{"op":"schedule_enable","id":"t..","on":false}` | `{"ok":true,"task":{...}}`; unknown: "That task is gone." |
+| `schedule_run_now` | `{"op":"schedule_run_now","id":"t.."}` | `{"ok":true,"started":true,"task":{...}}`; the run is in the background, its result shows in the task and as a notification |
+| `schedule_history` | `{"op":"schedule_history","id":"t.."}` | `{"ok":true,"task":{...},"history":[{"time","status","summary","chat","ms","missed","how" ("scheduled"/"manual")}]}` (20 at most, newest first) |
+| `schedule_preview` | `{"op":"schedule_preview","when":"every weekday at 9","repeat":"","tz":"Asia/Karachi"}` | `{"ok":true,"repeat":"weekdays","runs":[{"at","label"}],"text":"next run: ..."}`; unreadable time: `{"ok":false,"error":"..."}` |
 | `schedule_cancel` | `{"op":"schedule_cancel","id":"t..."}` | `{"ok":true}`; unknown: "That task is gone." (live) |
+| Test | `POST /api/schedule/test` with `{"id":"t.."}` or `{"draft":{"task","kind","title","run_on"},"tz"}` | an NDJSON stream like `/api/send`: `stream`, `test`, `delta`, `tool_start`, `tool_done`, `approval` (answer with `/api/reply`), `notify`, `result {ok,status,summary,tools,ms,chat}`, `done` |
 | `machines` | `{"op":"machines"}` | live: `{"ok":true,"machines":[]}`; items `{name, host, user, port, note, has_key}` |
 | `machine_add` | `{"op":"machine_add","name":"vm1","host":"203.0.113.7","user":"ubuntu","port":22,"note":"n","key":"-----BEGIN OPENSSH PRIVATE KEY-----\n..."}` | `{"ok":true}`; **the key is required** (live without: `{"ok":false,"error":"Paste the private key that this machine accepts."}`); `port` is a number or a string |
 | `machine_test` | `{"op":"machine_test","name":"vm1"}` | `{"ok":true,"message":"..."}` (code) |
@@ -296,6 +309,10 @@ For a restricted account every op in this block except `artifacts` answers `{"ok
 | `mcp_import` | `{"op":"mcp_import","config":"<JSON of mcpServers>"}` | `{"ok":true,"message":"..."}`; live error for `{}`: "No server was found in that. A server needs a \"command\" (a program) or a \"url\" (a remote server)." |
 | `mcp_toggle` | `{"op":"mcp_toggle","name":"x","enabled":false}` | `{"ok":true}`; unknown: "no such server" (live) |
 | `mcp_remove` | `{"op":"mcp_remove","name":"x"}` | `{"ok":true}`; unknown: "no server named x" |
+| `connectors` | `{"op":"connectors","q":"","cursor":null,"kind":"remote","category":"all"}` | `{"ok":true,"restricted":false,"featured":[entry],"entries":[entry],"next":"<cursor>|null","stale":false,"error":null}`; entry `{id,title,description,version,website,publisher,category,featured,trust,kind,remotes:[{url,headers:[{name,description,secret,required,value?}]}]}`; restricted: `{"restricted":true,"message":...,"entries":[]}`. Same data as `GET /api/connectors?q=&cursor=&kind=&category=` (docs/MCP.md "Browse connectors") |
+| `connector_preview` | `{"op":"connector_preview","id":"com.x/y","kind":"remote","name":"x","url":"optional","headers":{"Authorization":"..."}}` | `{"ok":true,"name","target","tools":[..],"trust","notice"}`; tries the server, saves nothing; restricted: refused |
+| `connector_add` / `connector_cancel` | `{"op":"connector_add","name":"x"}` | saves what was tried (`{"ok":true,"message"}`) / drops it |
+| `connector_accept_change` | `{"op":"connector_accept_change","name":"x"}` | uses the new address a connector's registry entry lists (`mcp_list` items then carry `registry` and `address_changed`) |
 
 ### 4.5 Computer relay op
 
@@ -359,7 +376,7 @@ bodies 1 MB (`/api/op`, `/api/reply`), 14 MB (`/api/send`), 20 MB (sync), arrivi
 ## 11. Notes on what the server does not give the phone
 
 * No paging of chats: `chats` returns the newest 60; `search` covers up to 100 stored chats.
-* No op returns the Context breakdown, the project workspace, scheduled-task run state (`last_run`, `last_chat`, run now, on/off) or the model's vision setting for `select`.
+* No op returns the Context breakdown, the project workspace, the model's vision setting for `select`.
 * `question` events and `needs_you` pushes are specified but not built (INTERACTION.md); approvals are live. A push for an approval does not exist yet: the "needs you" notification can only be made while a stream is open.
 * The desktop's `edit` is not forwarded to a linked computer.
 * Keys are never returned by any op (`has_key` only).

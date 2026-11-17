@@ -55,3 +55,56 @@ Access tokens are renewed shortly before they run out (Claude renews 5 minutes b
   inside one message).
 * Showing resources and prompts in the interface (the model can use them; there is no `@` picker or `/` list yet).
 * Extensions in the `.mcpb` format.
+
+## Browse connectors (the directory)
+
+Settings > Connected apps > **Browse connectors** (desktop, website and Android app) lists remote MCP servers to add with one click. Built
+2026-11-14 from `docs/CONNECTORS-DIRECTORY-PLAN.md`; code in `crates/zo-core/src/connectors/` (`mod.rs`: registry, parser, filter, cache;
+`add.rs`: the Add steps), `crates/zo-server/src/connectors_api.rs`, `crates/zohara-agent/src/connectors_ui.rs`, the page in
+`crates/zo-server/web/index.html` (`connectorsBrowse`), and `SettingsConnectors.kt` on Android.
+
+**Source.** The official MCP registry, `https://registry.modelcontextprotocol.io/v0/servers?limit=50&version=latest[&search=][&cursor=]`
+and `/v0/servers/<id>/versions/latest`: plain GETs, no key, nothing about the person, JSON only, at most 3 MB, no redirects, 15 s.
+Shown: status `active`, `isLatest`, and a `streamable-http` remote at a public `https://` address (the old SSE type is not supported), or an
+npm/pypi package with literal arguments (second list). Titles and descriptions are third-party text: control characters removed, cut
+short. No icon is loaded from an entry (the publisher would learn who is browsing): the clients draw a letter. Category comes from words
+in the id, title and description (dev, docs, chat, data, finance, media, search, other).
+
+**Cache and limits.** The Zohara Agent server keeps each answer 1 hour; a failed request is not repeated for 5 minutes, and the last good
+answer is served meanwhile (`stale: true`, with a sentence). At most 40 requests a minute go to the registry for the whole process, and 30
+a minute per person reach the server's `GET /api/connectors?q=&cursor=&kind=remote|local&category=` (any sign-in; a restricted account gets
+`{"restricted":true,"message":...,"entries":[]}`). The website and the desktop use the endpoint / the `connectors` op; the Android app uses
+the `connectors` op (it only posts). A desktop that is signed in asks the server (the registry never sees its address); **a desktop
+that is not signed in asks the registry itself with the same plain GET and no identifier.** `ZO_CONNECTORS_REGISTRY_URL` points the
+server (or the desktop) at a mirror; tests use a fake registry on 127.0.0.1.
+
+**Featured.** `FEATURED` in `connectors/mod.rs` (Notion, GitHub, Linear, Atlassian, Sentry, Stripe, PayPal, Cloudflare, Figma, Zapier,
+Vercel, Supabase). Each id was found in the live registry on 2026-11-14 and is asked for again at every refresh; one that the registry does
+not answer for is not shown. Slack, Asana, Intercom and Spotify were not in the registry under their own names that day, so they are not
+listed (add them to `FEATURED` when they appear). Featured ones are labelled "Featured by Zohara Agent"; every other entry says "Not
+reviewed by Zohara Agent".
+
+**Add** is two steps (ops `connector_preview`, then `connector_add`; `connector_cancel` drops a try). The address always comes from the
+registry's own record, never from the caller; it must be public https (same guard as model servers, and the host is looked up: a name
+that resolves to a private address is refused, and a server from the directory is connected to with an agent that re-checks at connect time
+and follows no redirect). Keys the entry asks for (headers such as `Authorization: Bearer ...`, shown with the header's name; a bare token
+for `Authorization` becomes a bearer token) go to the key store, never into `mcp-servers.json`. The server is tried (a sign-in opens the
+person's browser on the desktop; on the cloud server a sign-in cannot finish, so only key-based ones work there), the tool names are
+shown with the notice that every call still asks in Manual and Auto mode, and only a second yes saves it. Nothing is left behind after a
+failed try or Cancel. A saved connector remembers its registry id (`registry`), which marks it "Added" and is never synced.
+
+**Local (npm/pypi) entries** are listed in "Runs on this computer" with the runtime they need. Adding writes `npx -y <package>@<version>` or
+`uvx <package>@<version>` only after the person ticks a confirmation naming the exact command (the op needs the command typed back as
+`confirm`), and only when `npx`/`uvx` exist. They are never added on the cloud server, and the website and the phone only explain this.
+
+**Address changed.** Once per desktop run (and by the `connector_check` op) the directory is asked about every connector added from it. One
+whose saved address is no longer listed is held (not started) and shows "Address changed: the directory now lists ...". "Use the new
+address" forgets the old sign-in and keys (they must not go to the new address) and switches it on; switching it on as it is keeps the old
+address. A server that arrives by sync with another address is treated the same way (it already came in held, without keys).
+
+**Restricted accounts** on the cloud get no MCP; the browse screen says why and shows no Add. `connector_*` ops are refused for them.
+
+**Tests.** `cargo test -p zo-core --lib connectors` (recorded registry JSON in `crates/zo-core/data/registry-page.json` and
+`registry-featured.json`: entries with several remotes, only packages, deprecated, old versions, bad addresses; the filter, cache and
+fallback, the rate limit, big/non-JSON answers, SSRF refusals, the Add flow against a fake MCP server, the restricted account, address
+changes), `cargo test -p zo-server connectors_directory`, `ConnectorsApiTest` on Android.

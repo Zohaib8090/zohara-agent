@@ -92,6 +92,8 @@ class ZoNotifier(
 
   /** The app is not running and a data message came from FCM: `{type, chat, title?}` (NOTIF-04). Unknown types and invalid chat ids are dropped. */
   fun fromPush(data: Map<String, String>): Boolean {
+    // a scheduled task ended (a reminder has no chat): `{type:"task", chat?, ok, reminder, title?, body?}`
+    if (data["type"] == "task") return taskFinished(DeepLinks.validChatId(data["chat"]), data["title"], data["body"], data["ok"] != "false", data["reminder"] == "true")
     val chat = DeepLinks.validChatId(data["chat"]) ?: return false
     return when (data["type"]) {
       "answer" -> answerFinished(chat, data["title"])
@@ -137,6 +139,22 @@ class ZoNotifier(
   }
 
   /** The decision was made (in the app or from the notification): the notice goes away. */
+  /**
+   * A scheduled task ended or a reminder is due, while the app is in the background ("Answers" switch). A tap opens the chat the run left (a reminder has none:
+   * it opens the app). [title] and [body] are only used when the person turned titles on.
+   */
+  fun taskFinished(chat: String?, title: String?, body: String?, ok: Boolean, reminder: Boolean): Boolean {
+    val s = settings.value
+    if (foreground() || !s.answers || !permission()) return false
+    val t = NotifyText.task(s.showTitle, title, body, ok, reminder)
+    val tag = "zo-task-" + (chat ?: title ?: "x")
+    val tap = if (chat != null) openChatIntent(chat) else PendingIntent.getActivity(
+      context, id("zo-task-open"), Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
+    post(tag, id(tag), builder(NotificationChannels.ANSWERS, t, chat.orEmpty(), tap).setPriority(if (reminder || !ok) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT).build())
+    return true
+  }
+
   fun cancelNeedsYou(chat: String) { nm?.cancel(tagNeed(chat), id(tagNeed(chat))) }
   fun cancelAnswer(chat: String) { nm?.cancel(tagAnswer(chat), id(tagAnswer(chat))) }
 

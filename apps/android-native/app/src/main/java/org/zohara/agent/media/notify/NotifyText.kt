@@ -12,6 +12,17 @@ object NotifyText {
     return if (showTitle && t.isNotEmpty()) Text(t, "Zohara Agent: your answer is ready") else Text(APP, "Your answer is ready")
   }
 
+  /**
+   * A scheduled task ended, or a reminder is due (docs/SCHEDULED.md). Without "Show the chat title in notifications" only the fact is said (the server does
+   * not send the text then); with it the task's name is the title and the short result (or the reminder's text) the body.
+   */
+  fun task(showTitle: Boolean, title: String?, body: String?, ok: Boolean, reminder: Boolean): Text {
+    val fact = if (reminder) "A reminder is due" else if (ok) "A scheduled task finished" else "A scheduled task failed"
+    val t = clip(title)
+    val b = clip(body, 140)
+    return if (showTitle && t.isNotEmpty()) Text(t, b.ifEmpty { fact }) else Text(APP, fact)
+  }
+
   /** an approval: default "Zohara Agent needs your decision"; with details the summary */
   fun approval(details: Boolean, summary: String?): Text {
     val s = clip(summary, 120)

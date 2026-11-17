@@ -9,14 +9,16 @@ mod chat;
 mod claude_ui;
 use zo_core::store::chats;
 use zo_core::store::artifacts;
-use zo_core::store::schedules;
 mod composer;
+mod connectors_ui;
 mod dock;
 mod markdown;
+mod memfeed;
 mod modelpick;
 use zo_core::store::projects as model;
 mod questioncard;
 mod quick;
+mod sched_ui;
 mod scheduler;
 mod settings;
 mod shortcut;
@@ -407,152 +409,14 @@ fn open_code(ui: &Rc<Ui>, title: &str, text: &str) {
     win.present();
 }
 
-/// The Scheduled page: every task, when it runs next, and buttons to run it now, switch it off or remove it.
+/// The Scheduled page (sched_ui.rs): every task, when it runs next, its last result, and the buttons.
 fn refresh_scheduled(ui: &Rc<Ui>) {
-    while let Some(c) = ui.sched_list.first_child() {
-        ui.sched_list.remove(&c);
-    }
-    let tasks = schedules::load();
-    if tasks.is_empty() {
-        let empty = vbox(10);
-        empty.add_css_class("empty-box");
-        empty.set_margin_top(40);
-        let t = lbl("Nothing is scheduled", "empty-title");
-        t.set_halign(gtk::Align::Center);
-        let d = lbl("Ask Zohara Agent in a chat to do something later (for example \"every morning at 8, check my disk space\"), or press New task.", "empty-text");
-        d.set_halign(gtk::Align::Center);
-        d.set_wrap(true);
-        d.set_justify(gtk::Justification::Center);
-        d.set_max_width_chars(60);
-        empty.append(&t);
-        empty.append(&d);
-        ui.sched_list.append(&empty);
-        return;
-    }
-    for task in tasks {
-        let card = hbox(12);
-        card.add_css_class("project-card");
-        let ic = icon("alarm-symbolic", 18);
-        ic.add_css_class("pc-icon");
-        card.append(&ic);
-        let col = vbox(3);
-        col.set_hexpand(true);
-        let title = lbl(&task.title, "pc-name");
-        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        col.append(&title);
-        let when = if task.enabled {
-            format!("Next: {} · {}", schedules::format_when(task.next_run), task.repeat)
-        } else if let Some(ran) = task.last_run {
-            format!("Done {} · {}", model::relative(ran), task.repeat)
-        } else {
-            format!("Off · {}", task.repeat)
-        };
-        col.append(&lbl(&when, "pc-meta"));
-        let what = lbl(&task.prompt, "pc-meta");
-        what.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        col.append(&what);
-        card.append(&col);
-
-        if let Some(chat_id) = task.last_chat.clone() {
-            let open = icon_button("chat-message-new-symbolic", "Open the last result", "icon-btn");
-            let ui2 = ui.clone();
-            open.connect_clicked(move |_| {
-                if let Some(c) = chats::load().into_iter().find(|c| c.id == chat_id) {
-                    open_chat(&ui2, c);
-                }
-            });
-            card.append(&open);
-        }
-        let run = icon_button("media-playback-start-symbolic", "Run it now", "icon-btn");
-        let (ui2, id) = (ui.clone(), task.id.clone());
-        run.connect_clicked(move |_| {
-            schedules::run_now(&id);
-            let done = ui2.clone();
-            scheduler::check(Rc::new(move || refresh_scheduled(&done)));
-            refresh_scheduled(&ui2);
-        });
-        card.append(&run);
-        let sw = gtk::Switch::new();
-        sw.set_active(task.enabled);
-        sw.set_valign(gtk::Align::Center);
-        sw.set_tooltip_text(Some("On or off"));
-        let (ui2, id) = (ui.clone(), task.id.clone());
-        sw.connect_state_set(move |_, on| {
-            schedules::set_enabled(&id, on);
-            refresh_scheduled(&ui2);
-            glib::Propagation::Proceed
-        });
-        card.append(&sw);
-        let del = icon_button("edit-delete-symbolic", "Remove", "icon-btn");
-        let (ui2, id) = (ui.clone(), task.id.clone());
-        del.connect_clicked(move |_| {
-            schedules::remove(&id);
-            refresh_scheduled(&ui2);
-        });
-        card.append(&del);
-        ui.sched_list.append(&card);
-    }
+    sched_ui::refresh(ui);
 }
 
-/// The "New task" window.
+/// The "New task" window (sched_ui.rs).
 fn open_new_task(ui: &Rc<Ui>, project: Option<String>) {
-    let (win, body, foot) = sheet(ui, "New scheduled task", 560);
-    let what = gtk::Entry::new();
-    what.set_placeholder_text(Some("e.g. check my disk space and tell me if it is above 90%"));
-    what.add_css_class("field-input");
-    body.append(&field("What should Zohara Agent do?", &what));
-    let when = gtk::Entry::new();
-    when.set_placeholder_text(Some("tomorrow 9am, in 2 hours, 2026-11-05 18:30"));
-    when.add_css_class("field-input");
-    body.append(&field("When", &when));
-    let preview = lbl("", "field-hint");
-    body.append(&preview);
-    let repeat = gtk::DropDown::from_strings(&["Once", "Every hour", "Every day", "Every week", "Every month"]);
-    body.append(&field("Repeat", &repeat));
-    // or your own interval, which wins over the choice above
-    let custom = gtk::Entry::new();
-    custom.set_placeholder_text(Some("or your own: every 3 days, every 90 minutes, every 2 months"));
-    custom.add_css_class("field-input");
-    body.append(&custom);
-    let error = lbl("", "field-hint");
-    body.append(&error);
-    {
-        let preview = preview.clone();
-        when.connect_changed(move |e| {
-            let t = e.text();
-            preview.set_text(&if t.trim().is_empty() { String::new() } else {
-                match schedules::parse_when(&t) {
-                    Ok(ms) => format!("→ {}", schedules::format_when(ms)),
-                    Err(_) => "I can't read that as a time yet.".to_string(),
-                }
-            });
-        });
-    }
-    let cancel = secondary("Cancel");
-    let create = primary("Create task");
-    foot.append(&cancel);
-    foot.append(&create);
-    {
-        let w = win.clone();
-        cancel.connect_clicked(move |_| w.close());
-    }
-    {
-        let (w, ui2) = (win.clone(), ui.clone());
-        create.connect_clicked(move |_| {
-            let chosen = ["once", "hourly", "daily", "weekly", "monthly"][repeat.selected() as usize];
-            let typed = custom.text().to_string();
-            let repeat_id = if typed.trim().is_empty() { chosen } else { typed.trim() };
-            let result = schedules::parse_when(&when.text()).and_then(|ms| schedules::add("", &what.text(), ms, repeat_id, project.clone()));
-            match result {
-                Ok(_) => {
-                    w.close();
-                    refresh_scheduled(&ui2);
-                }
-                Err(e) => error.set_text(&e),
-            }
-        });
-    }
-    win.present();
+    sched_ui::open_form(ui, None, project);
 }
 
 /// The search page: chats and projects that match what is typed (everything recent when it is empty).
@@ -898,6 +762,28 @@ fn open_project(ui: &Rc<Ui>, id: &str) {
     ui.stack.set_visible_child_name("project");
     set_nav(ui, "projects");
     ui.top_title.set_text(&format!("Projects  /  {}", project.name));
+}
+
+/// Deletes the open project after a confirm. Its memory notes (what the memory agent learned in it) go with it; the chats stay.
+fn delete_project(ui: &Rc<Ui>) {
+    let Some(id) = ui.current.borrow().clone() else { return };
+    let name = ui.store.borrow().get(&id).map(|p| p.name.clone()).unwrap_or_default();
+    let notes = zo_core::store::memory::load().items.iter().filter(|i| i.scope == id).count();
+    let body = format!(
+        "\"{name}\" is removed from this computer, with its instructions and its {notes} memory note{}. Chats you had in it stay. This cannot be undone.",
+        if notes == 1 { "" } else { "s" }
+    );
+    let ui2 = ui.clone();
+    confirm_delete(ui, "Delete this project?", &body, move || {
+        let removed = ui2.store.borrow_mut().remove(&id);
+        if removed.is_some() {
+            save_store(&ui2);
+        }
+        *ui2.current.borrow_mut() = None;
+        refresh_projects(&ui2);
+        ui2.stack.set_visible_child_name("projects");
+        set_nav(&ui2, "projects");
+    });
 }
 
 fn update_rail(ui: &Rc<Ui>) {
@@ -1318,6 +1204,36 @@ fn open_memory(ui: &Rc<Ui>) {
                 col.append(&lbl(&entry.when, "sheet-item-sub"));
             }
             row.append(&col);
+            body.append(&row);
+        }
+    }
+
+    // what the memory agent learned in this project's chats: only chats of this project are told it
+    let learned: Vec<_> = zo_core::store::memory::load().items.into_iter().filter(|i| i.scope == id).collect();
+    if !learned.is_empty() {
+        let h = lbl("Learned in this project's chats", "pc-meta");
+        h.set_xalign(0.0);
+        h.set_margin_top(8);
+        body.append(&h);
+        for it in learned {
+            let row = hbox(10);
+            row.add_css_class("sheet-item");
+            let col = vbox(2);
+            col.set_hexpand(true);
+            let t = lbl(&it.text, "sheet-item-name");
+            t.set_wrap(true);
+            t.set_xalign(0.0);
+            col.append(&t);
+            row.append(&col);
+            let forget = icon_button("edit-delete-symbolic", "Forget this note", "icon-btn");
+            {
+                let (r, nid) = (row.clone(), it.id.clone());
+                forget.connect_clicked(move |_| {
+                    zo_core::store::memory::forget(&nid);
+                    r.set_visible(false);
+                });
+            }
+            row.append(&forget);
             body.append(&row);
         }
     }
@@ -1898,6 +1814,8 @@ fn build_ui(app: &adw::Application) {
     let send_btn = icon_button("go-up-symbolic", "Send", "tool-btn send");
     tools.append(&send_btn);
     composer.append(&tools);
+    // "Memory updated · View", above the message box (it shows only when the memory agent changed something)
+    composer_wrap.append(&memfeed::chip());
     composer_wrap.append(&composer);
 
     // under the card: which model, which permission mode
@@ -2069,6 +1987,7 @@ fn build_ui(app: &adw::Application) {
     let pv_send = icon_button("go-up-symbolic", "Send", "tool-btn send");
     pv_tools.append(&pv_send);
     pv_composer.append(&pv_tools);
+    pv_wrap.append(&memfeed::chip());
     pv_wrap.append(&pv_composer);
 
     let pv_meta = hbox(2);
@@ -2113,11 +2032,14 @@ fn build_ui(app: &adw::Application) {
     let (r_mem, a_mem) = rail_button("preferences-other-symbolic", "Memory");
     a_mem.set_text("View");
     let (r_sch, a_sch) = rail_button("alarm-symbolic", "Scheduled");
+    let (r_del, a_del) = rail_button("edit-delete-symbolic", "Delete project");
+    a_del.set_text("");
 
     rail.append(&r_instr);
     rail.append(&r_ctx);
     rail.append(&r_mem);
     rail.append(&r_sch);
+    rail.append(&r_del);
 
     let rail_spacer = gtk::Box::new(Orientation::Vertical, 0);
     rail_spacer.set_vexpand(true);
@@ -2304,6 +2226,7 @@ fn build_ui(app: &adw::Application) {
         rail_memory: a_mem,
         rail_scheduled: a_sch,
     });
+    memfeed::start(&ui);
 
     // ---------- the microphone: Zohara's own voice to text engine ----------
     {
@@ -2659,6 +2582,10 @@ fn build_ui(app: &adw::Application) {
     }
     {
         let ui2 = ui.clone();
+        r_del.connect_clicked(move |_| delete_project(&ui2));
+    }
+    {
+        let ui2 = ui.clone();
         r_sch.connect_clicked(move |_| {
             let project = ui2.current.borrow().clone();
             open_new_task(&ui2, project);
@@ -2684,6 +2611,8 @@ fn build_ui(app: &adw::Application) {
             ui2.pv_prompt.set_text("");
             ctl.new_conversation();
             ctl.set_context(project_context(&ui2));
+            // what the memory agent learns here belongs to this project, and the chat is told this project's notes
+            ctl.set_project(ui2.current.borrow().as_deref().unwrap_or(""));
             ui2.stack.set_visible_child_name("chat");
             main_prompt.set_text(&text);
             ctl.submit(&main_prompt);

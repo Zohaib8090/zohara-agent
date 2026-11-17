@@ -211,8 +211,21 @@ class ZoApi(
 
   // ------------------------------------------------------------ 4.3 memory, personalities
 
-  suspend fun memory(): MemoryResp = opAs("memory", true)
-  suspend fun memoryAdd(text: String, kind: String = "fact") { op("memory_add") { put("text", text); put("kind", kind) } }
+  /** [scope]: "all" (default), "global" (notes for every chat) or a project id */
+  suspend fun memory(scope: String = "all"): MemoryResp = opAs("memory", true) { if (scope != "all") put("scope", scope) }
+  /** [scope] "" = the whole memory, else a project id */
+  suspend fun memoryAdd(text: String, kind: String = "fact", scope: String = "") { op("memory_add") { put("text", text); put("kind", kind); if (scope.isNotEmpty()) put("scope", scope) } }
+  /** What the memory agent changed, newest first; only entries newer than [since] (ms). */
+  suspend fun memoryChanges(since: Long = 0, limit: Int = 60): MemoryChangesResp = opAs("memory_changes", true) { if (since > 0) put("since", since); put("limit", limit) }
+  /** Undoes one change; returns the sentence to show. */
+  suspend fun memoryUndo(id: String): String = opAs<TextResp>("memory_undo") { put("id", id) }.message
+  suspend fun memorySettings(every: Int? = null, showUpdates: Boolean? = null): MemorySettingsResp = opAs("memory_settings") {
+    if (every != null) put("every", every)
+    if (showUpdates != null) put("show_updates", showUpdates)
+  }
+  /** The `zo-memory-1` document with every note and the project of each. */
+  suspend fun memoryExport(): JsonObject = op("memory_export", true)
+  suspend fun memoryImport(data: JsonObject): MemoryImportResp = opAs("memory_import") { put("data", data) }
   suspend fun memoryUpdate(id: String, text: String) { op("memory_update") { put("id", id); put("text", text) } }
   suspend fun memoryPin(id: String, on: Boolean) { op("memory_pin") { put("id", id); put("on", on) } }
   suspend fun memoryForget(id: String) { op("memory_forget") { put("id", id) } }
@@ -230,14 +243,43 @@ class ZoApi(
 
   suspend fun projects(): String = opAs<ProjectsResp>("projects", true).text
   suspend fun projectCreate(name: String, goal: String = ""): String = opAs<TextResp>("project_create") { put("name", name); put("goal", goal) }.message
+  /** Deletes a project and the memory notes kept for it (the caller has asked the person first). Returns how many notes went. */
+  suspend fun projectDelete(id: String): Int = opAs<ProjectDeleteResp>("project_delete") { put("id", id); put("confirm", true) }.notesRemoved
   suspend fun artifacts(): List<ArtifactItem> = opAs<ArtifactsResp>("artifacts", true).items
-  suspend fun scheduled(): List<ScheduledTask> = opAs<ScheduledResp>("scheduled", true).tasks
-  /** [`when`] is plain words; a leading "in " is rewritten to "now + " because the server parses it with GNU date (API.md 4.4 known bug) */
+  suspend fun scheduled(): List<ScheduledTask> = scheduledInfo().tasks
+  /** the list with where tasks can run, the kinds and the limits of this account (docs/SCHEDULED.md) */
+  suspend fun scheduledInfo(): ScheduledResp = opAs("scheduled", true)
+  /** [`when`] is plain words ("tomorrow 9am", "in 2 hours", "every weekday at 9"); a leading "in " is still rewritten to "now + " for servers older than 2026-11-14 */
   suspend fun scheduleAdd(task: String, `when`: String, repeat: String? = null, title: String? = null): String = opAs<TextResp>("schedule_add") {
     put("task", task); put("when", fixWhen(`when`))
     if (!repeat.isNullOrBlank()) put("repeat", repeat)
     if (!title.isNullOrBlank()) put("title", title)
   }.message
+  /** a task with every field: [kind] task | reminder | browser, [runOn] "" | "cloud" | "machine:<name>"; [tz] the phone's time zone so "9am" is the person's 9am */
+  suspend fun scheduleSave(
+    id: String?, task: String, `when`: String?, repeat: String?, title: String?, kind: String, runOn: String, tz: String,
+  ): ScheduledTask? = opAs<ScheduledOne>(if (id == null) "schedule_add" else "schedule_update") {
+    if (id != null) put("id", id)
+    put("task", task); put("kind", kind); put("run_on", runOn); put("tz", tz)
+    if (!`when`.isNullOrBlank()) put("when", `when`.trim())
+    if (!repeat.isNullOrBlank()) put("repeat", repeat)
+    if (title != null) put("title", title)
+  }.task
+  suspend fun scheduleEnable(id: String, on: Boolean): ScheduledTask? = opAs<ScheduledOne>("schedule_enable") { put("id", id); put("on", on) }.task
+  /** starts the task now; its result shows in the task (last result, history) and as a notification */
+  suspend fun scheduleRunNow(id: String) { op("schedule_run_now") { put("id", id) } }
+  suspend fun scheduleHistory(id: String): ScheduleHistoryResp = opAs("schedule_history", true) { put("id", id) }
+  /** "next runs: ..." for what is typed in the form; an error sentence when the time cannot be read */
+  suspend fun schedulePreview(`when`: String, repeat: String?, tz: String): SchedulePreview = opAs("schedule_preview", true) {
+    put("when", `when`.trim()); put("tz", tz)
+    if (!repeat.isNullOrBlank()) put("repeat", repeat)
+  }
+  /** Test: runs the task once now in test mode, streamed like a send (`test`, `delta`, `tool_start`, `approval`, `notify`, `result`, `done`); for a saved task [id], else the [draft] */
+  fun scheduleTest(id: String?, draft: JsonObject?, tz: String): Flow<SendEvent> =
+    stream("/api/schedule/test", buildJsonObject {
+      if (id != null) put("id", id) else if (draft != null) put("draft", draft)
+      put("tz", tz); put("client", "phone")
+    })
   suspend fun scheduleCancel(id: String) { op("schedule_cancel") { put("id", id) } }
   suspend fun machines(): List<Machine> = opAs<MachinesResp>("machines", true).machines
   suspend fun machineAdd(name: String, host: String, user: String, port: Int, note: String, key: String) {
@@ -252,6 +294,23 @@ class ZoApi(
   suspend fun mcpImport(config: String): String = opAs<TextResp>("mcp_import") { put("config", config) }.message
   suspend fun mcpToggle(name: String, enabled: Boolean) { op("mcp_toggle") { put("name", name); put("enabled", enabled) } }
   suspend fun mcpRemove(name: String) { op("mcp_remove") { put("name", name) } }
+
+  // connectors directory: the server reads the public MCP registry (cached an hour); the phone never asks the registry itself
+  suspend fun connectors(q: String = "", cursor: String? = null, category: String = "all", kind: String = "remote"): ConnectorsResp = opAs("connectors", true) {
+    put("kind", kind); put("category", category)
+    if (q.isNotBlank()) put("q", q.trim())
+    if (!cursor.isNullOrBlank()) put("cursor", cursor)
+  }
+  /** Step one of adding: the server tries the connector (keys in [headers] by header name) and lists its tools. Nothing is saved yet. */
+  suspend fun connectorPreview(id: String, name: String, url: String? = null, headers: Map<String, String> = emptyMap()): ConnectorPreview = opAs("connector_preview") {
+    put("id", id); put("kind", "remote"); put("name", name)
+    if (!url.isNullOrBlank()) put("url", url)
+    putJsonObject("headers") { headers.forEach { (k, v) -> put(k, v) } }
+  }
+  /** Step two: saves what [connectorPreview] tried. */
+  suspend fun connectorAdd(name: String): String = opAs<TextResp>("connector_add") { put("name", name) }.message
+  suspend fun connectorCancel(name: String) { op("connector_cancel") { put("name", name) } }
+  suspend fun connectorAcceptChange(name: String): String = opAs<TextResp>("connector_accept_change") { put("name", name) }.message
 
   /** 4.5: an op relayed to a linked computer. Returns the computer's own answer. */
   suspend fun desktopOp(device: String, inner: JsonObject): JsonObject {
@@ -330,8 +389,11 @@ class ZoApi(
    * A refused request (400, 401, 403, 413, 429) throws an [ApiException] when the flow is collected. Cancelling the collector closes the
    * connection, which stops the answer on the server unless `keep_running` was set.
    */
-  fun send(r: SendRequest): Flow<SendEvent> = channelFlow {
-    val call = streamHttp.newCall(request("/api/send", sendBody(r)).newBuilder().header("Accept", "application/x-ndjson").build())
+  fun send(r: SendRequest): Flow<SendEvent> = stream("/api/send", sendBody(r))
+
+  /** The NDJSON stream of one request (a send, or the Test of a scheduled task); see [send]. */
+  private fun stream(path: String, body: JsonObject): Flow<SendEvent> = channelFlow {
+    val call = streamHttp.newCall(request(path, body).newBuilder().header("Accept", "application/x-ndjson").build())
     val reader = launch(Dispatchers.IO) {
       var sawDone = false
       try {

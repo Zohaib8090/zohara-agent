@@ -198,6 +198,39 @@ class NotifyTest {
     assertEquals("Could not send your answer: Offline. Retrying.", ApprovalActions.send({ _, _, _ -> throw ApiException(ErrorKind.Offline, "Offline. Retrying.") }, 1, 1, true))
     assertNull(null)
   }
+
+  // ---------------------------------------------------------------- scheduled tasks (docs/SCHEDULED.md)
+
+  @Test fun aFinishedTaskAndADueReminderSayOnlyTheFactUnlessTitlesAreOn() {
+    assertEquals("Zohara Agent" to "A scheduled task finished", NotifyText.task(false, "Disk check", "All fine", true, false).let { it.title to it.body })
+    assertEquals("Zohara Agent" to "A scheduled task failed", NotifyText.task(false, "Disk check", "No model", false, false).let { it.title to it.body })
+    assertEquals("Zohara Agent" to "A reminder is due", NotifyText.task(false, "Call mom", "Call mom", true, true).let { it.title to it.body })
+    assertEquals("Disk check" to "All fine", NotifyText.task(true, "Disk check", "All fine", true, false).let { it.title to it.body })
+    assertEquals("Disk check" to "A scheduled task failed", NotifyText.task(true, "Disk check", "", false, false).let { it.title to it.body })
+  }
+
+  @Test fun aTaskPushShowsInTheBackgroundOpensItsChatAndANoticeForAReminderHasNoChat() {
+    val n = notifier()
+    assertTrue(n.fromPush(mapOf("type" to "task", "chat" to "c77", "ok" to "true", "reminder" to "false")))
+    assertEquals("zo-task-c77", posted[0].tag)
+    assertEquals("A scheduled task finished", posted[0].n.text())
+    assertEquals(NotificationChannels.ANSWERS, posted[0].n.channelId)
+    // a reminder has no chat
+    assertTrue(n.fromPush(mapOf("type" to "task", "ok" to "true", "reminder" to "true")))
+    assertEquals("A reminder is due", posted[1].n.text())
+    // a text is shown only when the person turned titles on, and a chat id that is not valid is dropped
+    settings.value = NotifySettings(showTitle = true)
+    n.fromPush(mapOf("type" to "task", "chat" to "../x", "ok" to "false", "title" to "Disk check", "body" to "No model is chosen."))
+    assertEquals("Disk check", posted[2].n.title()); assertEquals("No model is chosen.", posted[2].n.text())
+    assertTrue(posted[2].tag.startsWith("zo-task-Disk"))
+  }
+
+  @Test fun noTaskNoticeWhileTheAppIsOpenOrWithoutPermissionOrWhenAnswersAreOff() {
+    fg = true; assertFalse(notifier().fromPush(mapOf("type" to "task", "chat" to "c1")))
+    fg = false; perm = false; assertFalse(notifier().fromPush(mapOf("type" to "task", "chat" to "c1")))
+    perm = true; settings.value = NotifySettings(answers = false); assertFalse(notifier().fromPush(mapOf("type" to "task", "chat" to "c1")))
+    assertTrue(posted.isEmpty())
+  }
 }
 
 /** NOTIF-02: a finished answer leaves a notification (the launcher shows its dot) until the app is back on screen, then it is closed. */

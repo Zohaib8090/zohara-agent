@@ -12,6 +12,8 @@ import org.zohara.agent.core.net.ActivityItem
 import org.zohara.agent.core.net.ArtifactItem
 import org.zohara.agent.core.net.ChatSummary
 import org.zohara.agent.core.net.ClientSeen
+import org.zohara.agent.core.net.ScheduleRun
+import org.zohara.agent.core.net.ScheduledResp
 import org.zohara.agent.core.net.ScheduledTask
 import org.zohara.agent.core.net.SearchHit
 
@@ -103,6 +105,10 @@ class ProjectsHolder(private val api: PagesApi, scope: CoroutineScope) : ListHol
   /** Creates a project; returns null when it worked (the list reloads), else the server's sentence. */
   suspend fun create(name: String, goal: String): String? =
     attempt { api.projectCreate(name.trim(), goal.trim()) }.fold({ refresh(); null }, { it.sentence() })
+
+  /** Deletes a project and the memory notes kept for it; returns null when it worked (the list reloads), else the server's sentence. */
+  suspend fun delete(id: String): String? =
+    attempt { api.projectDelete(id) }.fold({ refresh(); null }, { it.sentence() })
 }
 
 // ------------------------------------------------------------------ artifacts (ART-01..05)
@@ -113,13 +119,27 @@ class ArtifactsHolder(private val api: PagesApi, scope: CoroutineScope) : ListHo
 
 // ------------------------------------------------------------------ scheduled (SCHED-01..04)
 
-/** The fields of the New task sheet. */
-data class TaskForm(val prompt: String = "", val whenText: String = "", val repeatChoice: String = "once", val ownInterval: String = "") {
-  val valid: Boolean get() = prompt.isNotBlank() && whenText.isNotBlank()
+/**
+ * The fields of the New / Edit task sheet. [kind] is task, reminder or browser; [runOn] is "" (where this list runs), "cloud" or "machine:<name>";
+ * [editId] is set when a task is being changed (then the time may stay empty: it keeps its time).
+ */
+data class TaskForm(
+  val prompt: String = "", val whenText: String = "", val repeatChoice: String = "once", val ownInterval: String = "",
+  val title: String = "", val kind: String = "task", val runOn: String = "", val editId: String? = null,
+) {
+  val valid: Boolean get() = prompt.isNotBlank() && (whenText.isNotBlank() || editId != null)
 }
 
+/** The Scheduled page's data: the list of tasks, and (from the same call) where tasks can run, which kinds there are and the limits of the account. */
 class ScheduledHolder(private val api: PagesApi, scope: CoroutineScope) : ListHolder<List<ScheduledTask>>(scope) {
-  override suspend fun load() = api.scheduled()
+  private val _info = MutableStateFlow(ScheduledResp())
+  val info: StateFlow<ScheduledResp> = _info.asStateFlow()
+
+  override suspend fun load(): List<ScheduledTask> {
+    val r = api.scheduledInfo()
+    _info.value = r
+    return r.tasks
+  }
 
   /** Cancels a task; the card leaves at once. Returns an error sentence or null. */
   suspend fun cancel(id: String): String? {
@@ -128,11 +148,26 @@ class ScheduledHolder(private val api: PagesApi, scope: CoroutineScope) : ListHo
     return attempt { api.scheduleCancel(id) }.fold({ refresh(); null }, { if (before != null) setValue(before); it.sentence() })
   }
 
-  /** Adds a task. Returns Result of the server's message; the list reloads on success. */
-  suspend fun add(f: TaskForm): Result<String> =
-    attempt { api.scheduleAdd(f.prompt.trim(), f.whenText.trim(), PagesFormat.repeatValue(f.repeatChoice, f.ownInterval).takeIf { it != "once" }) }
-      .onSuccess { refresh() }
-      .map { it }
+  /** Makes a task or saves an edit ([f].editId). Returns Result of the task; the list reloads on success. */
+  suspend fun add(f: TaskForm, tz: String = java.util.TimeZone.getDefault().id): Result<ScheduledTask?> =
+    attempt { api.scheduleSave(f, tz) }.onSuccess { refresh() }
+
+  /** The switch: the card changes at once, goes back when the server refuses. Returns an error sentence or null. */
+  suspend fun enable(id: String, on: Boolean): String? {
+    val before = current
+    if (before != null) setValue(before.map { if (it.id == id) it.copy(enabled = on) else it })
+    return attempt { api.scheduleEnable(id, on) }.fold({ refresh(); null }, { if (before != null) setValue(before); it.sentence() })
+  }
+
+  /** "Run now": starts the task on the host that owns it; the result shows in the card (last result) and as a notification. */
+  suspend fun runNow(id: String): String? = attempt { api.scheduleRunNow(id) }.fold({ refresh(); null }, { it.sentence() })
+
+  suspend fun history(id: String): Result<List<ScheduleRun>> = attempt { api.scheduleHistory(id) }
+
+  /** the "next runs: ..." line of the form */
+  suspend fun preview(f: TaskForm, tz: String = java.util.TimeZone.getDefault().id): Result<String> = attempt { api.schedulePreview(f, tz) }
+
+  fun test(id: String?, f: TaskForm?, tz: String = java.util.TimeZone.getDefault().id) = api.scheduleTest(id, f, tz)
 }
 
 // ------------------------------------------------------------------ activity (ACT-*, NAV-14, NAV-15)

@@ -235,6 +235,7 @@ svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;stroke
 .pc-icon{background:var(--user);border-radius:8px;padding:9px;color:var(--text3);display:flex}.pc-icon svg{width:18px;height:18px}
 .pc-name{font-size:15px}.pc-meta{font-size:13px;color:var(--dim)}.pc-col{flex:1;min-width:0}
 .pc-col>*{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sch-card .pc-col>*{white-space:normal;overflow-wrap:anywhere}.sch-card .sch-last{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .search-input{width:100%;background:var(--card);color:var(--text);border:1px solid var(--line2);border-radius:12px;padding:10px 14px;font-size:15px;outline:none;margin-bottom:14px}
 .search-input:focus{border-color:var(--dimmer)}
 
@@ -312,6 +313,18 @@ select optgroup{background:var(--card);color:var(--accent);font-size:11px;font-w
 .switch::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .12s}
 .switch:checked{background:#3584e4;border-color:#3584e4}.switch:checked::after{left:20px}
 .mem-group{font-size:13px;color:var(--dim);padding:14px 16px 4px}
+.memchip{display:flex;align-items:center;gap:6px;width:max-content;max-width:100%;margin:0 0 8px 4px;padding:3px 4px 3px 12px;border:1px solid var(--line8);border-radius:99px;background:var(--comp);font-size:12px;color:var(--text2);animation:memin .25s ease-out}
+.memchip svg{width:14px;height:14px;fill:none;stroke:var(--accent);stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.memchip .mc-view{font-size:12px;font-weight:600;color:var(--text);padding:3px 6px;border-radius:99px}.memchip .mc-view:hover{background:var(--hov)}
+.memchip .mc-go,.memchip .mc-x{width:24px;height:24px;min-width:24px;min-height:24px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;padding:0;flex:none}
+.memchip .mc-go{background:var(--accent);color:var(--onaccent)}.memchip .mc-go:hover{background:var(--accent2)}.memchip .mc-go svg{stroke:var(--onaccent);width:14px;height:14px}
+.memchip .mc-x{color:var(--dim)}.memchip .mc-x:hover{background:var(--hov);color:var(--text)}.memchip .mc-x svg{stroke:currentColor;width:12px;height:12px}
+.memchip.fade{opacity:0;transition:opacity .3s}@keyframes memin{from{opacity:0;transform:translateY(4px)}}
+.mc-item{border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin:6px 0;display:flex;gap:10px;align-items:center;background:var(--card)}.mc-item .col{flex:1;min-width:0}
+.mc-before{font-size:12px;color:var(--dim);text-decoration:line-through;overflow-wrap:anywhere}.mc-text{font-size:13px;overflow-wrap:anywhere}.mc-sub{font-size:11px;color:var(--dim);margin-top:2px}
+.mc-head{font-size:12px;color:var(--dim);margin:12px 0 2px;text-transform:uppercase;letter-spacing:.04em}
+.mem-scope{font-size:11px;color:var(--accent);margin-left:6px}
+
 .mem-text{font-size:13.5px}
 
 /* sheets and popovers */
@@ -584,6 +597,8 @@ const P = {
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/>', speaker: '<path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16 9a4 4 0 010 6M18.5 6.5a8 8 0 010 11"/>',
   out: '<path d="M14 5h4a1 1 0 011 1v12a1 1 0 01-1 1h-4M10 8l-4 4 4 4M6 12h10"/>', stop: '<rect x="7" y="7" width="10" height="10" rx="2"/>', check: '<path d="M5 12l5 5 9-10"/>', pin: '<path d="M9 4h6l-1 6 3 3H7l3-3-1-6zM12 13v7"/>',
 };
+P.memory = '<path d="M9 4a3 3 0 00-3 3v.5A3 3 0 004 10.5 3 3 0 005.5 13 3 3 0 007 17a3 3 0 005 2V5a2 2 0 00-3-1zM15 4a3 3 0 013 3v.5a3 3 0 012 3 3 3 0 01-1.5 2.5A3 3 0 0117 17a3 3 0 01-5 2"/>';
+P.arrow = '<path d="M5 12h14M13 6l6 6-6 6"/>'; P.close = '<path d="M6 6l12 12M18 6L6 18"/>';
 P.paste = '<rect x="6" y="5" width="12" height="15" rx="2"/><path d="M9 5V4h6v1M9 11h6M9 15h6"/>';
 P.star = '<path d="M12 4l2.4 5 5.4.7-4 3.8 1 5.4L12 16.3 7.2 18.9l1-5.4-4-3.8 5.4-.7z"/>';
 const icon = n => `<svg viewBox="0 0 24 24">${P[n] || ""}</svg>`;
@@ -630,6 +645,18 @@ function netBanner(kind) {
   b.classList.remove("hide");
 }
 const op = (o, extra = {}) => api("/api/op", { op: o, ...extra });
+/* the connectors directory is a plain GET (the server keeps the registry's answer for an hour; this page never asks the registry) */
+async function apiGet(path) {
+  let r;
+  try { r = await fetch(path, { headers: { "X-ZO-Local": "1", Authorization: "Bearer " + await token() } }); }
+  catch { netBanner("offline"); throw new Error("Cannot reach the server."); }
+  let j = {}; try { j = await r.json(); } catch {}
+  if (r.status === 401) { netBanner("unauthorized"); throw new Error(j.error || "Sign in again."); }
+  netBanner(null);
+  if (r.status === 429) throw new Error(limitMsg(r));
+  if (!r.ok || j.ok === false) throw new Error(j.error || ("Error " + r.status));
+  return j;
+}
 function toast(t, ms) { if ([...document.querySelectorAll(".toast")].some(x => x.textContent === t)) return; const d = document.createElement("div"); d.className = "toast"; d.textContent = t; document.body.appendChild(d); setTimeout(() => d.remove(), ms || 2600); }
 
 /* ---------- markdown (headings, lists, quotes, code blocks, bold, italic, links) ---------- */
@@ -725,7 +752,7 @@ function greet() {
 
 /* ---------- the composer (home and chat share it) ---------- */
 function composerHTML() {
-  return `<div class="composer"><div class="att-strip" id="attStrip" aria-label="Attachments"></div><textarea id="text" rows="1" placeholder="How can I help you today?"></textarea>
+  return `<div class="memchip hide" id="memChip" role="status" aria-live="polite"><i data-i="memory"></i><span id="memChipT">Memory updated</span><span>·</span><button class="mc-view" id="memView" title="See what changed in the memory">View</button><button class="mc-go" id="memGo" title="See what changed in the memory" aria-label="See what changed in the memory" data-i="arrow"></button><button class="mc-x" id="memX" title="Dismiss" aria-label="Dismiss" data-i="close"></button></div><div class="composer"><div class="att-strip" id="attStrip" aria-label="Attachments"></div><textarea id="text" rows="1" placeholder="How can I help you today?"></textarea>
     <div class="row"><button class="tool-btn" id="plus" title="Add pictures, files or a link" aria-label="Add pictures, files or a link" data-i="plus"></button><span class="grow"></span><span class="stepn hide" id="stepN" role="status" aria-live="off"></span>
     <button class="tool-btn mic" id="mic" data-i="mic" aria-pressed="false"></button>
     <button class="tool-btn send" id="send" title="Send" data-i="up"></button><button class="tool-btn stop hide" id="stop" title="Stop" data-i="stop"></button></div></div>
@@ -1180,6 +1207,7 @@ async function send(opts) {
   const taken = re ? { items: [], links: [], attachments: [], meta: [] } : aTake(), text = re ? text0 : [text0, aLinkText(taken.links)].filter(Boolean).join("\n\n");
   if (!$("thread")) showThread("New chat");
   const first = !chatId;
+  if (!dsk) memStart();
   if (!re) { t.value = ""; t.style.height = "auto"; }
   const bubble = re ? re.reuse : addUser(text, taken.meta); setBusy(true);
   let ai = null, acc = "", group = null, began = false, gotDone = false, answeredLabel = "";
@@ -1197,6 +1225,7 @@ async function send(opts) {
         switch (ev.event) {
           case "stream": stream = ev.id; if (dsk) { const m = document.createElement("div"); m.className = "pc-meta"; m.textContent = "Running on your computer" + (ev.device ? " (" + String(ev.device).slice(0, 60) + ")" : ""); thread().appendChild(m); } break;
           case "done": gotDone = true; clearWait(); break;
+          case "memory_updated": memShow(ev); break;
           case "chat": chatId = ev.id; began = true; setTitle(ev.title || "Chat"); break;
           case "delta": clearWait(); endGroup(group); group = null; if (!ai) { ai = aiBox(); acc = ""; } acc += ev.text; setAi(ai, acc); break;
           case "text": if (!acc) { if (!ai) ai = aiBox(); acc = ev.text; setAi(ai, acc); } break;
@@ -1221,6 +1250,7 @@ async function send(opts) {
   }
   if (answeredLabel && thread()) { thread().appendChild(answeredNote(answeredLabel)); scrollEnd(); }
   closeQuestionCards(); clearWait(); endGroup(group); stream = 0; setBusy(false); $("text")?.focus(); refreshChats(); noteAnswer(chatId, $("title") ? $("title").textContent : "", !!ai);
+  if (!dsk) memWatch();
   if (dsk) setTimeout(refreshChats, 6000); /* the computer syncs the chat to the server after the turn */
   if (ai && acc && ai.isConnected && voiceGet("read") === "1") voiceSpeak(acc, ai);
 }
@@ -2096,7 +2126,8 @@ async function showProjects() {
     const lines = /no projects/i.test(t) ? [] : t.split("\n").map(l => l.split("|").map(x => x.trim())).filter(c => c.length >= 2);
     if (!lines.length) return b.innerHTML = empty("No projects yet", "Projects keep one long-running thing together — its files, notes and context — so Zohara Agent keeps working inside it.");
     lines.forEach(c => { const d = document.createElement("div"); d.className = "card project-card"; d.style.cursor = "default"; d.innerHTML = `<div class="pc-icon">${icon("folder")}</div><div class="pc-col"><div class="pc-name"></div><div class="pc-meta"></div></div>`;
-      d.querySelector(".pc-name").textContent = c[1]; d.querySelector(".pc-meta").textContent = c.slice(2).filter(Boolean).join(" · "); b.appendChild(d); });
+      d.querySelector(".pc-name").textContent = c[1]; d.querySelector(".pc-meta").textContent = c.slice(2).filter(Boolean).join(" · ");
+      const del = document.createElement("button"); del.className = "icon-btn"; del.title = "Delete this project"; del.innerHTML = icon("trash"); del.onclick = () => confirmBox("Delete this project?", `"${c[1]}" is deleted with its instructions and the memory notes Zohara Agent kept for it. Chats you had in it stay. This cannot be undone.`, "Delete", async () => { try { await op("project_delete", { id: c[0], confirm: true }); showProjects(); } catch (e) { toast(e.message); } }); d.appendChild(del); b.appendChild(d); });
   } catch (e) { b.innerHTML = `<div class="msg-error">${esc(e.message)}</div>`; }
 }
 async function showArtifacts() {
@@ -2107,13 +2138,185 @@ async function showArtifacts() {
       b.appendChild(d); });
   } catch (e) { b.innerHTML = `<div class="msg-error">${esc(e.message)}</div>`; }
 }
+/* ===== SCHEDULED-BEGIN: scheduled tasks (docs/SCHEDULED.md). A task is something Zohara Agent does later, once or on a repeat. Kinds: task, reminder
+   (a notification only), browser task. On the web the tasks run on the cloud server (even when your computer is off); restricted accounts have
+   reminders and web search tasks with limits. The list shows next run and last result; each task has Test, Run now, History, Edit and on/off. ===== */
+Object.assign(P, {
+  play: '<path d="M8 5v14l11-7z"/>', hist: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  flask: '<path d="M9 3h6M10 3v6l-5 9a2 2 0 002 3h10a2 2 0 002-3l-5-9V3"/><path d="M7.5 15h9"/>'
+});
+const SCH_KINDS = [["task", "Task"], ["reminder", "Reminder (a notification only)"], ["browser", "Browser task (asks first)"]];
+const SCH_REPEATS = [["", "As the words say"], ["once", "Once"], ["hourly", "Every hour"], ["daily", "Every day"], ["weekdays", "Every weekday"], ["weekly", "Every week"], ["monthly", "Every month"]];
+const schTz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { return ""; } };
+const schKind = k => (SCH_KINDS.find(x => x[0] === k) || SCH_KINDS[0])[1].split(" (")[0];
+const schRepeat = r => (SCH_REPEATS.find(x => x[0] === r && r) || [0, r ? r[0].toUpperCase() + r.slice(1) : ""])[1];
+const schAgo = ms => { const s = Math.max(0, (Date.now() - ms) / 1000); return s < 60 ? "just now" : s < 3600 ? Math.floor(s / 60) + " min ago" : s < 86400 ? Math.floor(s / 3600) + " h ago" : Math.floor(s / 86400) + " d ago"; };
+let schInfo = null; /* the last list: where tasks can run, the kinds and the limits of this account */
+let schTimer = 0;
+
 async function showScheduled() {
-  setNav("scheduled"); setTitle("Scheduled"); const b = pageBox("Scheduled");
-  try { const r = await op("scheduled"); if (!r.tasks.length) return b.innerHTML = empty("Nothing scheduled", "Ask Zohara Agent in a chat to do something later or on repeat.");
-    r.tasks.forEach(t => { const d = document.createElement("div"); d.className = "card project-card"; d.innerHTML = `<div class="pc-icon">${icon("alarm")}</div><div class="pc-col"><div class="pc-name"></div><div class="pc-meta"></div></div><button class="icon-btn" title="Cancel this task" data-i="trash"></button>`; d.querySelector(".pc-name").textContent = t.title || t.prompt; d.querySelector(".pc-meta").textContent = (t.repeat ? t.repeat + " · " : "") + "next " + when(t.next_run); paint(d);
-      d.querySelector("button").onclick = () => confirmBox("Cancel this task?", "It will not run again.", "Cancel task", async () => { await op("schedule_cancel", { id: t.id }); showScheduled(); }); b.appendChild(d); });
+  setNav("scheduled"); setTitle("Scheduled");
+  const nb = document.createElement("button"); nb.className = "page-btn primary"; nb.textContent = "New task"; nb.onclick = () => schForm(null);
+  const b = pageBox("Scheduled", [nb]); b.id = "pbody";
+  clearTimeout(schTimer);
+  try {
+    const r = await op("scheduled"); schInfo = r;
+    if (!r.tasks.length) { b.innerHTML = empty("Nothing scheduled", "Ask Zohara Agent in a chat to do something later or on repeat (for example \"every weekday at 9, remind me to stand up\"), or press New task.") + '<div class="pc-meta" style="margin-top:10px;text-align:center">' + esc(schPlaceNote(r)) + "</div>"; return; }
+    const note = document.createElement("div"); note.className = "pc-meta"; note.style.margin = "0 2px 10px"; note.textContent = schPlaceNote(r); b.appendChild(note);
+    r.tasks.forEach(t => b.appendChild(schCard(t)));
+    /* a run that is going on: look again in a few seconds so the result shows */
+    if (r.tasks.some(t => t.running)) schTimer = setTimeout(() => { if ($("pbody") === b && document.querySelector('[data-nav="scheduled"].active, .nav-item.active[data-nav="scheduled"]')) showScheduled(); }, 4000);
   } catch (e) { b.innerHTML = `<div class="msg-error">${esc(e.message)}</div>`; }
 }
+function schPlaceNote(r) {
+  const cloud = r.host === "cloud";
+  return cloud ? "These tasks run on the Zohara Agent server, so they run even when your computer is off." + (restricted() ? " This account has reminders and web search tasks, with limits (" + (r.limits ? r.limits.max_tasks + " tasks, at most every " + r.limits.min_repeat_minutes + " minutes" : "") + ")." : "")
+    : "These tasks run on this computer while Zohara Agent is running.";
+}
+function schCard(t) {
+  const d = document.createElement("div"); d.className = "card project-card sch-card"; d.style.cursor = "default"; d.style.flexWrap = "wrap";
+  const late = t.enabled && !t.running && t.next_run + 300000 < Date.now();
+  const line = t.running ? "Running now" : t.enabled ? "Next " + when(t.next_run) + (late ? " (missed, runs once soon)" : "") : "Off";
+  d.innerHTML = `<div class="pc-icon">${icon(t.kind === "reminder" ? "alarm" : "list")}</div><div class="pc-col"><div class="pc-name"></div><div class="pc-meta"></div><div class="pc-meta sch-last"></div></div><input type="checkbox" class="switch" title="On or off" aria-label="On or off"><div class="sch-btns" style="display:flex;gap:2px;width:100%;justify-content:flex-end;flex-wrap:wrap"></div>`;
+  d.querySelector(".pc-name").textContent = t.title || t.prompt;
+  d.querySelector(".pc-meta").textContent = [line, schRepeat(t.repeat), schKind(t.kind), t.place].filter(Boolean).join(" · ");
+  const last = d.querySelector(".sch-last");
+  if (t.last_status && t.last_run) { last.textContent = "Last run: " + t.last_status + " " + schAgo(t.last_run) + (t.last_output ? " — " + t.last_output : ""); if (t.last_status !== "ok") last.style.color = "var(--danger)"; } else last.remove();
+  const sw = d.querySelector(".switch"); sw.checked = !!t.enabled;
+  sw.onchange = async () => { try { await op("schedule_enable", { id: t.id, on: sw.checked }); } catch (e) { toast(e.message); } showScheduled(); };
+  const bar = d.querySelector(".sch-btns");
+  const add = (ic, tip, fn) => { const x = document.createElement("button"); x.className = "icon-btn"; x.title = tip; x.setAttribute("aria-label", tip); x.dataset.i = ic; x.onclick = fn; bar.appendChild(x); return x; };
+  if (t.last_chat) add("chat", "Open the last result", () => openChat(t.last_chat));
+  add("flask", "Test: run it once now without changing its schedule", () => schTest({ id: t.id }, t.title || t.prompt));
+  const run = add("play", t.running ? "It is running now" : "Run it now", async () => { run.disabled = true; try { await op("schedule_run_now", { id: t.id }); toast("Started. The result shows here and as a notification."); } catch (e) { toast(e.message); } setTimeout(showScheduled, 600); });
+  if (t.running) run.disabled = true;
+  add("hist", "History: the last runs", () => schHistory(t));
+  add("edit", "Edit", () => schForm(t));
+  add("trash", "Remove", () => confirmBox("Remove this task?", "It will not run again.", "Remove", async () => { try { await op("schedule_cancel", { id: t.id }); } catch (e) { toast(e.message); } showScheduled(); }));
+  paint(d); return d;
+}
+async function schHistory(t) {
+  const box = document.createElement("div"); box.innerHTML = '<div class="pc-meta">Loading…</div>';
+  const sh = sheet("History: " + (t.title || t.prompt), box, [btn("Close", "primary", () => sh.close())], true);
+  try {
+    const r = await op("schedule_history", { id: t.id }); box.innerHTML = "";
+    if (!r.history.length) box.innerHTML = '<div class="pc-meta">It has not run yet.</div>';
+    r.history.forEach(h => {
+      const row = document.createElement("div"); row.className = "card"; row.style.cssText = "padding:10px 12px;margin-bottom:8px;display:flex;gap:10px;align-items:flex-start";
+      row.innerHTML = '<div class="pc-col" style="white-space:normal"><div class="pc-name2"></div><div class="pc-meta" style="white-space:normal"></div></div>';
+      row.querySelector(".pc-name2").textContent = h.status + " · " + when(h.time) + (h.missed ? " · missed " + when(h.missed) : "") + " · " + Math.round((h.ms || 0) / 1000) + " s" + (h.how === "manual" ? " · Run now" : "");
+      row.querySelector(".pc-meta").textContent = h.summary || "";
+      if (h.chat) { const o = btn("Open chat", "", () => { sh.close(); openChat(h.chat); }); row.appendChild(o); }
+      box.appendChild(row);
+    });
+  } catch (e) { box.innerHTML = `<div class="msg-error">${esc(e.message)}</div>`; }
+}
+/* Test: runs the task once now in test mode (a chat called "Test: ..."; its schedule, last run and history are not changed; every change still asks
+   first) and shows the output as it comes, then a result card: what it did, the answer, tools, time, success or failed. */
+async function schTest(payload, title) {
+  const box = document.createElement("div");
+  box.innerHTML = '<div class="field-hint" style="margin:0 0 8px"></div><div class="pc-meta sch-log" style="white-space:pre-wrap;overflow-wrap:anywhere"></div><div class="sch-ans" style="white-space:pre-wrap;overflow-wrap:anywhere;margin-top:8px"></div><div class="sch-ask"></div><div class="sch-res"></div>';
+  const hint = box.children[0], log = box.children[1], ans = box.children[2], asks = box.children[3], res = box.children[4];
+  hint.textContent = "It runs once now. Its schedule is not changed, and anything that changes something still asks first.";
+  const ctrl = new AbortController(); let stream = 0, over = false;
+  const stop = btn("Stop", "", () => { if (stream) api("/api/reply", { stream, op: "stop" }).catch(() => {}); stop.disabled = true; });
+  const sh = sheet("Test: " + title, box, [stop, btn("Close", "primary", () => { ctrl.abort(); sh.close(); })], true);
+  const closeOrig = sh.close; sh.close = () => { ctrl.abort(); closeOrig(); };
+  log.textContent = "Starting…";
+  const addLog = s => { log.textContent = (log.textContent === "Starting…" ? "" : log.textContent + "\n") + s; };
+  const fin = () => { over = true; stop.style.display = "none"; };
+  try {
+    const r = await fetch("/api/schedule/test", { method: "POST", signal: ctrl.signal, headers: { "Content-Type": "application/json", "X-ZO-Local": "1", Authorization: "Bearer " + await token() }, body: JSON.stringify({ ...payload, tz: schTz() }) });
+    if (!r.ok || !r.body) { let j = {}; try { j = await r.json(); } catch {} throw new Error(j.error || "Error " + r.status); }
+    const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "", acc = "";
+    for (;;) {
+      const { value, done } = await rd.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i; while ((i = buf.indexOf("\n")) >= 0) {
+        const l = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!l) continue;
+        let ev; try { ev = JSON.parse(l); } catch { continue; }
+        switch (ev.event) {
+          case "stream": stream = ev.id; break;
+          case "test": addLog("Test of a " + (ev.kind || "task") + ", on " + (ev.place || "this computer")); break;
+          case "delta": acc += ev.text; ans.textContent = acc; break;
+          case "text": if (!acc) { acc = ev.text; ans.textContent = acc; } break;
+          case "tool_start": addLog("▸ " + String(ev.summary || ev.name).split("\n").slice(0, 2).join(" ")); acc = ""; break;
+          case "tool_done": addLog((ev.ok ? "✓ " : "✗ ") + String(ev.output || "").slice(0, 200)); break;
+          case "approval": {
+            const d = document.createElement("div"); d.className = "ask"; d.style.marginTop = "8px";
+            d.innerHTML = `<div>Zohara Agent wants to: ${esc(ev.summary || ev.tool)}</div><div class="row"><button class="btn primary">Allow</button><button class="btn">Deny</button></div>`;
+            asks.appendChild(d); const [yes, no] = d.querySelectorAll("button");
+            const answer = ok => { api("/api/reply", { stream, op: "approve", id: ev.id, yes: ok }).catch(() => {}); d.innerHTML = `<span class="pc-meta">${ok ? "Allowed" : "Denied"}: ${esc(ev.summary || ev.tool)}</span>`; };
+            yes.onclick = () => answer(true); no.onclick = () => answer(false); break;
+          }
+          case "notify": if (ev.kind === "reminder") { const n = document.createElement("div"); n.className = "card"; n.style.cssText = "padding:10px 12px;margin-top:8px"; n.innerHTML = '<div class="pc-meta">The notification:</div><div class="pc-name2"></div><div class="pc-meta"></div>'; n.children[1].textContent = ev.title; n.children[2].textContent = ev.body; res.appendChild(n); } break;
+          case "result": {
+            const x = ev.result || {}, c = document.createElement("div"); c.className = "card"; c.style.cssText = "padding:10px 12px;margin-top:8px";
+            c.innerHTML = '<div class="pc-name2"></div><div class="pc-meta" style="white-space:normal"></div>';
+            c.children[0].textContent = (x.ok ? "Success" : x.status === "skipped" ? "Could not start" : "Failed") + " · " + ((x.ms || 0) / 1000).toFixed(1) + " s · " + (x.tools && x.tools.length ? "tools: " + x.tools.join(", ") : "no tools used");
+            if (!x.ok) c.children[0].style.color = "var(--danger)";
+            c.children[1].textContent = (x.summary || "") + (x.chat ? "\n\nThe run is saved as a chat called \"Test: ...\"." : "");
+            c.children[1].style.whiteSpace = "pre-wrap"; ans.textContent = ""; res.appendChild(c); break;
+          }
+          case "error": { const m = document.createElement("div"); m.className = "msg-error"; m.textContent = ev.message || ev.error; res.appendChild(m); break; }
+          case "done": fin(); break;
+        }
+      }
+    }
+  } catch (e) { if (e.name !== "AbortError") { const m = document.createElement("div"); m.className = "msg-error"; m.textContent = e.message; res.appendChild(m); } }
+  if (log.textContent === "Starting…") log.textContent = "";
+  fin();
+}
+/* the New / Edit form: kind, what, name, when (plain words), repeat, where it runs, the next runs, Test */
+function schForm(t) {
+  const info = schInfo || {}, editing = !!t, cur = t || {};
+  const kinds = SCH_KINDS.filter(k => !info.kinds || info.kinds.includes(k[0]));
+  const places = info.run_on && info.run_on.length ? info.run_on : [{ id: "", label: "This computer", note: "" }];
+  const w = document.createElement("div");
+  w.innerHTML = `<div class="field-label" style="margin-top:0">Kind</div><select id="sk"></select>
+    <div class="field-label" id="swl">What should Zohara Agent do?</div><textarea class="field-input" id="sw" rows="3" maxlength="8000" placeholder="e.g. check my disk space and tell me if it is above 90%"></textarea>
+    <div class="field-label">Name</div><input class="field-input" id="sn" maxlength="120" placeholder="a short name for the list (optional)">
+    <div class="field-label">When</div><input class="field-input" id="st" autocomplete="off">
+    <div class="field-label">Repeat</div><select id="sr"></select><input class="field-input" id="sc" style="margin-top:8px" placeholder="or your own: every 3 days, every 90 minutes, every 2 months">
+    <div class="field-label">Run on</div><select id="so"></select><div class="field-hint" id="son"></div>
+    <div class="field-hint" id="sp" style="font-size:12.5px;color:var(--dim)"></div><div class="msg-error" id="se"></div>`;
+  const q = s => w.querySelector(s);
+  kinds.forEach(k => q("#sk").add(new Option(k[1], k[0]))); q("#sk").value = kinds.some(k => k[0] === cur.kind) ? cur.kind : "task";
+  SCH_REPEATS.forEach(r => q("#sr").add(new Option(r[1], r[0])));
+  if (cur.repeat && SCH_REPEATS.some(r => r[0] === cur.repeat)) q("#sr").value = cur.repeat; else if (cur.repeat) q("#sc").value = cur.repeat;
+  places.forEach(p => q("#so").add(new Option(p.label, p.id))); q("#so").value = places.some(p => p.id === cur.run_on) ? cur.run_on : places[0].id;
+  q("#sw").value = cur.prompt || ""; q("#sn").value = cur.title || ""; q("#st").placeholder = editing ? "leave empty to keep the time" : "tomorrow 9am, in 2 hours, every weekday at 9, on the 1st of each month";
+  const note = () => { const p = places.find(x => x.id === q("#so").value); q("#son").textContent = p ? p.note || "" : ""; q("#swl").textContent = q("#sk").value === "reminder" ? "What should the reminder say?" : "What should Zohara Agent do?"; };
+  const base = () => editing ? "next run: " + when(cur.next_run) : "";
+  let tm = 0, seq = 0;
+  const preview = () => {
+    note(); clearTimeout(tm); const v = q("#st").value.trim(); if (!v) { q("#sp").textContent = base(); return; }
+    tm = setTimeout(async () => {
+      const my = ++seq; try { const r = await op("schedule_preview", { when: v, repeat: q("#sc").value.trim() || q("#sr").value, tz: schTz() }); if (my === seq) { q("#sp").textContent = r.text; q("#sp").style.color = ""; } }
+      catch (e) { if (my === seq) { q("#sp").textContent = "I can't use that time yet: " + e.message; q("#sp").style.color = "var(--danger)"; } }
+    }, 250);
+  };
+  ["#st", "#sc"].forEach(s => q(s).addEventListener("input", preview)); ["#sr", "#sk", "#so"].forEach(s => q(s).addEventListener("change", preview)); preview();
+  const fields = () => ({ kind: q("#sk").value, task: q("#sw").value.trim(), title: q("#sn").value.trim(), run_on: q("#so").value });
+  let sh;
+  const test = btn("Test", "", () => {
+    const f = fields(); q("#se").textContent = ""; if (!f.task) return q("#se").textContent = "Say what the task is.";
+    schTest({ draft: f }, f.title || f.task.slice(0, 40));
+  });
+  test.title = "Run it once now without saving or changing anything";
+  const save = btn(editing ? "Save" : "Create task", "primary", async () => {
+    const f = fields(), when1 = q("#st").value.trim(); q("#se").textContent = "";
+    if (!f.task) return q("#se").textContent = "Say what the task is.";
+    if (!editing && !when1) return q("#se").textContent = "Say when, for example \"tomorrow 9am\" or \"every weekday at 9\".";
+    const body = { ...f, tz: schTz() }; if (when1) body.when = when1;
+    const rep = q("#sc").value.trim() || q("#sr").value; if (rep) body.repeat = rep;
+    save.disabled = true;
+    try { await op(editing ? "schedule_update" : "schedule_add", editing ? { id: cur.id, ...body } : body); sh.close(); showScheduled(); }
+    catch (e) { q("#se").textContent = e.message; save.disabled = false; }
+  });
+  sh = sheet(editing ? "Edit scheduled task" : "New scheduled task", w, [btn("Cancel", "", () => sh.close()), test, save]);
+}
+/* ===== SCHEDULED-END ===== */
 
 /* ===== CLAUDE-LOGIN-BEGIN: one-click Claude Code login. The person sees steps (a link, a place for the code, a status), never a token. =====
    On the cloud server the server runs Claude's own sign-in for them (/api/claude/*, see claude_api.rs); on My computer a terminal opens there
@@ -2741,14 +2944,58 @@ async function pagePersonality(b) {
   const both = document.createElement("div"); both.style.cssText = "display:flex;gap:6px"; both.append(own, gen);
   b.appendChild(head("Personality")); b.appendChild(cardOf(...rows, row("Add a personality", "The AI can write one from a description (it uses the model you chose). A personality changes the voice only, never the rules or what Zohara Agent may do.", both)));
 }
+/* ---------- the memory feed: "Memory updated · View", the list of what changed, Undo (docs/MEMORY.md) ---------- */
+let memSince = null, memTimer = 0, memHide = 0, memPolls = [];
+async function memStart() { if (memSince !== null) return; memSince = 0; try { memSince = (await op("memory_changes", { limit: 1 })).latest || 0; } catch { memSince = Date.now(); } }
+function memShow(ev) {
+  if (ev.time && ev.time > memSince) memSince = ev.time;
+  const c = $("memChip"); if (!c) return; $("memChipT").textContent = ev.summary ? "Memory updated (" + String(ev.summary).toLowerCase() + ")" : "Memory updated";
+  c.classList.remove("hide", "fade"); clearTimeout(memHide); memHide = setTimeout(memDismiss, 12000);
+}
+function memDismiss() { const c = $("memChip"); clearTimeout(memHide); if (!c) return; c.classList.add("fade"); setTimeout(() => { if (c.classList.contains("fade")) c.classList.add("hide"); }, 300); }
+/* the memory agent works after the answer, on the server: ask a few times whether it changed something */
+function memWatch() {
+  memPolls.forEach(clearTimeout); memPolls = [4000, 10000, 20000, 40000, 70000].map(ms => setTimeout(async () => {
+    try { const r = await op("memory_changes", { since: memSince || 0, limit: 50 }); if (r.changes.length) { const n = r.changes.length; memSince = r.latest; if (r.show_updates) memShow({ summary: r.summary, time: r.latest, n }); memPolls.forEach(clearTimeout); } } catch {}
+  }, ms));
+}
+document.addEventListener("click", e => { const t = e.target.closest && e.target.closest("#memView,#memGo"); if (t) { memDismiss(); memSheet(true); } else if (e.target.closest && e.target.closest("#memX")) memDismiss(); });
+async function memSheet(latest) {
+  const w = document.createElement("div"); const all = btn(latest ? "Show earlier changes" : "Show only the latest", "", null), page = btn("Open the memory page", "", () => { sh.close(); settingsPage("memory"); });
+  const sh = sheet("Memory updated", w, [all, page, btn("Close", "primary", () => sh.close())], true); let only = !!latest;
+  const fill = async () => {
+    let r; try { r = await op("memory_changes", { limit: 60 }); } catch (e) { w.innerHTML = `<div class="msg-error">${esc(e.message)}</div>`; return; }
+    let list = r.changes; if (only && list.length) list = list.filter(c => c.batch === list[0].batch); all.textContent = only ? "Show earlier changes" : "Show only the latest";
+    w.innerHTML = ""; if (!list.length) { w.innerHTML = '<div class="pc-meta">Nothing has changed in the memory yet. When Zohara Agent learns something about you, it is listed here, and you can undo it.</div>'; return; }
+    const hint = document.createElement("div"); hint.className = "pc-meta"; hint.textContent = "This is what Zohara Agent changed in its memory. Undo puts a note back the way it was."; w.appendChild(hint);
+    [["added", "Added"], ["updated", "Updated"], ["deleted", "Removed"]].forEach(([a, title]) => { const mine = list.filter(c => c.action === a); if (!mine.length) return;
+      const h = document.createElement("div"); h.className = "mc-head"; h.textContent = title; w.appendChild(h);
+      mine.forEach(c => { const d = document.createElement("div"); d.className = "mc-item"; d.innerHTML = '<div class="col"></div>'; const col = d.firstChild;
+        const add = (cls, t) => { const x = document.createElement("div"); x.className = cls; x.textContent = t; col.appendChild(x); };
+        if (a === "updated") { add("mc-before", c.before); add("mc-text", c.after); } else add("mc-text", a === "deleted" ? c.before : c.after);
+        add("mc-sub", (c.scope ? "Project: " + (c.scope_name || "a project") : "All chats") + " · " + ago(c.time) + (c.title ? ' · from "' + c.title + '"' : ""));
+        const u = btn(c.undone ? "Undone" : "Undo", "", async () => { try { await op("memory_undo", { id: c.id }); fill(); } catch (e) { u.textContent = "Cannot undo"; u.title = e.message; u.disabled = true; } }); u.disabled = !!c.undone; d.appendChild(u); w.appendChild(d); }); });
+  };
+  all.onclick = () => { only = !only; fill(); }; fill();
+}
+let memScope = "all";
 async function pageMemory(b) {
-  const m = await op("memory"); b.innerHTML = "";
+  const m = await op("memory", memScope === "all" ? {} : { scope: memScope }); b.innerHTML = "";
+  if (memScope !== "all" && memScope !== "global" && !m.projects.some(p => p.id === memScope)) { memScope = "all"; return pageMemory(b); }
   const sw = document.createElement("input"); sw.type = "checkbox"; sw.className = "switch"; sw.checked = m.enabled; sw.onchange = () => op("memory_enable", { on: sw.checked });
   const notes = m.items.filter(i => i.kind !== "episode").length;
   const talk = btn("Chat about memory…", "primary", () => memoryChat(b));
+  const upd = document.createElement("input"); upd.type = "checkbox"; upd.className = "switch"; upd.checked = m.show_updates !== false; upd.onchange = () => op("memory_settings", { show_updates: upd.checked });
+  const every = document.createElement("input"); every.type = "number"; every.className = "field-input"; every.style.width = "86px"; every.min = m.min_every || 2; every.max = 20; every.value = m.every; every.onchange = async () => { try { every.value = (await op("memory_settings", { every: Number(every.value) || 3 })).every; } catch (e) { toast(e.message); } };
+  const chg = btn("View changes", "", () => memSheet(false));
   const card = cardOf(row("Remember things between chats", `${notes} notes about you and ${m.items.length - notes} chat summaries, shared with the computer and the phone. After every ${m.every} messages of yours, Zohara Agent reads the chat in the background and keeps what is worth remembering. Never passwords or keys.`, sw),
-    row("Edit by talking", 'Tell Zohara Agent what to change, in your own words: "join my preferences into one note", "forget the old laptop", "my name is spelled Zohaib". This chat only edits the notes.', talk));
+    row("Edit by talking", 'Tell Zohara Agent what to change, in your own words: "join my preferences into one note", "forget the old laptop", "my name is spelled Zohaib". This chat only edits the notes.', talk),
+    row("Show memory updates", 'When Zohara Agent changes the memory, a small "Memory updated · View" note shows above the message box. View lists what changed and lets you undo it.', upd),
+    row("How often it reads your chats", "After this many messages of yours in a chat (at least " + (m.min_every || 2) + ", normally 3). Fewer is more up to date, more is cheaper.", every),
+    row("Recent changes", "What the memory agent added, updated or removed lately, with Undo for each.", chg));
   b.appendChild(head("Memory")); b.appendChild(card);
+  if (m.projects.length) { const sel = document.createElement("select"); sel.style.width = "220px"; [["all", "All notes"], ["global", "Every chat (global)"], ...m.projects.map(p => [p.id, "Project: " + p.name])].forEach(([v, t]) => { const o = document.createElement("option"); o.value = v; o.textContent = t; o.selected = v === memScope; sel.appendChild(o); }); sel.onchange = () => { memScope = sel.value; pageMemory(b); };
+    card.appendChild(row("Show", "Notes for every chat, and the notes Zohara Agent keeps for one project (only chats in that project are told them).", sel)); }
   const items = [...m.items].sort((x, y) => (y.pinned - x.pinned) || (y.updated - x.updated));
   const textSheet = (title, ok, text, run) => { const w = document.createElement("div"); w.innerHTML = '<div class="field-label">What should Zohara Agent remember?</div><textarea class="field-input" rows="4" placeholder="I prefer short answers"></textarea>'; const ta = w.querySelector("textarea"); ta.value = text;
     const sh = sheet(title, w, [btn("Cancel", "", () => sh.close()), btn(ok, "primary", async () => { try { await run(ta.value); sh.close(); pageMemory(b); } catch (er) { toast(er.message); } })]); };
@@ -2759,12 +3006,19 @@ async function pageMemory(b) {
       if (k !== "episode") mkb("Edit this note", "edit", () => textSheet("Edit note", "Save", i.text, t => op("memory_update", { id: i.id, text: t })));
       const p = mkb(i.pinned ? "Always tell the AI (pinned)" : "Pin: always tell the AI", "star", async () => { await op("memory_pin", { id: i.id, on: !i.pinned }); pageMemory(b); }); if (i.pinned) p.querySelector("svg").style.fill = "currentColor";
       mkb("Forget this", "trash", async () => { await op("memory_forget", { id: i.id }); pageMemory(b); });
-      const r = row(k === "episode" ? i.title : "", i.text, ctl); if (k !== "episode") r.querySelector(".pc-name2").remove(); card.appendChild(r); }); });
+      const r = row(k === "episode" ? i.title : "", i.text, ctl); if (k !== "episode") r.querySelector(".pc-name2").remove();
+      if (i.scope) { const tag = document.createElement("div"); tag.className = "mem-scope"; tag.textContent = "Project: " + (i.scope_name || "(gone)"); r.querySelector(".col").appendChild(tag); } card.appendChild(r); }); });
   if (items.length > 80) card.appendChild(row("…", `${items.length - 80} more are kept; the AI can search all of them.`));
-  const add = btn("Add a note…", "", () => textSheet("Add a note", "Add", "", t => op("memory_add", { text: t })));
+  const target = () => (memScope === "all" || memScope === "global") ? {} : { scope: memScope };
+  const add = btn("Add a note…", "", () => textSheet("Add a note", "Add", "", t => op("memory_add", { text: t, ...target() })));
   const forget = btn("Forget everything", "danger", () => confirmBox("Forget everything?", "All notes and chat summaries are removed, on every device. Saved chats stay.", "Forget", async () => { await op("memory_clear"); pageMemory(b); }));
   const both = document.createElement("div"); both.style.cssText = "display:flex;gap:6px"; both.append(add, forget);
   card.appendChild(row("Your notes", 'Pin a note to make sure the AI always knows it. Delete one that is wrong. You can also just tell Zohara Agent: "remember that ..." or "forget that ...".', both));
+  const ex = btn("Export…", "", async () => { try { const d = await op("memory_export"); delete d.ok; const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(d, null, 2)], { type: "application/json" })); a.download = "zohara-memory-" + new Date().toISOString().slice(0, 10) + ".json"; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); } catch (e) { toast(e.message); } });
+  const fi = document.createElement("input"); fi.type = "file"; fi.accept = ".json,application/json"; fi.className = "hide";
+  fi.onchange = async () => { const f = fi.files[0]; fi.value = ""; if (!f) return; try { const r = await op("memory_import", { data: JSON.parse(await f.text()) }); toast(`Imported ${r.added} note${r.added === 1 ? "" : "s"}. ${r.already_there} were already here, ${r.skipped} were left out.`, 5000); pageMemory(b); } catch (e) { toast(e instanceof SyntaxError ? "That file is not a memory export." : e.message); } };
+  const im = btn("Import…", "", () => fi.click()); const io = document.createElement("div"); io.style.cssText = "display:flex;gap:6px"; io.append(ex, im, fi);
+  card.appendChild(row("Export and import", "A file with all your notes, including each project's. Importing adds what is not there yet; a project's notes go to the project with the same name, or are left out.", io));
 }
 function memoryChat(b) {
   const w = document.createElement("div"); w.innerHTML = '<div id="ml" style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px"><div class="pc-meta">Say what to change. Zohara Agent edits the notes and tells you what it did.</div></div><input class="field-input" id="mi" placeholder="For example: join all my preferences into one note">';
@@ -2789,9 +3043,17 @@ async function pageGeneral(b) {
   const vh = document.createElement("div"); vh.className = "field-hint"; vh.textContent = "In Chrome and Edge your voice goes to the browser maker's speech service for recognition, not to Zohara Agent's server. Zohara Agent only receives the text you send."; b.appendChild(vh);
 }
 async function pageApps(b) {
-  if (restricted()) { b.innerHTML = `<div class="msg-error">Connected apps are not available on this account.</div>`; return; }
+  if (restricted()) {
+    b.innerHTML = "";
+    b.appendChild(head("Connectors"));
+    const m = document.createElement("div"); m.className = "msg-error"; m.textContent = "Connected apps are not available on this account."; b.appendChild(m);
+    const w = document.createElement("div"); w.className = "note";
+    try { w.textContent = (await apiGet("/api/connectors")).message || ""; } catch { w.textContent = "Accounts on the cloud server get web search, page reading and memory only. Connectors (MCP servers) can run programs and reach your accounts, so they are for the app on your own computer."; }
+    b.appendChild(w); return;
+  }
   const r = await op("mcp_list"); b.innerHTML = "";
   const redo = () => pageApps(b);
+  const browse = btn("Browse connectors…", "primary", () => connectorsBrowse(redo));
   const add = btn("Add server…", "primary", () => {
     const w = document.createElement("div"); w.innerHTML = '<div class="field-label">Name</div><input class="field-input" id="an" placeholder="notes" autocomplete="off"><div class="field-label">Address</div><input class="field-input" id="aa" type="url" placeholder="https://example.com/mcp" autocomplete="off" spellcheck="false"><div class="field-label">Token (optional)</div><input class="field-input" id="at" type="password" autocomplete="off"><div class="field-hint" id="ae">Only servers with a web address. The token is stored on the server and never shown again.</div>';
     const q = i => w.querySelector("#" + i);
@@ -2803,19 +3065,108 @@ async function pageApps(b) {
     const w = document.createElement("div"); w.innerHTML = '<div class="field-label">Config (JSON)</div><textarea class="field-input" rows="8" spellcheck="false" placeholder=\'{"mcpServers": {"name": {"url": "https://…"}}}\'></textarea><div class="field-hint" id="pe">The same format other apps use. Servers that start a program (command) are skipped: they stay on the desktop.</div>'; const t = w.querySelector("textarea");
     const go = btn("Import", "primary", async () => { go.disabled = true; try { const x = await op("mcp_import", { config: t.value }); dlg.close(); toast(x.message || "Imported"); redo(); } catch (e) { w.querySelector("#pe").className = "field-hint bad"; w.querySelector("#pe").textContent = e.message; go.disabled = false; } });
     const dlg = sheet("Paste a config", w, [btn("Cancel", "", () => dlg.close()), go]); t.focus(); });
-  const acts = document.createElement("div"); acts.className = "acts"; acts.append(add, paste);
+  const acts = document.createElement("div"); acts.className = "acts"; acts.append(browse, add, paste);
   b.appendChild(head("MCP servers Zohara Agent can use"));
   const rows = r.servers.map(s => {
     const c = document.createElement("div"); c.className = "acts";
     const sw = document.createElement("input"); sw.type = "checkbox"; sw.className = "switch"; sw.checked = s.enabled; sw.setAttribute("aria-label", "Enable " + s.name);
     sw.onchange = async () => { try { await op("mcp_toggle", { name: s.name, enabled: sw.checked }); toast(s.name + (sw.checked ? " on" : " off")); } catch (e) { sw.checked = !sw.checked; toast(e.message); } };
     const rm = btn("Remove", "danger", () => confirmBox("Remove " + s.name + "?", "Zohara Agent stops using this server. Its saved token is deleted.", "Remove", async () => { try { await op("mcp_remove", { name: s.name }); redo(); } catch (e) { toast(e.message); } }));
+    if (s.address_changed) {
+      const ac = btn("Use the new address", "", async () => { try { toast((await op("connector_accept_change", { name: s.name })).message); redo(); } catch (e) { toast(e.message); } });
+      c.prepend(ac);
+    }
     c.append(sw, rm);
-    return row(s.name, (s.address || s.command || "") + (!s.address && s.command ? " · runs on the desktop" : ""), c);
+    return row(s.name, (s.address || s.command || "") + (!s.address && s.command ? " · runs on the desktop" : "") + (s.address_changed ? " · Address changed: the directory now lists " + s.address_changed + ". It is held until you decide." : ""), c);
   });
   b.appendChild(cardOf(...rows, row(rows.length ? "Add more" : "No servers yet", "Add a server by its web address, or paste a config.", acts)));
   b.insertAdjacentHTML("beforeend", '<div class="note">Servers that run a program on your computer (command or stdio) can only be added and run on the desktop. Remote servers sync from your desktop when you are signed in there. <a href="#" id="toSync2">Open Desktop sync</a></div>');
   $("toSync2").onclick = e => { e.preventDefault(); settingsPage("sync"); };
+}
+/* ---------- Browse connectors (docs/MCP.md): the directory of remote MCP servers, read from the public registry by the server ---------- */
+const CONN_CATS = [["all", "All"], ["dev", "Developer"], ["docs", "Documents"], ["chat", "Chat"], ["data", "Data"], ["finance", "Finance"], ["media", "Media"], ["search", "Search"], ["other", "Other"]];
+function connectorsBrowse(onChange) {
+  const st = { q: "", category: "all", kind: "remote", cursor: null, gen: 0 };
+  const w = document.createElement("div");
+  const intro = document.createElement("div"); intro.className = "field-hint"; intro.textContent = "Connectors are tools from other services that the chat can use. They come from the public MCP registry. Only the ones marked Featured were looked at by Zohara Agent. Every call of a connector still asks you first unless the mode is Bypass.";
+  const bar = document.createElement("div"); bar.className = "acts"; bar.style.margin = "10px 0";
+  const search = document.createElement("input"); search.className = "field-input"; search.type = "search"; search.placeholder = "Search connectors"; search.autocomplete = "off"; search.style.flex = "1 1 160px";
+  const cat = document.createElement("select"); CONN_CATS.forEach(([v, t]) => { const o = document.createElement("option"); o.value = v; o.textContent = t; cat.appendChild(o); });
+  const tRemote = btn("Remote", "primary"), tLocal = btn("Runs on this computer", "");
+  bar.append(search, cat); const tabs = document.createElement("div"); tabs.className = "acts"; tabs.append(tRemote, tLocal);
+  const note = document.createElement("div"); note.className = "field-hint"; note.style.margin = "8px 0";
+  const list = document.createElement("div");
+  const more = btn("Load more", "", () => load(true)); const showMore = on => { more.style.display = on ? "" : "none"; }; showMore(false);
+  w.append(intro, bar, tabs, note, list, more);
+  const sh = sheet("Browse connectors", w, [btn("Close", "", () => { sh.close(); })], true);
+  let added = new Set();
+  const card = (e) => {
+    const c = document.createElement("div"); c.className = "settings-row";
+    const col = document.createElement("div"); col.className = "col";
+    const t = document.createElement("div"); t.className = "pc-name2"; t.textContent = e.title;
+    const m = document.createElement("div"); m.className = "pc-meta2"; m.textContent = e.publisher + " · " + e.trust;
+    const d = document.createElement("div"); d.className = "pc-meta2"; d.textContent = e.description;
+    col.append(t, m, d); c.appendChild(col);
+    const isAdded = added.has(e.id);
+    const a = btn(isAdded ? "Added" : "Add", isAdded ? "" : "primary", () => connectorAdd(e, st.kind, () => { sh.close(); onChange(); }));
+    a.disabled = isAdded || st.kind === "local";
+    if (st.kind === "local") { a.textContent = "On the desktop"; a.title = "Programs that run on a computer are added in the desktop app."; }
+    c.appendChild(a); return c;
+  };
+  async function load(append) {
+    if (!append) { st.cursor = null; st.gen++; list.textContent = ""; }
+    const gen = st.gen; showMore(false); note.textContent = "Loading…";
+    const qs = new URLSearchParams({ kind: st.kind }); if (st.q) qs.set("q", st.q); if (st.category !== "all") qs.set("category", st.category); if (append && st.cursor) qs.set("cursor", st.cursor);
+    try {
+      const [r, mine] = await Promise.all([apiGet("/api/connectors?" + qs), op("mcp_list").catch(() => ({ servers: [] }))]);
+      if (gen !== st.gen) return;
+      added = new Set((mine.servers || []).map(s => s.registry).filter(Boolean));
+      if (r.restricted) { note.textContent = r.message; return; }
+      const all = [...(r.featured || []), ...(r.entries || [])];
+      note.textContent = all.length || list.children.length ? (r.error || "") : (r.error || "Nothing found.");
+      all.forEach(e => list.appendChild(card(e)));
+      st.cursor = r.next || null; showMore(!!st.cursor);
+    } catch (e) { if (gen === st.gen) note.textContent = e.message; }
+  }
+  search.onkeydown = e => { if (e.key === "Enter") { st.q = search.value.trim(); load(false); } };
+  cat.onchange = () => { st.category = cat.value; load(false); };
+  [[tRemote, "remote"], [tLocal, "local"]].forEach(([b, k]) => b.onclick = () => { st.kind = k; tRemote.classList.toggle("primary", k === "remote"); tLocal.classList.toggle("primary", k === "local"); load(false); });
+  load(false);
+}
+/* the Add steps: try it (its tools are listed), then save what was tried */
+function connectorAdd(e, kind, done) {
+  const w = document.createElement("div");
+  const meta = document.createElement("div"); meta.className = "pc-meta"; meta.textContent = e.publisher + " · " + e.trust; w.appendChild(meta);
+  const lab = (t) => { const l = document.createElement("div"); l.className = "field-label"; l.textContent = t; return l; };
+  const name = document.createElement("input"); name.className = "field-input"; name.autocomplete = "off"; name.value = (e.id.split("/")[1] || "connector").replace(/[^A-Za-z0-9_-]/g, "-");
+  w.append(lab("Name"), name);
+  let pick = null; const asks = [];
+  const remotes = e.remotes || [];
+  if (remotes.length > 1) { pick = document.createElement("select"); remotes.forEach(r => { const o = document.createElement("option"); o.textContent = r.url; pick.appendChild(o); }); w.append(lab("Address"), pick); }
+  else if (remotes[0]) { const a = document.createElement("div"); a.className = "field-hint"; a.textContent = "Address: " + remotes[0].url; w.appendChild(a); }
+  ((remotes[0] && remotes[0].headers) || []).filter(h => h.value === undefined).forEach(h => {
+    const i = document.createElement("input"); i.className = "field-input"; i.type = h.secret ? "password" : "text"; i.autocomplete = "off"; i.spellcheck = false;
+    w.append(lab("Header " + h.name + (h.required ? " (needed)" : "")), i);
+    if (h.description) { const d = document.createElement("div"); d.className = "field-hint"; d.textContent = h.description; w.appendChild(d); }
+    asks.push([h.name, i]);
+  });
+  const st = document.createElement("div"); st.className = "field-hint"; st.textContent = "It is tried first. The tools it offers are listed before it is saved."; w.appendChild(st);
+  let tried = null;
+  const go = btn("Try it", "primary", async () => {
+    go.disabled = true;
+    try {
+      if (tried) { const x = await op("connector_add", { name: tried }); tried = null; dlg.close(); toast(x.message || "Added", 4000); done(); return; }
+      const headers = {}; asks.forEach(([n, i]) => { if (i.value.trim()) headers[n] = i.value; });
+      const body = { id: e.id, kind, name: name.value.trim(), headers }; if (pick) body.url = remotes[pick.selectedIndex].url;
+      st.className = "field-hint"; st.textContent = "Trying it…";
+      const p = await op("connector_preview", body);
+      tried = p.name; st.className = "field-hint ok"; st.textContent = "It works. It offers these tools: " + (p.tools.length ? p.tools.join(", ") : "none") + ". " + p.notice;
+      go.textContent = "Add connector"; name.disabled = true;
+    } catch (x) { st.className = "field-hint bad"; st.textContent = x.message; }
+    go.disabled = false;
+  });
+  const cancel = btn("Cancel", "", () => { if (tried) op("connector_cancel", { name: tried }).catch(() => {}); dlg.close(); });
+  const dlg = sheet("Add " + e.title, w, [cancel, go]);
 }
 async function pageMachines(b) {
   const r = await op("machines"); b.innerHTML = "";
@@ -3414,7 +3765,7 @@ async function start(u, agreed) {
   paint(); 
   /* only a refusal (401) signs the person out: a network error or a 5xx while the server restarts keeps the page, and the banner says Offline */
   try { acct = await acctOp("whoami"); } catch (e) { acct = null; }
-  document.querySelectorAll('[data-nav="projects"],[data-nav="artifacts"],[data-nav="scheduled"]').forEach(n => n.classList.toggle("hide", restricted()));
+  document.querySelectorAll('[data-nav="projects"],[data-nav="artifacts"]').forEach(n => n.classList.toggle("hide", restricted())); /* Scheduled is for everybody: reminders and web search tasks on the server */
   try { await op("status"); } catch (e) { if (!NOAUTH && e.status === 401) { $("app").classList.add("hide"); $("login").classList.remove("hide"); $("err").textContent = e.message; signOut(auth); return; } }
   showHome(); refreshChats(); actFetch(); noteReady();
   nativeAfterStart(u);

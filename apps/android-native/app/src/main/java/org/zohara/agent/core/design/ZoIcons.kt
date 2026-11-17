@@ -63,6 +63,8 @@ object ZoIcons {
     "download" to """<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>""",
     "file" to """<path d="M7 3h7l5 5v12a1 1 0 01-1 1H7a1 1 0 01-1-1V4a1 1 0 011-1zM14 3v5h5"/>""",
     "moon" to """<path d="M20 14.5A8 8 0 019.5 4 8 8 0 1020 14.5z"/>""",
+    "memory" to """<path d="M9 4a3 3 0 00-3 3v.5A3 3 0 004 10.5 3 3 0 005.5 13 3 3 0 007 17a3 3 0 005 2V5a2 2 0 00-3-1zM15 4a3 3 0 013 3v.5a3 3 0 012 3 3 3 0 01-1.5 2.5A3 3 0 0117 17a3 3 0 01-5 2"/>""",
+    "arrow" to """<path d="M5 12h14M13 6l6 6-6 6"/>""",
     "bolt" to """<path d="M13 3L5 13.5h6L10 21l8-10.5h-6L13 3z"/>""",
   )
 
@@ -123,6 +125,8 @@ object ZoIcons {
   val File get() = icon("file")
   val Moon get() = icon("moon")
   val Bolt get() = icon("bolt")
+  val Memory get() = icon("memory")
+  val Arrow get() = icon("arrow")
 
   private fun build(name: String, fragment: String): ImageVector {
     val b = ImageVector.Builder(name = "zo_$name", defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 24f, viewportHeight = 24f)

@@ -41,6 +41,9 @@ pub struct Item {
     pub updated: u64,
     #[serde(default)]
     pub pinned: bool,
+    /// Where the note belongs: "" is the whole memory (every chat), otherwise the id of the project whose chats may read it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scope: String,
     /// How often it was handed to the model.
     #[serde(default)]
     pub uses: u32,
@@ -67,7 +70,14 @@ pub struct Store {
     /// When `enabled` was last changed (the sync keeps the newest choice).
     #[serde(default)]
     pub state_updated: u64,
+    /// Show the "Memory updated" chip above the message box when the memory agent changed something. This computer's own choice (not synced).
+    #[serde(default = "yes")]
+    pub show_updates: bool,
 }
+
+/// The memory agent never runs more often than every 2 messages of the person.
+pub const MIN_EVERY: usize = 2;
+pub const MAX_EVERY: usize = 20;
 
 fn yes() -> bool {
     true
@@ -78,7 +88,7 @@ fn three() -> usize {
 
 impl Default for Store {
     fn default() -> Self {
-        Store { enabled: true, every: 3, read: HashMap::new(), items: Vec::new(), state_updated: 0 }
+        Store { enabled: true, every: 3, read: HashMap::new(), items: Vec::new(), state_updated: 0, show_updates: true }
     }
 }
 
@@ -203,8 +213,44 @@ pub struct Hit {
     pub score: f32,
 }
 
+thread_local! {
+    /// The project the chat being answered on this thread belongs to ("" = none). The tools that read and write notes use it.
+    static PROJECT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// While it lives, the memory tools on this thread work for chats of that project (see `current_project`).
+pub struct ProjectGuard(String);
+
+impl Drop for ProjectGuard {
+    fn drop(&mut self) {
+        let old = std::mem::take(&mut self.0);
+        PROJECT.with(|p| *p.borrow_mut() = old);
+    }
+}
+
+/// A project that is gone (deleted, or never here) counts as no project: a note must never be written for a project nobody can see.
+pub fn project_guard(project: &str) -> ProjectGuard {
+    let project = if project.is_empty() || super::projects::Store::load().get(project).is_some() { project } else { "" };
+    ProjectGuard(PROJECT.with(|p| p.replace(project.to_string())))
+}
+
+pub fn current_project() -> String {
+    PROJECT.with(|p| p.borrow().clone())
+}
+
+/// Can a chat of `project` ("" = a chat outside every project) see this note? Global notes are seen by everybody; a project's notes only
+/// by the chats of that project.
+pub fn visible(it: &Item, project: &str) -> bool {
+    it.scope.is_empty() || (!project.is_empty() && it.scope == project)
+}
+
 /// The notes closest to `query`, best first. Notes that are pinned or recent get a small push; very weak matches are left out.
 pub fn search(store: &Store, query: &str, limit: usize) -> Vec<Hit> {
+    search_in(store, query, limit, "")
+}
+
+/// Like `search`, for a chat of `project`: its own notes and the global ones, never another project's.
+pub fn search_in(store: &Store, query: &str, limit: usize, project: &str) -> Vec<Hit> {
     let q = embed(query);
     if q.iter().all(|x| *x == 0.0) {
         return Vec::new();
@@ -213,6 +259,7 @@ pub fn search(store: &Store, query: &str, limit: usize) -> Vec<Hit> {
     let mut hits: Vec<Hit> = store
         .items
         .iter()
+        .filter(|it| visible(it, project))
         .filter_map(|it| {
             let c = cosine(&q, &it.vector());
             if c < 0.12 {
@@ -254,7 +301,13 @@ fn line(it: &Item) -> String {
 /// What the model is told about the person at the start of a message: the notes that always matter (pinned, preferences,
 /// who they are) and the ones closest to this message, with the summaries of earlier chats that look related.
 pub fn briefing(query: &str) -> String {
-    let store = load();
+    briefing_in(query, "")
+}
+
+/// `briefing` for a chat of `project` ("" = none): the project's notes come with the global ones, no other project's.
+pub fn briefing_in(query: &str, project: &str) -> String {
+    let mut store = load();
+    store.items.retain(|i| visible(i, project));
     if !store.enabled || store.items.is_empty() {
         return String::new();
     }
@@ -277,7 +330,7 @@ pub fn briefing(query: &str) -> String {
         pick(it, &mut chosen, 1400);
     }
     let always_count = chosen.len();
-    for h in search(&store, query, 8) {
+    for h in search_in(&store, query, 8, project) {
         pick(&h.item, &mut chosen, 3000);
     }
     if chosen.is_empty() {
@@ -313,7 +366,12 @@ pub fn briefing(query: &str) -> String {
 /// `base`, then the briefing for `query` (when there are notes), then the personality in use (when there is one). The personality is LAST on
 /// purpose: it must come after the abilities, the tool rules and the notes, so that it decides how everything is worded.
 pub fn system_with(base: &str, query: &str) -> String {
-    join(&[base, &briefing(query), &super::personality::instructions()])
+    system_in(base, query, "")
+}
+
+/// `system_with` for a chat of `project`.
+pub fn system_in(base: &str, query: &str, project: &str) -> String {
+    join(&[base, &briefing_in(query, project), &super::personality::instructions()])
 }
 
 /// `base` followed by the personality only, with NO notes: for a restricted account, whose notes must reach the model only through
@@ -324,7 +382,11 @@ pub fn system_without_notes(base: &str) -> String {
 
 /// The briefing and the personality as one piece (personality last), for programs that take extra instructions (Claude Code).
 pub fn extras(query: &str) -> String {
-    join(&[&briefing(query), &super::personality::instructions()])
+    extras_in(query, "")
+}
+
+pub fn extras_in(query: &str, project: &str) -> String {
+    join(&[&briefing_in(query, project), &super::personality::instructions()])
 }
 
 fn join(parts: &[&str]) -> String {
@@ -352,8 +414,22 @@ fn valid_kind(k: &str) -> &'static str {
     }
 }
 
-/// Adds a note, or updates the note it repeats. Returns (id, true if it was new).
+/// Where a note of this kind goes when nobody said: what is about the person (who they are, how they like things) stays global, the rest of
+/// what is learned in a project's chat belongs to the project.
+pub fn default_scope(kind: &str, project: &str) -> String {
+    match valid_kind(kind) {
+        "person" | "preference" | "episode" => String::new(),
+        _ => project.to_string(),
+    }
+}
+
+/// Adds a note to the whole memory, or updates the note it repeats. Returns (id, true if it was new).
 pub fn remember(text: &str, kind: &str, chat: &str) -> Option<(String, bool)> {
+    remember_in(text, kind, chat, "")
+}
+
+/// Adds a note to `scope` ("" = the whole memory, else a project id), or updates the note of the same scope it repeats.
+pub fn remember_in(text: &str, kind: &str, chat: &str, scope: &str) -> Option<(String, bool)> {
     let text = clean(text);
     if text.chars().count() < 3 {
         return None;
@@ -362,7 +438,7 @@ pub fn remember(text: &str, kind: &str, chat: &str) -> Option<(String, bool)> {
     change(|s| {
         let v = embed(&text);
         let now = chats::now_millis();
-        let same = s.items.iter().enumerate().filter(|(_, i)| i.kind == kind && i.kind != "episode").map(|(n, i)| (n, cosine(&v, &i.vector()))).filter(|(_, c)| *c >= SAME_AS).max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let same = s.items.iter().enumerate().filter(|(_, i)| i.kind == kind && i.kind != "episode" && i.scope == scope).map(|(n, i)| (n, cosine(&v, &i.vector()))).filter(|(_, c)| *c >= SAME_AS).max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         if let Some((n, _)) = same {
             let it = &mut s.items[n];
             it.text = text;
@@ -370,10 +446,43 @@ pub fn remember(text: &str, kind: &str, chat: &str) -> Option<(String, bool)> {
             return Some((it.id.clone(), false));
         }
         let id = format!("m{}{:03}", now, s.items.len() % 1000);
-        s.items.push(Item { id: id.clone(), text, kind: kind.into(), chat: chat.into(), created: now, updated: now, ..Default::default() });
+        s.items.push(Item { id: id.clone(), text, kind: kind.into(), chat: chat.into(), created: now, updated: now, scope: scope.into(), ..Default::default() });
         prune(s);
         Some((id, true))
     })
+}
+
+/// Writes a note that was removed again (undo), with a new id. Returns the id.
+pub fn restore(text: &str, kind: &str, chat: &str, scope: &str, pinned: bool) -> Option<String> {
+    let text = clean(text);
+    if text.chars().count() < 3 {
+        return None;
+    }
+    let kind = valid_kind(kind);
+    Some(change(|s| {
+        let now = chats::now_millis();
+        let id = format!("m{}{:03}", now, s.items.len() % 1000);
+        s.items.push(Item { id: id.clone(), text, kind: kind.into(), chat: chat.into(), created: now, updated: now, pinned, scope: scope.into(), ..Default::default() });
+        prune(s);
+        id
+    }))
+}
+
+/// Adds a note the person brought in (an import), unless the same text is already there in that scope. Some(true) = added, Some(false) = it was there.
+pub fn add_unique(text: &str, kind: &str, scope: &str, pinned: bool) -> Option<bool> {
+    let text = clean(text);
+    if text.chars().count() < 3 {
+        return None;
+    }
+    let kind = valid_kind(kind);
+    if kind == "episode" {
+        return None;
+    }
+    let dup = load().items.iter().any(|i| i.scope == scope && i.kind != "episode" && i.text.trim().eq_ignore_ascii_case(text.trim()));
+    if dup {
+        return Some(false);
+    }
+    restore(&text, kind, "", scope, pinned).map(|_| true)
 }
 
 /// Rewrites the note about one chat (one episode per chat).
@@ -411,11 +520,20 @@ fn prune(s: &mut Store) {
 
 /// Rewrites one note (the memory agent found it changed). Returns false when there is no such note.
 pub fn update_text(id: &str, text: &str) -> bool {
+    update_text_checked(id, text, None)
+}
+
+/// Like `update_text`, for the memory agent working on a chat of `project`: a note that chat cannot see is not touched.
+pub fn update_text_in(id: &str, text: &str, project: &str) -> bool {
+    update_text_checked(id, text, Some(project))
+}
+
+fn update_text_checked(id: &str, text: &str, project: Option<&str>) -> bool {
     let text = clean(text);
     if text.chars().count() < 3 {
         return false;
     }
-    change(|s| match s.items.iter_mut().find(|i| i.id == id && i.kind != "episode") {
+    change(|s| match s.items.iter_mut().find(|i| i.id == id && i.kind != "episode" && project.is_none_or(|p| visible(i, p))) {
         Some(i) => {
             i.text = text;
             i.updated = chats::now_millis();
@@ -426,10 +544,19 @@ pub fn update_text(id: &str, text: &str) -> bool {
 }
 
 pub fn forget(id: &str) -> bool {
+    forget_checked(id, None)
+}
+
+/// Like `forget`, for the memory agent working on a chat of `project`: a note that chat cannot see stays.
+pub fn forget_in(id: &str, project: &str) -> bool {
+    forget_checked(id, Some(project))
+}
+
+fn forget_checked(id: &str, project: Option<&str>) -> bool {
     let (gone, updated) = change(|s| {
         let updated = s.items.iter().find(|i| i.id == id).map_or(0, |i| i.updated);
         let before = s.items.len();
-        s.items.retain(|i| i.id != id);
+        s.items.retain(|i| i.id != id || project.is_some_and(|p| !visible(i, p)));
         (s.items.len() != before, updated)
     });
     if gone {
@@ -440,11 +567,16 @@ pub fn forget(id: &str) -> bool {
 
 /// Forgets the notes that match `words` best (used when the model is asked to forget something), returning what went.
 pub fn forget_matching(words: &str) -> Vec<String> {
+    forget_matching_in(words, "")
+}
+
+/// `forget_matching` for a chat of `project`: only notes it can see.
+pub fn forget_matching_in(words: &str, project: &str) -> Vec<String> {
     let store = load();
-    let hits = search(&store, words, 3);
+    let hits = search_in(&store, words, 3, project);
     let gone: Vec<Item> = hits.into_iter().filter(|h| h.score > 0.45).map(|h| h.item).collect();
     for g in &gone {
-        forget(&g.id);
+        forget_in(&g.id, project);
     }
     gone.into_iter().map(|g| g.text).collect()
 }
@@ -458,6 +590,7 @@ pub fn set_pinned(id: &str, on: bool) {
 }
 
 pub fn clear_all() {
+    super::memory_log::clear();
     let items: Vec<(String, u64)> = change(|s| {
         s.read.clear();
         s.items.drain(..).map(|i| (i.id, i.updated)).collect()
@@ -465,6 +598,39 @@ pub fn clear_all() {
     for (id, updated) in items {
         crate::sync::tombstone("memory", &id, updated);
     }
+}
+
+/// How many messages of the person the memory agent waits for (at least `MIN_EVERY`, at most `MAX_EVERY`). Returns what was kept.
+pub fn set_every(n: usize) -> usize {
+    let n = n.clamp(MIN_EVERY, MAX_EVERY);
+    change(|s| {
+        s.every = n;
+        // the sync takes the newest choice
+        s.state_updated = chats::now_millis();
+    });
+    n
+}
+
+pub fn set_show_updates(on: bool) {
+    change(|s| s.show_updates = on);
+}
+
+/// Removes every note that belongs to the project (it was deleted). Returns how many went.
+pub fn delete_scope(project: &str) -> usize {
+    if project.is_empty() {
+        return 0;
+    }
+    let gone: Vec<(String, u64)> = change(|s| {
+        let gone = s.items.iter().filter(|i| i.scope == project).map(|i| (i.id.clone(), i.updated)).collect::<Vec<_>>();
+        s.items.retain(|i| i.scope != project);
+        gone
+    });
+    for (id, updated) in &gone {
+        crate::sync::tombstone("memory", id, *updated);
+    }
+    // the change log must not keep the text of notes that were deleted with their project
+    super::memory_log::forget_scope(project);
+    gone.len()
 }
 
 pub fn set_enabled(on: bool) {
@@ -557,6 +723,86 @@ mod tests {
         let gone = forget_matching("allergic to peanuts");
         assert_eq!(gone.len(), 1);
         assert_eq!(load().items.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn project_notes_are_seen_only_by_chats_of_that_project() {
+        let (_g, dir) = sandbox();
+        remember("Likes short answers without long explanations", "preference", "c0").unwrap();
+        remember_in("The atlas project uses metric units and a Postgres database", "project", "c1", "pa").unwrap();
+        remember_in("The harbor project is written in Rust with a GTK window", "project", "c2", "pb").unwrap();
+        // inside project A: its own notes and the global ones, never B's
+        let a = briefing_in("which database does the atlas project use, and the harbor project", "pa");
+        assert!(a.contains("Postgres") && a.contains("short answers"), "{a}");
+        assert!(!a.contains("harbor") && !a.contains("GTK"), "{a}");
+        let b = briefing_in("which database does the atlas project use, and the harbor project", "pb");
+        assert!(b.contains("GTK") && !b.contains("Postgres"), "{b}");
+        // outside every project: only the global ones
+        let none = briefing("atlas harbor database GTK Postgres");
+        assert!(!none.contains("Postgres") && !none.contains("GTK"), "{none}");
+        assert!(search(&load(), "Postgres atlas database", 8).is_empty());
+        assert_eq!(search_in(&load(), "Postgres atlas database", 8, "pa").len(), 1);
+        assert!(search_in(&load(), "Postgres atlas database", 8, "pb").is_empty());
+        // the same sentence in another scope is another note, not an update
+        let (_, new) = remember_in("The atlas project uses metric units and a Postgres database", "project", "c3", "pb").unwrap();
+        assert!(new);
+        assert_eq!(load().items.len(), 4);
+        // forgetting and rewriting from a chat of another project does nothing
+        let id = load().items.iter().find(|i| i.scope == "pa").unwrap().id.clone();
+        assert!(!forget_in(&id, "pb") && !forget_in(&id, ""));
+        assert!(!update_text_in(&id, "Changed by the wrong project", "pb"));
+        assert!(forget_matching_in("atlas Postgres database", "").is_empty());
+        assert!(update_text_in(&id, "The atlas project uses imperial units", "pa"));
+        assert!(forget_in(&id, "pa"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_guard_ignores_a_project_that_is_gone() {
+        let (_g, dir) = sandbox();
+        let mut p = super::super::projects::Store::default();
+        p.projects.push(super::super::projects::Project::new("Atlas", ""));
+        p.projects[0].id = "pa".into();
+        p.save();
+        {
+            let _a = project_guard("pa");
+            assert_eq!(current_project(), "pa");
+            let _b = project_guard("p404");
+            assert_eq!(current_project(), "", "a deleted project is no project");
+        }
+        assert_eq!(current_project(), "", "the guard puts back what was there");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn deleting_a_project_removes_its_notes_and_only_those() {
+        let (_g, dir) = sandbox();
+        remember("Likes green tea", "preference", "c0").unwrap();
+        remember_in("The atlas project ships on Friday", "project", "c1", "pa").unwrap();
+        remember_in("The harbor project ships in March", "project", "c2", "pb").unwrap();
+        let mut p = super::super::projects::Store::default();
+        p.projects.push(super::super::projects::Project::new("Atlas", ""));
+        p.projects[0].id = "pa".into();
+        assert_eq!(p.remove("pa"), Some(1));
+        assert_eq!(p.remove("pa"), None);
+        let left: Vec<String> = load().items.into_iter().map(|i| i.text).collect();
+        assert_eq!(left.len(), 2);
+        assert!(!left.iter().any(|t| t.contains("atlas")));
+        assert_eq!(delete_scope(""), 0, "no scope means nothing is deleted");
+        assert_eq!(load().items.len(), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_agent_waits_at_least_two_messages() {
+        let (_g, dir) = sandbox();
+        assert_eq!(set_every(1), 2);
+        assert_eq!(load().every, 2);
+        assert_eq!(set_every(0), 2);
+        assert_eq!(set_every(5), 5);
+        assert_eq!(set_every(500), MAX_EVERY);
+        assert_eq!(Store::default().every, 3);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

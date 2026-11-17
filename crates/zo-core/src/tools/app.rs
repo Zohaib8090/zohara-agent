@@ -9,10 +9,29 @@ fn text<'a>(a: &'a Value, key: &str) -> Result<&'a str, String> {
 }
 
 pub fn schedule(a: &Value) -> Result<String, String> {
-    let when = schedules::parse_when(text(a, "when")?)?;
-    let repeat = a.get("repeat").and_then(Value::as_str).unwrap_or("once");
-    let task = schedules::add(a.get("title").and_then(Value::as_str).unwrap_or(""), text(a, "task")?, when, repeat, None)?;
-    Ok(format!("Scheduled \"{}\" for {} ({}). It is on the Scheduled page, id {}.", task.title, schedules::format_when(task.next_run), task.repeat, task.id))
+    let now = schedules::now_millis();
+    let w = schedules::parse_schedule(text(a, "when")?, None, now)?;
+    let repeat = match a.get("repeat").and_then(Value::as_str).map(str::trim).filter(|r| !r.is_empty()) {
+        Some(r) => schedules::normalize_repeat(r)?,
+        None => w.repeat.clone().unwrap_or_else(|| "once".into()),
+    };
+    let kind = a.get("kind").and_then(Value::as_str).map(str::trim).filter(|k| !k.is_empty()).unwrap_or("task");
+    let want_on = match a.get("machine").and_then(Value::as_str).map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) => format!("machine:{m}"),
+        None => String::new(),
+    };
+    let run_on = crate::scheduler::check_for_host(kind, &want_on, &repeat, schedules::load().len())?;
+    let task = schedules::add_new(schedules::New {
+        title: a.get("title").and_then(Value::as_str).unwrap_or("").into(),
+        prompt: text(a, "task")?.into(),
+        next_run: w.at,
+        repeat,
+        kind: kind.into(),
+        run_on,
+        day: w.day,
+        ..Default::default()
+    })?;
+    Ok(format!("Scheduled \"{}\" ({}) for {} ({}). It is on the Scheduled page, id {}.", task.title, task.kind(), schedules::format_when(task.next_run), task.repeat, task.id))
 }
 
 pub fn list_scheduled() -> Result<String, String> {
@@ -20,7 +39,17 @@ pub fn list_scheduled() -> Result<String, String> {
     if all.is_empty() {
         return Ok("Nothing is scheduled.".into());
     }
-    Ok(all.iter().map(|t| format!("{} | {} | next {} | {}{} | {}", t.id, t.title, schedules::format_when(t.next_run), t.repeat, if t.enabled { "" } else { " (off)" }, t.prompt)).collect::<Vec<_>>().join("\n"))
+    Ok(all
+        .iter()
+        .map(|t| {
+            let last = match (&t.last_status, t.last_run) {
+                (Some(st), Some(at)) => format!(" | last {st} {}", schedules::format_when(at)),
+                _ => String::new(),
+            };
+            format!("{} | {} | next {} | {}{} | {} | {}{}", t.id, t.title, schedules::format_when(t.next_run), t.repeat, if t.enabled { "" } else { " (off)" }, t.kind(), t.prompt, last)
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 pub fn cancel_scheduled(a: &Value) -> Result<String, String> {
@@ -78,7 +107,7 @@ pub fn memory_search(a: &Value) -> Result<String, String> {
     if !store.enabled {
         return Ok("Memory is switched off.".into());
     }
-    let hits = memory::search(&store, text(a, "query")?, 8);
+    let hits = memory::search_in(&store, text(a, "query")?, 8, &memory::current_project());
     if hits.is_empty() {
         return Ok("Nothing in memory matches.".into());
     }
@@ -93,7 +122,12 @@ pub fn memory_save(a: &Value) -> Result<String, String> {
     crate::tenant::check_room()?;
     let note = text(a, "text")?;
     let kind = a.get("kind").and_then(Value::as_str).unwrap_or("fact");
-    match memory::remember(note, kind, "") {
+    // in a project's chat, what is not about the person itself is kept for that project
+    let scope = memory::default_scope(kind, &memory::current_project());
+    let before = crate::store::memory_log::snapshot();
+    let r = memory::remember_in(note, kind, "", &scope);
+    crate::store::memory_log::record_diff(&before, "chat", "", "");
+    match r {
         Some((_, true)) => Ok("Remembered.".into()),
         Some((_, false)) => Ok("Updated what I remembered about this.".into()),
         None => Err("That note is too short to keep.".into()),
@@ -102,7 +136,9 @@ pub fn memory_save(a: &Value) -> Result<String, String> {
 
 pub fn memory_forget(a: &Value) -> Result<String, String> {
     use crate::store::memory;
-    let gone = memory::forget_matching(text(a, "what")?);
+    let before = crate::store::memory_log::snapshot();
+    let gone = memory::forget_matching_in(text(a, "what")?, &memory::current_project());
+    crate::store::memory_log::record_diff(&before, "chat", "", "");
     if gone.is_empty() {
         return Ok("Nothing in memory matched that closely enough to forget. Use zohara_memory_search to see the notes.".into());
     }
@@ -202,6 +238,16 @@ mod tests {
         let r = schedule(&json!({ "task": "tidy my downloads", "when": "now + 1 hour", "repeat": "daily" })).unwrap();
         assert!(r.contains("Scheduled") && r.contains("daily"));
         assert!(schedule(&json!({ "task": "x", "when": "never ever" })).is_err());
+        let r = schedule(&json!({ "task": "stand up", "when": "every weekday at 9", "kind": "reminder" })).unwrap();
+        assert!(r.contains("weekdays") && r.contains("reminder"), "{r}");
+        assert!(schedule(&json!({ "task": "x", "when": "in 2 hours" })).unwrap().contains("once"));
+        assert!(schedule(&json!({ "task": "x", "when": "tomorrow", "kind": "shell" })).is_err());
+        assert!(schedule(&json!({ "task": "x", "when": "tomorrow", "machine": "vm-1" })).unwrap().contains("Scheduled"));
+        for t in schedules::load() {
+            if t.title != "tidy my downloads" {
+                schedules::remove(&t.id);
+            }
+        }
         let listed = list_scheduled().unwrap();
         assert!(listed.contains("tidy my downloads") && listed.contains("daily"));
         let id = schedules::load()[0].id.clone();
