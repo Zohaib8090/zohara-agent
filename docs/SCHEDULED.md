@@ -42,7 +42,7 @@ Each task shows its name, when it runs next, how often, its kind, where it runs,
 |---|---|---|
 | **This computer** (desktop app) | Zohara Agent running on the computer (it can run in the tray) | The default in the desktop app. Shows the next run and "missed" when the computer was off. |
 | **Cloud server** (web and phone) | nothing of yours | The task runs on the Zohara Agent server, even when your computer and phone are off. It uses **your own API key** (the same one your chats use). |
-| **An added machine** (Settings > Machines) | the host that owns the task | Phase 1: no program is installed on the machine. The desktop app (or, for the owner, the cloud server) runs the task and the agent works on the machine through the SSH tools: "runs from this computer on vm-1". The host has to be on. |
+| **An added machine** (Settings > Machines) | the host that owns the task | Without a runner: the desktop app (or, for the owner, the cloud server) runs the task and the agent works on the machine through the SSH tools ("runs from this computer on vm-1"); the host has to be on. With a runner installed on the machine (docs/RUNNER.md), the runner runs the task there, even when the host is off; browser tasks still run from the host, as the runner has no browser. |
 
 **Missed runs.** If the computer (or the server) was off at the planned time, the task runs **once** when it is back, and says so ("Missed Sat 14 Nov 09:00"). It is not run again for every missed time.
 
@@ -103,4 +103,4 @@ A task: `{id,title,prompt,next_run,repeat,enabled,project,created,last_run,last_
 
 **Cloud runner** (`cloudrun.rs`): the server keeps a small index (in memory and in the Firestore collection `sched_index`, one document per person with the next due time and the admin flag; no task text) so it can find who is due without reading every person's folder. Every 10 seconds the people who are due get one thread each: their data is loaded, one place of `ZO_MAX_RUNS` is held, `run_due` runs what is due with `approval::Deny`, and the person's devices get a push (`push::TaskNote`). The index is refreshed after every `schedule*` op, after a run, and dropped when the account is deleted. A person's data is only touched inside their `tenant::scope`.
 
-Not built yet (see the plan documents): the headless runner for VMs (`zohara-agent-runner`), managing a desktop's tasks from the web through the desktop link, and the Machines popup.
+The VM runner (`zohara-agent-runner`) and the Machines popup are built: see docs/RUNNER.md. Not built yet (see the plan documents): managing a desktop's tasks from the web through the desktop link.

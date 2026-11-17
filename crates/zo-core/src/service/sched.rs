@@ -38,7 +38,7 @@ fn run_on_options() -> Vec<Value> {
     }
     if lim.machines && !tenant::is_restricted() {
         for m in crate::store::machines::load() {
-            out.push(json!({"id": format!("machine:{}", m.name), "label": format!("{} (added machine)", m.name), "note": format!("Runs from {} and works on {} through SSH.", if tenant::multi_tenant() { "the cloud server" } else { "this computer" }, m.name)}));
+            out.push(json!({"id": format!("machine:{}", m.name), "label": format!("{} (added machine)", m.name), "note": if crate::runner::host::has_runner(&m.name) { format!("The runner on {} runs it, even when {} is off (browser tasks still run from {}).", m.name, if tenant::multi_tenant() { "the cloud server" } else { "this computer" }, if tenant::multi_tenant() { "the cloud server" } else { "this computer" }) } else { format!("Runs from {} and works on {} through SSH.", if tenant::multi_tenant() { "the cloud server" } else { "this computer" }, m.name) }}));
         }
     }
     out
@@ -151,7 +151,7 @@ fn preview(req: &Value) -> Result<Value, String> {
 }
 
 /// How a run's end reaches the person: a notice through whatever the host has registered (desktop notification, web push).
-fn notify_hook() -> Arc<dyn Fn(&Task, &Outcome) + Send + Sync> {
+pub(super) fn notify_hook() -> Arc<dyn Fn(&Task, &Outcome) + Send + Sync> {
     let tenant_id = tenant::current().map(|t| t.id).unwrap_or_default();
     Arc::new(move |t: &Task, o: &Outcome| scheduler::notify(&tenant_id, t, &o.notice))
 }

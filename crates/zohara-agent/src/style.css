@@ -898,3 +898,10 @@ textview.code-view { padding: 10px; }
 .mem-chip-go { background-color: #5FD4D4; color: #0B0E14; }
 .mem-chip-go:hover { background-color: #7EE0E0; color: #0B0E14; }
 .mem-chip-close:hover { background-color: alpha(white, 0.08); color: #ECECEC; }
+
+/* Machines: the status dot */
+.mdot { font-size: 14px; }
+.mdot-wait { color: #8A8F98; }
+.mdot-ok { color: #3FB57A; }
+.mdot-warn { color: #D9A441; }
+.mdot-bad { color: #E5484D; }

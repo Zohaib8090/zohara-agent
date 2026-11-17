@@ -85,10 +85,19 @@ fn put(app: &App, tenant: &str, admin: bool, next: Option<u64>) {
     }
 }
 
+/// When this person is next due: a task of theirs, or (an administrator with runners on machines) the next look at a runner.
+fn next_wake(admin: bool) -> Option<u64> {
+    let runner = if admin { zo_core::runner::host::next_tick() } else { None };
+    match (scheduler::next_due_here(), runner) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 /// A person's tasks changed (made, edited, switched, removed, asked to run): look again at when they are next due. Called after the
 /// scheduled-task operations, inside the request that made them.
 pub fn refresh(app: &App, tenant: &zo_core::tenant::Tenant) {
-    let next = zo_core::tenant::scope(tenant, scheduler::next_due_here);
+    let next = zo_core::tenant::scope(tenant, || next_wake(!tenant.restricted));
     put(app, &tenant.id, !tenant.restricted, next);
 }
 
@@ -154,7 +163,11 @@ fn run_person(app: &Arc<App>, id: &str, admin: bool) {
     let next = zo_core::tenant::scope(&tenant, || {
         let tid = tenant.id.clone();
         scheduler::run_due(&Deny, "scheduler", &cancel, &mut |_, out| notify(&push, &tid, &out.notice));
-        scheduler::next_due_here()
+        if admin {
+            // the runners on the administrator's machines: send the changed tasks, fetch what they did (docs/RUNNER.md)
+            zo_core::runner::host::tick();
+        }
+        next_wake(admin)
     });
     put(app, id, admin, next);
     drop(permit);

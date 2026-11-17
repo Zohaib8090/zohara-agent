@@ -8,7 +8,7 @@ use gtk::glib;
 use libadwaita as adw;
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 use zo_core::approval::AppApprover;
@@ -82,9 +82,36 @@ pub fn check(done: Rc<dyn Fn()>) {
     });
 }
 
+/// Looks at the runners on the added machines (docs/RUNNER.md): sends a changed task list at once, fetches what they ran, and every few
+/// minutes asks them how they are. It can take a while when a machine does not answer, so it runs in a thread, one at a time.
+fn runners(done: Rc<dyn Fn()>) {
+    static BUSY: AtomicBool = AtomicBool::new(false);
+    if BUSY.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let (tx, rx) = mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        zo_core::runner::host::tick();
+        BUSY.store(false, Ordering::SeqCst);
+        let _ = tx.send(());
+    });
+    glib::timeout_add_local(Duration::from_millis(500), move || match rx.try_recv() {
+        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+        _ => {
+            done();
+            glib::ControlFlow::Break
+        }
+    });
+}
+
 /// Starts looking every 20 seconds (and once now, which runs what was missed while the computer was off).
 pub fn start(done: Rc<dyn Fn()>) {
     register_notifier();
+    let d = done.clone();
+    glib::timeout_add_seconds_local(60, move || {
+        runners(d.clone());
+        glib::ControlFlow::Continue
+    });
     let d = done.clone();
     glib::timeout_add_seconds_local(20, move || {
         check(d.clone());

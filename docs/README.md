@@ -15,6 +15,7 @@ https://zohara-agent.duckdns.org, the repository is Zohaib8090/zohara-agent. Eng
 | [ACTIVITY.md](ACTIVITY.md) | What is running now (tray icon, Activity page, web menu) and how to stop it |
 | [SSH.md](SSH.md) | Running commands on other computers over SSH (machines) |
 | [MIGRATE.md](MIGRATE.md) | Settings > Import: bring MCP servers and instructions from Claude Code, Claude Desktop, Codex, Gemini, Cursor, VS Code and Zed (detectors, secrets, undo, the three clients) |
+| [RUNNER.md](RUNNER.md) | The runner for Linux VMs (scheduled tasks while the computer is off), the Machines popup, copying connected apps and the model key to a machine |
 | [INTERACTION.md](INTERACTION.md) | Question cards and "needs you" notifications on every platform (the contract) |
 | [GREETINGS.md](GREETINGS.md) | The home-screen greetings (20 messages by time of day, weekday and gap) and how each client picks one; one shared JSON file |
 | [NOTIFICATIONS.md](NOTIFICATIONS.md) | Notifications, the installable web app (PWA) and background push |

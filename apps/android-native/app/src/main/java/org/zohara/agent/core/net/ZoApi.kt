@@ -325,7 +325,32 @@ class ZoApi(
     op("machine_add") { put("name", name); put("host", host); put("user", user); put("port", port); put("note", note); put("key", key) }
   }
   suspend fun machineTest(name: String): String = opAs<TextResp>("machine_test") { put("name", name) }.message
-  suspend fun machineRemove(name: String) { op("machine_remove") { put("name", name) } }
+  suspend fun machineRemove(name: String, force: Boolean = false) { op("machine_remove") { put("name", name); if (force) put("force", true) else put("uninstall_runner", true) } }
+  // docs/RUNNER.md: status, the add wizard, the runner, the model and the connected apps on a machine. Administrators only (the server refuses the rest).
+  /** every machine (or just [name]) with reachable / runner installed; one SSH call each, all at the same time */
+  suspend fun machineStatus(name: String? = null): List<MachineStatus> = opAs<MachineStatusResp>("machine_status", true) { if (name != null) put("name", name) }.machines
+  /** a new machine with a NEW key made for Zohara Agent: the public line and the command to put it on the machine */
+  suspend fun machineNew(name: String, host: String, user: String, port: Int, note: String): MachineNew =
+    opAs("machine_new") { put("name", name); put("host", host); put("user", user); put("port", port); put("note", note) }
+  /** puts the key on the machine with a one-time password: used once, never kept, never logged */
+  suspend fun machineAuthorize(name: String, password: String): String = opAs<TextResp>("machine_authorize") { put("name", name); put("password", password) }.message
+  suspend fun runnerInstall(name: String): List<String> = opAs<StepsResp>("machine_runner_install") { put("name", name) }.steps
+  suspend fun runnerUninstall(name: String) { op("machine_runner_uninstall") { put("name", name) } }
+  suspend fun runnerAllow(name: String, commands: Boolean, files: Boolean) { op("machine_runner_allow") { put("name", name); put("commands", commands); put("files", files) } }
+  suspend fun machineModelPlan(name: String): ModelPlan = opAs("machine_model_plan", true) { put("name", name) }
+  /** [confirm] is the sentence from [machineModelPlan], word for word: the service refuses anything else */
+  suspend fun machineModelCopy(name: String, confirm: String): String = opAs<TextResp>("machine_model_copy") { put("name", name); put("confirm", confirm) }.message
+  suspend fun machineModelClear(name: String) { op("machine_model_clear") { put("name", name) } }
+  suspend fun machineAppsPlan(name: String): AppsPlanResp = opAs("machine_apps_plan", true) { put("name", name) }
+  /** [servers] are (app name, copy its credentials too); with credentials the service wants the named sentence in [confirm] and says it when it is missing */
+  suspend fun machineAppsCopy(name: String, servers: List<Pair<String, Boolean>>, confirm: String): AppsCopyResp = opAs("machine_apps_copy") {
+    put("name", name); put("confirm", confirm)
+    putJsonArray("servers") { servers.forEach { (n, c) -> add(buildJsonObject { put("name", n); put("credentials", c) }) } }
+  }
+  suspend fun machineAppsRevoke(name: String) { op("machine_apps_revoke") { put("name", name) } }
+  suspend fun machineAppsCheck(name: String): List<AppCheck> = opAs<AppsCheckResp>("machine_apps_check") { put("name", name) }.servers
+  suspend fun machineAppsSync(name: String, confirm: String): AppsCopyResp = opAs("machine_apps_sync") { put("name", name); put("confirm", confirm) }
+  suspend fun machineTaskRun(name: String, prompt: String): RunTaskResp = opAs("machine_task_run") { put("name", name); put("prompt", prompt) }
   suspend fun mcpList(): List<McpServer> = opAs<McpResp>("mcp_list", true).servers
   suspend fun mcpAdd(name: String, address: String, token: String? = null): String = opAs<TextResp>("mcp_add") {
     put("name", name); put("address", address); if (!token.isNullOrBlank()) put("token", token)

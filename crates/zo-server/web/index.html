@@ -208,7 +208,7 @@ svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;stroke
 .foot-note{font-size:12px;color:var(--dimmer);text-align:center;padding:12px 0 0}
 /* LINK-CSS-BEGIN: run on my computer */
 .pill.pill-run{display:inline-flex;align-items:center;gap:7px;max-width:min(46vw,260px)}.pill-run .pt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pdot{width:8px;height:8px;border-radius:50%;background:var(--dimmer);flex:none;display:inline-block}.pdot.on{background:#3FB57A}.pdot.wait{background:#D9A441}
+.pdot{width:8px;height:8px;border-radius:50%;background:var(--dimmer);flex:none;display:inline-block}.pdot.on{background:#3FB57A}.pdot.wait{background:#D9A441}.pdot.bad{background:#E5484D}
 .pills{flex-wrap:wrap}
 .runnote{margin:8px 8px 0;padding:10px 12px;border:1px solid var(--line2);border-radius:12px;background:var(--card);font-size:13px;color:var(--text2);display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
 .runnote .btn{flex:none}
@@ -590,6 +590,7 @@ const P = {
   refresh: '<path d="M21 12a9 9 0 00-15.5-6.4L3 8M3 3v5h5M3 12a9 9 0 0015.5 6.4L21 16M21 21v-5h-5"/>',
   context: '<circle cx="12" cy="12" r="9"/><path d="M12 3v9h9"/>',
   activity: '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
+  server: '<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>',
   terminal: '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>',
   sidebar: '<rect x="4" y="5" width="16" height="14" rx="2"/><path d="M10 5v14"/>', gear: '<circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/>',
   up: '<path d="M6 15l6-6 6 6"/>', chev: '<path d="M9 6l6 6-6 6"/>', down: '<path d="M6 9l6 6 6-6"/>', copy: '<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 012-2h9"/>',
@@ -758,7 +759,7 @@ function composerHTML() {
     <button class="tool-btn send" id="send" title="Send" data-i="up"></button><button class="tool-btn stop hide" id="stop" title="Stop" data-i="stop"></button></div></div>
     <div class="runnote hide" id="runNote" role="status" aria-live="polite"></div>
     <div class="runnote hide" id="ccBanner" role="status" aria-live="polite"></div>
-    <div class="pills"><button class="pill pill-run" id="pRun" aria-haspopup="menu" title="Where Zohara Agent runs"><span class="pdot" id="pRunDot"></span><span class="pt" id="pRunT">Cloud</span><i data-i="down"></i></button><button class="pill" id="pModel"><span id="pModelT">…</span><i data-i="down"></i></button><button class="pill pill-muted" id="pMode">${esc(mode)}</button><button class="pill" id="pContext" title="Context usage and token breakdown"><i data-i="context"></i><span id="pContextT">Context</span></button><button class="pill" id="pTerminal" title="Interactive terminal"><i data-i="terminal"></i><span id="pTerminalT">Terminal</span></button></div>
+    <div class="pills"><button class="pill pill-run" id="pRun" aria-haspopup="menu" title="Where Zohara Agent runs"><span class="pdot" id="pRunDot"></span><span class="pt" id="pRunT">Cloud</span><i data-i="down"></i></button><button class="pill" id="pModel"><span id="pModelT">…</span><i data-i="down"></i></button><button class="pill pill-muted" id="pMode">${esc(mode)}</button><button class="pill" id="pContext" title="Context usage and token breakdown"><i data-i="context"></i><span id="pContextT">Context</span></button>${restricted() ? "" : '<button class="pill" id="pMachines" title="Machines you can reach over SSH"><i data-i="server"></i><span>Machines</span></button>'}<button class="pill" id="pTerminal" title="Interactive terminal"><i data-i="terminal"></i><span id="pTerminalT">Terminal</span></button></div>
     <div class="foot-note" id="footNote">Zohara Agent can make mistakes. Check what it did.</div>`;
 }
 function wireComposer() {
@@ -776,6 +777,7 @@ function wireComposer() {
   $("pMode").onclick = e => modePopover(e.currentTarget);
   if ($("pContext")) $("pContext").onclick = () => dockToggle("context");
   if ($("pTerminal")) $("pTerminal").onclick = () => dockToggle("terminal");
+  if ($("pMachines")) $("pMachines").onclick = () => machinesPopup();
   refreshModel(); t.focus();
 }
 /* live step counter and stuck-loop notice (stream events "steps" {n} and "stuck" {n, tool}); never stops anything by itself */
@@ -2629,7 +2631,7 @@ async function tNew(opts) {
   if (TM.tabs.length >= 8) { toast("That is enough terminals. Close one first."); return null; }
   const stage = TM.root.querySelector(".tm-stage"), pane = document.createElement("div"); pane.className = "tm-pane hide"; stage.appendChild(pane);
   const term = new window.Terminal({ fontSize: tFont, fontFamily: '"JetBrains Mono", "Cascadia Mono", "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", "Droid Sans Mono", "SF Mono", Menlo, Consolas, "Courier New", monospace', cursorBlink: true, scrollback: 5000, allowProposedApi: true, theme: tTheme(), macOptionIsMeta: true, convertEol: false });
-  const t = { id: "t" + (++TM.n), sid: opts.sid || null, target: desktop ? "desktop" : "cloud", device: desktop ? (opts.device || runOn) : "", name: opts.name || "Terminal " + TM.n, term, pane, next: opts.next || 0, state: "connecting", q: "", sending: false, closed: false, retry: 0, why: "", auto: opts.autoType || "", rz: null, ac: null };
+  const t = { id: "t" + (++TM.n), machine: opts.machine || "", sid: opts.sid || null, target: desktop ? "desktop" : "cloud", device: desktop ? (opts.device || runOn) : "", name: opts.name || "Terminal " + TM.n, term, pane, next: opts.next || 0, state: "connecting", q: "", sending: false, closed: false, retry: 0, why: "", auto: opts.autoType || "", rz: null, ac: null };
   TM.tabs.push(t);
   term.open(pane);
   term.onData(d => {
@@ -2738,6 +2740,7 @@ async function tRun(t, resume) {
   try {
     const body = { target: t.target, rows: t.term.rows || 30, cols: t.term.cols || 110, name: t.name };
     if (t.target === "desktop") body.device = t.device;
+    if (t.machine && !t.sid) body.machine = t.machine;
     if (t.sid && t.target === "cloud") { body.session = t.sid; body.from = t.next; }
     r = await fetch("/api/term/open", { method: "POST", headers: { "Content-Type": "application/json", "X-ZO-Local": "1", Authorization: "Bearer " + await token() }, body: JSON.stringify(body), signal: ac.signal });
   } catch { return tLost(t); }
@@ -2847,24 +2850,24 @@ async function renderDockContext() {
   }
 }
 
-function dockSelect(tab) {
+function dockSelect(tab, opts) {
   dockCurTab = tab;
   if ($("dockTabTerm")) $("dockTabTerm").classList.toggle("active", tab === "terminal");
   if ($("dockTabCtx")) $("dockTabCtx").classList.toggle("active", tab === "context");
   if ($("dockPageTerm")) $("dockPageTerm").classList.toggle("hide", tab !== "terminal");
   if ($("dockPageCtx")) $("dockPageCtx").classList.toggle("hide", tab !== "context");
   if (tab === "terminal") {
-    tOpen();
+    tOpen(opts);
   } else if (tab === "context") {
     renderDockContext();
   }
 }
 
-function dockOpen(tab = "terminal") {
+function dockOpen(tab = "terminal", opts) {
   const d = $("dock");
   if (!d) return;
   d.classList.remove("hide");
-  dockSelect(tab);
+  dockSelect(tab, opts);
 }
 
 function dockHide() {
@@ -3404,29 +3407,173 @@ function connectorAdd(e, kind, done) {
   const cancel = btn("Cancel", "", () => { if (tried) op("connector_cancel", { name: tried }).catch(() => {}); dlg.close(); });
   const dlg = sheet("Add " + e.title, w, [cancel, go]);
 }
-async function pageMachines(b) {
-  const r = await op("machines"); b.innerHTML = "";
-  const add = btn("Add machine…", "primary", () => machineSheet(b));
-  b.appendChild(head("Machines"));
-  const rows = r.machines.map(m => {
-    const c = document.createElement("div"); c.style.cssText = "display:flex;gap:6px";
-    const t = btn("Test", "", async () => { t.disabled = true; t.textContent = "Testing…"; try { toast((await op("machine_test", { name: m.name })).message); } catch (e) { toast(e.message); } t.disabled = false; t.textContent = "Test"; });
-    const d = btn("Remove", "danger", () => confirmBox("Remove " + m.name + "?", "Zohara Agent forgets this machine and its saved key.", "Remove", async () => { try { await op("machine_remove", { name: m.name }); } catch (e) { toast(e.message); } pageMachines(b); }));
-    c.append(t, d);
-    return row(m.name, `${m.user ? m.user + "@" : ""}${m.host}:${m.port}${m.has_key ? " · key saved" : " · no key"}${m.note ? " · " + m.note : ""}`, c);
-  });
-  b.appendChild(cardOf(...rows, row("Add a machine", "Zohara Agent connects with SSH to run commands there. The private key is stored on the server and never shown again. Use a key made for Zohara Agent.", add)));
+/* ===== MACHINES: the page, the popup on the chat screen, the add wizard, the runner and the copy of connected apps (docs/SSH.md, docs/RUNNER.md).
+   Everything here is the owner's / admin's: the service refuses every machine_* operation for a restricted account, and the buttons are not drawn for one. ===== */
+const mNames = a => { const v = [...a].sort(); return v.length < 2 ? v.join("") : v.slice(0, -1).join(", ") + " and " + v[v.length - 1]; };
+function mStateText(s) {
+  if (!s) return "Checking…";
+  if (!s.reachable) return "Not reachable" + (s.error ? ": " + String(s.error).slice(0, 140) : "");
+  if (!s.installed) return "Reachable · no runner";
+  const r = s.runner || {};
+  return "Reachable · runner " + (r.version || "?") + (r.timer_active === false ? " · timer off" : "") + " · " + (r.enabled_tasks || 0) + " task" + (r.enabled_tasks === 1 ? "" : "s") + (r.last_run ? " · last run " + ago(r.last_run) + (r.last_status ? " (" + r.last_status + ")" : "") : "");
 }
-function machineSheet(b) {
+const mDotClass = s => !s ? "pdot" : !s.reachable ? "pdot bad" : s.installed ? "pdot on" : "pdot wait";
+/* what a person agrees to is shown word for word, and the page sends exactly that text back; the service refuses anything else */
+function mAsk(title, sentence, okText, run) {
+  const w = document.createElement("div"); const err = document.createElement("div"); err.className = "field-hint bad";
+  w.innerHTML = `<div class="pc-meta"></div><label class="inline" style="margin-top:12px"><input type="checkbox" id="mck"><span></span></label>`;
+  w.querySelector(".pc-meta").textContent = "Your credentials are copied over SSH, straight from this " + (onDesktop() ? "computer" : "server") + " to the machine, as files only you can read. You can revoke them on the machine afterwards.";
+  w.querySelector("label span").textContent = sentence; w.appendChild(err);
+  const go = btn(okText, "primary", async () => { go.disabled = true; err.textContent = ""; try { await run(sentence); sh.close(); } catch (e) { err.textContent = e.message; go.disabled = !w.querySelector("#mck").checked; } });
+  go.disabled = true; w.querySelector("#mck").onchange = e => { go.disabled = !e.target.checked; };
+  const sh = sheet(title, w, [btn("Cancel", "", () => sh.close()), go]);
+}
+/* a call that may need the named confirmation: the service answers "Confirm exactly: <sentence>" and the page shows that sentence to the person */
+async function mConfirmed(title, okText, call, done) {
+  try { const r = await call(""); if (done) done(r); return; } catch (e) {
+    const m = /^Confirm exactly: (.+)$/.exec(e.message); if (!m) throw e;
+    mAsk(title, m[1], okText, async c => { const r = await call(c); if (done) done(r); });
+  }
+}
+async function machineListInto(host, refresh) {
+  host.innerHTML = ""; const gen = host._mg = (host._mg || 0) + 1; /* a newer call for the same place wins: an old answer is dropped */
+  let list; try { list = (await op("machines")).machines; } catch (e) { if (host._mg === gen) host.innerHTML = `<div class="msg-error">${esc(e.message)}</div>`; return; }
+  if (host._mg !== gen) return;
+  if (!list.length) { host.appendChild(cardOf(row("No machines yet", "Add a computer or a cloud server that Zohara Agent can reach over SSH.", null))); return; }
+  const rows = {}, card = cardOf(...list.map(m => (rows[m.name] = machineRow(m, null, refresh)))); host.appendChild(card);
+  let st = {}; try { st = await op("machine_status"); } catch { st = { machines: [] }; }
+  if (!host.isConnected || host._mg !== gen) return;
+  for (const m of list) { const s = (st.machines || []).find(x => x.name === m.name) || { reachable: false, error: "No answer." }; const n = machineRow(m, s, refresh); rows[m.name].replaceWith(n); }
+}
+function machineRow(m, s, refresh) {
+  const c = document.createElement("div"); c.style.cssText = "display:flex;gap:6px;flex-wrap:wrap";
+  const t = btn("Test", "", async () => { t.disabled = true; t.textContent = "Testing…"; try { toast((await op("machine_test", { name: m.name })).message); } catch (e) { toast(e.message); } t.disabled = false; t.textContent = "Test"; if (refresh) refresh(); });
+  c.append(t);
+  if (tIsAdmin()) c.append(btn("Terminal", "", () => { document.querySelectorAll(".scrim").forEach(x => x.remove()); dockOpen("terminal", { fresh: true, target: "cloud", machine: m.name, name: m.name }); }));
+  c.append(btn("Manage…", "", () => machineManage(m, s, refresh)));
+  const r = row(m.name, `${m.user ? m.user + "@" : ""}${m.host}:${m.port}${m.has_key ? "" : " · no key"}${m.note ? " · " + m.note : ""} — ${mStateText(s)}`, c);
+  const dot = document.createElement("span"); dot.className = mDotClass(s); dot.style.marginRight = "8px"; dot.title = mStateText(s); r.querySelector(".pc-name2").prepend(dot);
+  return r;
+}
+async function pageMachines(b) {
+  b.innerHTML = ""; b.appendChild(head("Machines"));
+  const host = document.createElement("div"); b.appendChild(host);
+  const again = () => { if (b.isConnected) pageMachines(b); };
+  b.appendChild(cardOf(row("Add a machine", "Zohara Agent connects with SSH to run commands there. It makes a new key for the machine and shows you the one line to put on it. The private key is stored on the server and never shown.", btn("Add machine…", "primary", () => machineWizard(again)))));
+  b.appendChild(cardOf(row("Already have a key?", "Add a machine with a private key you made yourself (no passphrase). The key is stored on the server and never shown again.", btn("Use my own key…", "", () => machineKeySheet(again)))));
+  b.appendChild(cardOf(row("Where tasks run", "On a machine with the runner installed, scheduled tasks keep running while your computer is off. Open Manage… on a machine to install it. See docs/RUNNER.md.", null)));
+  await machineListInto(host, again);
+}
+function machineKeySheet(done) {
   const w = document.createElement("div");
-  w.innerHTML = '<div class="field-label">Name</div><input class="field-input" id="mn" placeholder="home-server"><div class="field-label">Host</div><input class="field-input" id="mh" placeholder="192.168.1.20 or example.com"><div class="field-label">User</div><input class="field-input" id="mu"><div class="field-label">Port</div><input class="field-input" id="mp" value="22" inputmode="numeric"><div class="field-label">Note (optional)</div><input class="field-input" id="mo"><div class="field-label">Private key (optional)</div><textarea class="field-input" id="mk" rows="5" spellcheck="false" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea><div class="field-hint" id="me"></div>';
+  w.innerHTML = '<div class="field-label">Name</div><input class="field-input" id="mn" placeholder="home-server"><div class="field-label">Host</div><input class="field-input" id="mh" placeholder="192.168.1.20 or example.com"><div class="field-label">User</div><input class="field-input" id="mu"><div class="field-label">Port</div><input class="field-input" id="mp" value="22" inputmode="numeric"><div class="field-label">Note (optional)</div><input class="field-input" id="mo"><div class="field-label">Private key</div><textarea class="field-input" id="mk" rows="5" spellcheck="false" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea><div class="field-hint" id="me"></div>';
   const v = id => w.querySelector("#" + id).value;
   const save = btn("Add", "primary", async () => {
     save.disabled = true; w.querySelector("#me").textContent = "";
-    try { await op("machine_add", { name: v("mn"), host: v("mh"), user: v("mu"), port: v("mp"), note: v("mo"), key: v("mk") || undefined }); sh.close(); pageMachines(b); }
+    try { await op("machine_add", { name: v("mn"), host: v("mh"), user: v("mu"), port: v("mp"), note: v("mo"), key: v("mk") }); sh.close(); if (done) done(); }
     catch (e) { w.querySelector("#me").textContent = e.message; save.disabled = false; }
   });
-  const sh = sheet("Add a machine", w, [btn("Cancel", "", () => sh.close()), save]);
+  const sh = sheet("Add a machine with my own key", w, [btn("Cancel", "", () => sh.close()), save]);
+}
+/* the popup next to the model pill on the chat screen */
+function machinesPopup() {
+  if (restricted()) return;
+  const w = document.createElement("div"); const list = document.createElement("div"); w.appendChild(list);
+  const sh = sheet("Machines", w, [btn("Add machine…", "primary", () => machineWizard(load)), btn("Close", "", () => sh.close())], true);
+  const load = () => machineListInto(list, load); load();
+}
+/* the add wizard: where it is -> a new key and the one line to put on the machine (or a one-time password, never kept) -> Test */
+function machineWizard(done) {
+  const w = document.createElement("div"); let name = "";
+  const step1 = () => {
+    w.innerHTML = '<div class="pc-meta">Zohara Agent makes a new key just for this machine. You put its public half on the machine, once.</div><div class="field-label">Name</div><input class="field-input" id="mn" placeholder="home-server"><div class="field-label">Host</div><input class="field-input" id="mh" placeholder="192.168.1.20 or example.com"><div class="field-label">User</div><input class="field-input" id="mu"><div class="field-label">Port</div><input class="field-input" id="mp" value="22" inputmode="numeric"><div class="field-label">Note (optional)</div><input class="field-input" id="mo"><div class="field-hint bad" id="me"></div>';
+    const v = id => w.querySelector("#" + id).value;
+    const next = btn("Next", "primary", async () => {
+      next.disabled = true; w.querySelector("#me").textContent = "";
+      try { const r = await op("machine_new", { name: v("mn"), host: v("mh"), user: v("mu"), port: v("mp"), note: v("mo") }); name = r.name; step2(r); }
+      catch (e) { w.querySelector("#me").textContent = e.message; next.disabled = false; }
+    });
+    foot([btn("Cancel", "", () => sh.close()), next]);
+  };
+  const step2 = r => {
+    w.innerHTML = '<div class="pc-meta">Put this key on the machine. Run this one line there (it appends the key to ~/.ssh/authorized_keys):</div><textarea class="field-input" id="ac" rows="6" readonly spellcheck="false" style="font-family:monospace;font-size:12px"></textarea><div class="inline"><button class="btn" id="cp">Copy the line</button></div><div class="pc-meta" style="margin-top:14px">Or, if the machine accepts a password, give it once. It is used one time to put the key there and is never stored.</div><div class="inline"><input class="field-input" id="pw" type="password" autocomplete="off" placeholder="One-time password"><button class="btn" id="pb">Use it once</button></div><div class="field-hint" id="ms"></div>';
+    w.querySelector("#ac").value = r.authorize_command;
+    const say = (t, bad) => { const e = w.querySelector("#ms"); e.textContent = t; e.className = "field-hint" + (bad ? " bad" : " ok"); };
+    w.querySelector("#cp").onclick = async () => { try { await navigator.clipboard.writeText(r.authorize_command); say("Copied."); } catch { w.querySelector("#ac").select(); say("Select the text and copy it."); } };
+    w.querySelector("#pb").onclick = async e => { const b2 = e.currentTarget, p = w.querySelector("#pw"); if (!p.value) return; b2.disabled = true; try { const x = await op("machine_authorize", { name, password: p.value }); say(x.message); } catch (er) { say(er.message, true); } p.value = ""; b2.disabled = false; };
+    const test = btn("Test connection", "primary", async () => { test.disabled = true; test.textContent = "Testing…"; try { say((await op("machine_test", { name })).message); } catch (e) { say(e.message, true); } test.disabled = false; test.textContent = "Test connection"; });
+    foot([btn("Done", "", () => sh.close()), test]);
+  };
+  const foot = btns => { const f = sh.el.querySelector(".sheet-foot"); f.innerHTML = ""; btns.forEach(x => f.appendChild(x)); };
+  const sh = sheet("Add a machine", w, []);
+  const close0 = sh.close; sh.close = () => { close0(); if (done && name) done(); };
+  step1();
+}
+function machineManage(m, s, refresh) {
+  const w = document.createElement("div"); const sh = sheet(m.name, w, [btn("Close", "", () => { sh.close(); if (refresh) refresh(); })], true);
+  const reload = async () => { try { s = (await op("machine_status", { name: m.name })).machines[0] || s; } catch {} draw(); };
+  const busyBtn = (label, cls, fn, busyText) => { const x = btn(label, cls, async () => { x.disabled = true; x.textContent = busyText || "Working…"; try { await fn(); } catch (e) { toast(e.message); } await reload(); }); return x; };
+  const draw = () => {
+    w.innerHTML = "";
+    const ctl = (...b) => { const d = document.createElement("div"); d.style.cssText = "display:flex;gap:6px;flex-wrap:wrap"; d.append(...b); return d; };
+    const top = row("Status", `${m.user ? m.user + "@" : ""}${m.host}:${m.port} — ${mStateText(s)}`, null);
+    const dot = document.createElement("span"); dot.className = mDotClass(s); dot.style.marginRight = "8px"; top.querySelector(".pc-name2").prepend(dot);
+    const rows = [top];
+    const inst = s && s.installed;
+    rows.push(row("Runner", inst ? "Installed. It runs this machine's own task list from a systemd timer, also when your computer is off. Its results come back here." : "A small program (zohara-agent-runner) that is copied to the machine over SSH, with its checksum checked. It lets scheduled tasks run there while your computer is off.",
+      ctl(busyBtn(inst ? "Update" : "Install runner", "primary", async () => { const r = await op("machine_runner_install", { name: m.name }); toast((r.steps || []).slice(-1)[0] || "Installed."); }, "Installing…"),
+        ...(inst ? [busyBtn("Remove runner", "danger", async () => { await op("machine_runner_uninstall", { name: m.name }); toast("The runner is removed."); })] : []))));
+    if (inst) {
+      const chk = (k, label, sub) => { const i = document.createElement("input"); i.type = "checkbox"; i.checked = !!s[k]; i.onchange = async () => { try { await op("machine_runner_allow", { name: m.name, commands: k === "commands" ? i.checked : !!s.commands, files: k === "files" ? i.checked : !!s.files }); s[k] = i.checked; } catch (e) { toast(e.message); i.checked = !i.checked; } }; return row(label, sub, i); };
+      rows.push(chk("commands", "Let tasks run commands there", "Off: a task that needs to run a command is refused (nobody is there to ask)."));
+      rows.push(chk("files", "Let tasks write files there", "Off: writing files is refused."));
+      rows.push(row("Model on this machine", s.runner && s.runner.has_model ? (s.runner.model + (s.runner.has_key ? " · key copied" : "")) : "Tasks there need a model. Copying sends your API key for it over SSH, after you confirm.",
+        ctl(btn("Copy model key…", "", () => modelCopy(m, reload)), ...(s.runner && s.runner.has_model ? [busyBtn("Remove", "danger", async () => { await op("machine_model_clear", { name: m.name }); })] : []))));
+    }
+    const ac = s && s.apps_copied;
+    rows.push(row("Connected apps", ac && ac.servers && ac.servers.length ? "Copied: " + ac.servers.map(x => x.name + (x.credentials ? " (with credentials)" : "")).join(", ") : "Copy your connected apps (MCP servers) to the machine so its tasks can use them without signing in again.",
+      ctl(btn("Copy connected apps…", "", () => appsCopy(m, reload)),
+        ...(ac && ac.servers && ac.servers.length ? [
+          busyBtn("Check", "", async () => { const r = await op("machine_apps_check", { name: m.name }); const bad = (r.servers || []).filter(x => !x.present); toast(bad.length ? bad.map(x => x.name + ": " + x.hint).join(" ") : "Everything the apps need is on the machine.", 6000); }),
+          busyBtn("Sync", "", async () => { await mConfirmed("Send the credentials again", "Sync", c => op("machine_apps_sync", { name: m.name, confirm: c }), r => toast("In step: " + r.synced + " app(s)" + (r.removed && r.removed.length ? ", removed " + r.removed.join(", ") : "") + ".")); }),
+          busyBtn("Revoke on machine", "danger", async () => { await op("machine_apps_revoke", { name: m.name }); toast("Deleted from the machine."); })] : []))));
+    const ta = document.createElement("textarea"); ta.className = "field-input"; ta.rows = 3; ta.placeholder = "What should it do on " + m.name + "?";
+    const runb = btn("Run a task here", "primary", async () => { if (!ta.value.trim()) return; runb.disabled = true; try { const r = await op("machine_task_run", { name: m.name, prompt: ta.value.trim() }); toast(r.by_runner ? "Sent to the runner on " + m.name + ". The answer comes back to you." : "Started from here over SSH. Anything that would need your OK is refused here, as nobody can answer."); ta.value = ""; } catch (e) { toast(e.message); } runb.disabled = false; });
+    const rrow = row("Run a task here", "One time, now.", null); rrow.style.flexWrap = "wrap"; const col = document.createElement("div"); col.style.cssText = "flex:1 1 100%;display:flex;flex-direction:column;gap:8px"; col.append(ta, runb); rrow.appendChild(col); rows.push(rrow);
+    rows.push(row("Remove this machine", "Zohara Agent forgets it and its saved key. Nothing changes on the machine itself (the runner stays unless you remove it first).", btn("Remove", "danger", () => confirmBox("Remove " + m.name + "?", "Zohara Agent forgets this machine and its saved key. If a runner is installed on it, the runner is removed first.", "Remove", async () => { try { await op("machine_remove", { name: m.name, uninstall_runner: true }); } catch (e) { confirmBox("The runner could not be removed", e.message + " Remove " + m.name + " anyway? If the machine still exists, the runner and what it holds stay there.", "Remove anyway", async () => { try { await op("machine_remove", { name: m.name, force: true }); } catch (e2) { toast(e2.message); } sh.close(); if (refresh) refresh(); }); return; } sh.close(); if (refresh) refresh(); }))));
+    w.appendChild(cardOf(...rows));
+  };
+  draw(); reload();
+}
+async function modelCopy(m, after) {
+  let p; try { p = await op("machine_model_plan", { name: m.name }); } catch (e) { toast(e.message); return; }
+  if (!p.can) { toast(p.why || "That cannot be copied."); return; }
+  mAsk("Copy the model key to " + m.name, p.confirm, "Copy key", async c => { toast((await op("machine_model_copy", { name: m.name, confirm: c })).message); if (after) after(); });
+}
+async function appsCopy(m, after) {
+  let p; try { p = await op("machine_apps_plan", { name: m.name }); } catch (e) { toast(e.message); return; }
+  const w = document.createElement("div"); const err = document.createElement("div"); err.className = "field-hint bad";
+  if (!p.servers.length) { toast("There are no connected apps to copy."); return; }
+  const picks = p.servers.map(sv => { const a = document.createElement("input"); a.type = "checkbox"; a.checked = !sv.copied; const c = document.createElement("input"); c.type = "checkbox"; c.checked = false; return { sv, a, c }; });
+  const rows = picks.map(({ sv, a, c }) => {
+    const hasCred = (sv.credentials || []).length > 0 || sv.oauth;
+    const sub = (sv.kind === "remote" ? "Address: " : "Starts: ") + sv.target + (hasCred ? " · needs " + ((sv.credentials || []).join(", ") || "a sign-in") : "") + (sv.copied ? " · already copied" : "") + (sv.warnings || []).map(x => " — " + x).join("");
+    const d = document.createElement("div"); d.style.cssText = "display:flex;flex-direction:column;gap:6px;align-items:flex-start";
+    const l1 = document.createElement("label"); l1.className = "inline"; l1.append(a, document.createTextNode("Copy it"));
+    d.appendChild(l1);
+    if (hasCred) { const l2 = document.createElement("label"); l2.className = "inline"; l2.append(c, document.createTextNode("with its credentials")); d.appendChild(l2); }
+    return row(sv.name, sub, d);
+  });
+  w.append(cardOf(...rows), err);
+  const go = btn("Copy", "primary", async () => {
+    const chosen = picks.filter(x => x.a.checked).map(x => ({ name: x.sv.name, credentials: x.c.checked && ((x.sv.credentials || []).length > 0 || x.sv.oauth) }));
+    if (!chosen.length) { err.textContent = "Pick at least one app."; return; }
+    go.disabled = true; err.textContent = "";
+    try { await mConfirmed("Copy credentials to " + m.name, "Copy", c => op("machine_apps_copy", { name: m.name, servers: chosen, confirm: c }), r => { toast("Copied " + r.copied + " app" + (r.copied === 1 ? "" : "s") + (r.credentials ? " (" + r.credentials + " with credentials)" : "") + " to " + m.name + "."); if (after) after(); });
+      sh.close(); } catch (e) { err.textContent = e.message; }
+    go.disabled = false;
+  });
+  const sh = sheet("Copy connected apps to " + m.name, w, [btn("Cancel", "", () => sh.close()), go], true);
 }
 const ago = ms => { if (!ms) return "never"; const m = Math.round((Date.now() - ms) / 60000); return m < 1 ? "just now" : m < 60 ? m + " min ago" : m < 2880 ? Math.round(m / 60) + " h ago" : new Date(ms).toLocaleDateString(); };
 async function pageSync(b) {

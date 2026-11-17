@@ -154,6 +154,33 @@ val ZoJson: Json = Json {
 @Serializable data class SchedulePreview(val repeat: String = "", val runs: List<SchedulePreviewRun> = emptyList(), val text: String = "")
 @Serializable data class Machine(val name: String, val host: String = "", val user: String = "", val port: Int = 22, val note: String = "", val hasKey: Boolean = false)
 @Serializable data class MachinesResp(val machines: List<Machine> = emptyList())
+// ---- machines: status, runner, copy of connected apps (docs/RUNNER.md, docs/VM-MIGRATION-PLAN.md sections 2, 4, 6): the `machine_*` ops ----
+/** What the runner on a machine says about itself (`machine_status`.runner). */
+@Serializable data class RunnerInfo(
+  val version: String = "", val timerActive: Boolean? = null, val enabledTasks: Int = 0, val tasks: Int = 0, val lastRun: Long? = null,
+  val lastStatus: String? = null, val hasModel: Boolean = false, val model: String = "", val hasKey: Boolean = false,
+)
+@Serializable data class AppsCopiedServer(val name: String, val credentials: Boolean = false)
+@Serializable data class AppsCopied(val at: Long = 0, val servers: List<AppsCopiedServer> = emptyList())
+/** One machine: reachable now? runner installed? [error] is the sentence when it is not reachable. */
+@Serializable data class MachineStatus(
+  val name: String, val reachable: Boolean = false, val installed: Boolean = false, val error: String? = null, val runner: RunnerInfo? = null,
+  val commands: Boolean = false, val files: Boolean = false, val appsCopied: AppsCopied? = null, val hasKey: Boolean = false,
+)
+@Serializable data class MachineStatusResp(val machines: List<MachineStatus> = emptyList())
+/** The wizard's answer: the public key line and the one command that puts it on the machine. The private key never leaves the server. */
+@Serializable data class MachineNew(val name: String = "", val publicKey: String = "", val authorizeCommand: String = "")
+@Serializable data class ModelPlan(val provider: String = "", val model: String = "", val can: Boolean = false, val why: String = "", val needsKey: Boolean = false, val confirm: String = "")
+@Serializable data class AppPlan(
+  val name: String, val kind: String = "", val target: String = "", val credentials: List<String> = emptyList(), val oauth: Boolean = false,
+  val warnings: List<String> = emptyList(), val copied: Boolean = false, val copiedWithCredentials: Boolean = false,
+)
+@Serializable data class AppsPlanResp(val machine: String = "", val hasRunner: Boolean = false, val servers: List<AppPlan> = emptyList())
+@Serializable data class AppCheck(val name: String = "", val present: Boolean = false, val hint: String = "")
+@Serializable data class AppsCheckResp(val servers: List<AppCheck> = emptyList())
+@Serializable data class AppsCopyResp(val copied: Int = 0, val credentials: Int = 0, val synced: Int = 0, val removed: List<String> = emptyList())
+@Serializable data class RunTaskResp(val task: String = "", val byRunner: Boolean = false)
+@Serializable data class StepsResp(val steps: List<String> = emptyList())
 @Serializable data class McpServer(val name: String, val command: String = "", val enabled: Boolean = true, val held: Boolean = false, val registry: String? = null, val addressChanged: String? = null)
 // ---- connectors directory (docs/MCP.md "Browse connectors"): `connectors` op and the connector_* ops ----
 @Serializable data class ConnectorHeader(val name: String, val description: String = "", val secret: Boolean = false, val required: Boolean = false, val value: String? = null)

@@ -12,6 +12,7 @@ use zo_core::store::artifacts;
 mod composer;
 mod connectors_ui;
 mod dock;
+mod machines_ui;
 mod markdown;
 mod migrate_ui;
 mod memfeed;
@@ -1831,6 +1832,9 @@ fn build_ui(app: &adw::Application) {
     pills.set_halign(gtk::Align::End);
     let (model_btn, model_label) = chat::pill_button(&chat::pill_text(&zo_core::ai::Selection::load()), true);
     let (perm_btn, perm_label) = chat::pill_button(zo_core::Mode::load().name(), false);
+    let (machines_btn, _) = chat::pill_button("Machines", false);
+    machines_btn.set_tooltip_text(Some("Machines you can reach over SSH"));
+    pills.append(&machines_btn);
     pills.append(&model_btn);
     pills.append(&perm_btn);
     composer_wrap.append(&pills);
@@ -2002,6 +2006,9 @@ fn build_ui(app: &adw::Application) {
     pv_meta.set_halign(gtk::Align::End);
     let (pv_model, pv_model_label) = chat::pill_button(&chat::pill_text(&zo_core::ai::Selection::load()), true);
     let (pv_perm, pv_perm_label) = chat::pill_button(zo_core::Mode::load().name(), false);
+    let (pv_machines, _) = chat::pill_button("Machines", false);
+    pv_machines.set_tooltip_text(Some("Machines you can reach over SSH"));
+    pv_meta.append(&pv_machines);
     pv_meta.append(&pv_model);
     pv_meta.append(&pv_perm);
     pv_wrap.append(&pv_meta);
@@ -2327,6 +2334,10 @@ fn build_ui(app: &adw::Application) {
         });
         let ui2 = ui.clone();
         model_btn.connect_clicked(move |b| chat::show_model_popover(&ui2, b));
+        for b in [&machines_btn, &pv_machines] {
+            let ui3 = ui.clone();
+            b.connect_clicked(move |_| machines_ui::popup(&ui3));
+        }
         let ui2 = ui.clone();
         perm_btn.connect_clicked(move |b| chat::show_perm_popover(&ui2, b));
         let p = prompt.clone();

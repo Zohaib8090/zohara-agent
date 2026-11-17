@@ -121,6 +121,24 @@ pub fn shell_spec(home: &Path, rows: u16, cols: u16) -> Spec {
     s
 }
 
+/// How an ssh session is started: ssh itself (no shell in between), an empty environment with only what is listed, the person's own
+/// home, the same limits as a shell.
+pub fn ssh_spec(home: &Path, rows: u16, cols: u16, args: Vec<String>) -> Spec {
+    let mut s = shell_spec(home, rows, cols);
+    s.program = which_ssh();
+    s.args = args;
+    s
+}
+
+fn which_ssh() -> PathBuf {
+    for p in ["/usr/bin/ssh", "/bin/ssh", "/usr/local/bin/ssh"] {
+        if Path::new(p).exists() {
+            return p.into();
+        }
+    }
+    "ssh".into()
+}
+
 struct Sess {
     tenant: String,
     name: String,
@@ -183,6 +201,16 @@ impl Hub {
 
     /// Starts a shell for `tenant` (the caller checked that this person is an admin).
     pub fn open(&self, tenant: &str, root: &Path, rows: u16, cols: u16, name: &str) -> Result<Info, Fail> {
+        self.open_as(tenant, root, rows, cols, name, None)
+    }
+
+    /// A terminal that is an ssh session to one of the admin's added machines (docs/SSH.md): the same limits and the same pseudo-terminal
+    /// as a shell, started with the arguments the service made (`machine_terminal_spec`).
+    pub fn open_ssh(&self, tenant: &str, root: &Path, rows: u16, cols: u16, name: &str, args: Vec<String>) -> Result<Info, Fail> {
+        self.open_as(tenant, root, rows, cols, name, Some(args))
+    }
+
+    fn open_as(&self, tenant: &str, root: &Path, rows: u16, cols: u16, name: &str, ssh: Option<Vec<String>>) -> Result<Info, Fail> {
         let mut g = self.lock();
         g.retain(|_, s| s.ended_at.lock().unwrap_or_else(|e| e.into_inner()).is_none_or(|t| t.elapsed() < ENDED_KEPT));
         let alive = |s: &Sess| s.pty.alive();
@@ -197,7 +225,11 @@ impl Hub {
             use std::os::unix::fs::DirBuilderExt;
             std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&home).map_err(|e| Fail::new(500, format!("Could not prepare the terminal's folder: {e}")))?;
         }
-        let pty = Pty::spawn(&shell_spec(&home, rows, cols)).map_err(|e| Fail::new(503, e))?;
+        let spec = match ssh {
+            Some(args) => ssh_spec(&home, rows, cols, args),
+            None => shell_spec(&home, rows, cols),
+        };
+        let pty = Pty::spawn(&spec).map_err(|e| Fail::new(503, e))?;
         let id = new_id();
         let n: String = zo_core::pty::strip_ansi(name).chars().filter(|c| !c.is_control()).take(40).collect();
         let name = if n.trim().is_empty() { format!("Terminal {}", g.values().filter(|s| s.tenant == tenant).count() + 1) } else { n };
@@ -439,7 +471,7 @@ pub fn open_http(app: &Arc<App>, req: Request, v: Value, who: &Who) {
             }
             None => return ndjson(app, req, &[json!({"event": "error", "error": "gone", "message": "That terminal has ended (the server closes idle ones after 30 minutes, and a restart ends all of them)."}), json!({"event": "done"})]),
         },
-        None => match app.term.open(&who.tenant, &app.term_root, rows, cols, v.get("name").and_then(Value::as_str).unwrap_or("")) {
+        None => match open_new(app, who, &v, rows, cols) {
             Ok(i) => i,
             Err(f) => return ndjson(app, req, &[json!({"event": "error", "error": "limit", "message": f.error}), json!({"event": "done"})]),
         },
@@ -471,6 +503,27 @@ pub fn open_http(app: &Arc<App>, req: Request, v: Value, who: &Who) {
     }
     let _ = out.write_all(b"0\r\n\r\n");
     let _ = out.flush();
+}
+
+/// A new cloud terminal: a shell, or (with `machine`) an ssh session to one of the admin's machines.
+fn open_new(app: &Arc<App>, who: &Who, v: &Value, rows: u16, cols: u16) -> Result<Info, Fail> {
+    let name = v.get("name").and_then(Value::as_str).unwrap_or("");
+    match v.get("machine").and_then(Value::as_str).filter(|m| !m.is_empty()) {
+        None => app.term.open(&who.tenant, &app.term_root, rows, cols, name),
+        Some(m) => {
+            // admin only (cloud_allowed was checked); a shell that starts connections from this server's address is not for everybody
+            let req = json!({"op": "machine_terminal_spec", "name": m, "tenant": {"id": who.tenant, "restricted": !who.admin}});
+            let r = crate::op(&req).map_err(|e| Fail::new(502, e))?;
+            if r["ok"] == json!(false) {
+                return Err(Fail::new(400, r["error"].as_str().unwrap_or("Could not open the machine.").to_string()));
+            }
+            let args: Vec<String> = r["args"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+            if args.is_empty() {
+                return Err(Fail::new(502, "The machine gave no way in."));
+            }
+            app.term.open_ssh(&who.tenant, &app.term_root, rows, cols, if name.is_empty() { m } else { name }, args)
+        }
+    }
 }
 
 fn open_desktop(app: &Arc<App>, req: Request, v: Value, who: &Who, rows: u16, cols: u16) {

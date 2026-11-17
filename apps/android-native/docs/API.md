@@ -315,7 +315,20 @@ For a restricted account every op in this block except `artifacts` answers `{"ok
 | `machines` | `{"op":"machines"}` | live: `{"ok":true,"machines":[]}`; items `{name, host, user, port, note, has_key}` |
 | `machine_add` | `{"op":"machine_add","name":"vm1","host":"203.0.113.7","user":"ubuntu","port":22,"note":"n","key":"-----BEGIN OPENSSH PRIVATE KEY-----\n..."}` | `{"ok":true}`; **the key is required** (live without: `{"ok":false,"error":"Paste the private key that this machine accepts."}`); `port` is a number or a string |
 | `machine_test` | `{"op":"machine_test","name":"vm1"}` | `{"ok":true,"message":"..."}` (code) |
-| `machine_remove` | `{"op":"machine_remove","name":"vm1"}` | `{"ok":true}`; unknown: "There is no such machine." (live) |
+| `machine_remove` | `{"op":"machine_remove","name":"vm1","uninstall_runner":true,"force":false}` | `{"ok":true}`; unknown: "There is no such machine." (live). When a runner is installed on the machine: without `uninstall_runner` (or `force`) it refuses with "A runner is installed on this machine..."; `uninstall_runner:true` removes the runner first (an unreachable machine is an error); `force:true` forgets the machine and the runner record even when the machine cannot be reached |
+| `machine_status` | `{"op":"machine_status"}` or with `"name"` | live: `{"ok":true,"machines":[{"name","reachable","installed","error"?,"ms","has_key","commands","files","last_sync","sync_error","apps_copied":{"at","servers":[{"name","credentials"}]}|null,"runner"?:{"version","enabled_tasks","tasks","timer_active"(bool or null),"last_run","last_status","has_model","model","has_key","apps","os","arch"}}],"terminal"}`; one SSH call per machine, all at once (up to 30 s each) |
+| `machine_new` | `{"op":"machine_new","name","host","user","port","note"}` | `{"ok":true,"name","public_key","authorize_command"}`: makes a NEW key; the private half stays in the key store |
+| `machine_pubkey` | `{"op":"machine_pubkey","name"}` | `{"public_key","authorize_command"}` |
+| `machine_authorize` | `{"op":"machine_authorize","name","password"}` | `{"message"}`; the password is used once for one `ssh` run, never stored or logged |
+| `machine_runner_install` / `machine_runner_uninstall` | `{"op":...,"name"}` | install: `{"steps":["..."]}` (can take a minute); uninstall `{}` |
+| `machine_runner_allow` | `{"op":"machine_runner_allow","name","commands":bool,"files":bool}` | `{}`; what the runner may do without asking |
+| `machine_runner_sync` | `{"op":"machine_runner_sync","name"}` | `{"tasks":n}`; sends the task list, fetches results |
+| `machine_model_plan` / `machine_model_copy` / `machine_model_clear` | plan `{"name"}` -> `{"provider","model","can","why","needs_key","confirm"}`; copy `{"name","confirm"}` -> `{"message"}` | `confirm` must be the plan's sentence word for word; otherwise `{"ok":false,"error":"Confirm exactly: <sentence>"}` |
+| `machine_apps_plan` | `{"op":"machine_apps_plan","name"}` | `{"machine","has_runner","servers":[{"name","kind","target","credentials":["variable X",...],"oauth","runtime","warnings":[],"copied","copied_with_credentials"}],"copied"}`; never a value |
+| `machine_apps_copy` | `{"op":"machine_apps_copy","name","servers":[{"name","credentials":bool}],"confirm"}` | `{"copied","on_machine","credentials","confirm_was"}`; with any `credentials:true` the service wants `confirm` = `This copies the <apps, sorted, "a, b and c"> credentials to <machine>.` and says so in `Confirm exactly: ...` when it is missing or different |
+| `machine_apps_check` / `machine_apps_revoke` / `machine_apps_sync` | `{"name"}` (sync also `"confirm"`) | check `{"servers":[{"name","present","runtime","hint"}]}`; revoke `{}`; sync `{"synced","removed":[],"credentials"}` |
+| `machine_task_run` | `{"op":"machine_task_run","name","prompt"}` | `{"task","by_runner"}` |
+| `machine_terminal_spec` | server internal (the cloud terminal's `{"machine"}` field of `/api/term/open`) | admin only |
 | `mcp_list` | `{"op":"mcp_list"}` | live: `{"ok":true,"servers":[]}`; items `{name, command, enabled}` |
 | `mcp_add` | `{"op":"mcp_add","name":"x","address":"https://example.com/mcp","token":"optional"}` | `{"ok":true,"message":"..."}`; tries the server first (live error: "Could not reach the server: ...") |
 | `mcp_import` | `{"op":"mcp_import","config":"<JSON of mcpServers>"}` | `{"ok":true,"message":"..."}`; live error for `{}`: "No server was found in that. A server needs a \"command\" (a program) or a \"url\" (a remote server)." |
@@ -329,6 +342,8 @@ For a restricted account every op in this block except `artifacts` answers `{"ok
 | `connector_preview` | `{"op":"connector_preview","id":"com.x/y","kind":"remote","name":"x","url":"optional","headers":{"Authorization":"..."}}` | `{"ok":true,"name","target","tools":[..],"trust","notice"}`; tries the server, saves nothing; restricted: refused |
 | `connector_add` / `connector_cancel` | `{"op":"connector_add","name":"x"}` | saves what was tried (`{"ok":true,"message"}`) / drops it |
 | `connector_accept_change` | `{"op":"connector_accept_change","name":"x"}` | uses the new address a connector's registry entry lists (`mcp_list` items then carry `registry` and `address_changed`) |
+
+Every `machine*` op answers a restricted account with "Machines (SSH) are not available to this account." See docs/RUNNER.md.
 
 ### 4.5 Computer relay op
 

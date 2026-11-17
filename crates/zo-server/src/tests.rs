@@ -3262,3 +3262,85 @@ fn the_connectors_directory_needs_a_sign_in_is_rate_limited_and_a_restricted_acc
     }
     assert!(limited, "the 31st request in a minute is refused");
 }
+
+/// A private sshd on a random port as the current user (skipped without sshd). Returns (child, port, dir).
+fn private_sshd(name: &str) -> Option<(std::process::Child, u16, std::path::PathBuf)> {
+    let bin = ["/usr/bin/sshd", "/usr/sbin/sshd"].into_iter().find(|p| std::path::Path::new(p).exists())?;
+    if std::process::Command::new("ssh-keygen").arg("-V").output().is_err() && !std::path::Path::new("/usr/bin/ssh-keygen").exists() {
+        return None;
+    }
+    let dir = std::env::temp_dir().join(format!("zo-srv-sshd-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let ok = std::process::Command::new("ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(dir.join("hostkey")).status().unwrap().success();
+    assert!(ok);
+    std::fs::write(dir.join("authorized_keys"), "").unwrap();
+    std::fs::set_permissions(dir.join("authorized_keys"), std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let d = dir.display();
+    std::fs::write(dir.join("sshd_config"), format!("Port {port}\nListenAddress 127.0.0.1\nHostKey {d}/hostkey\nPidFile {d}/sshd.pid\nAuthorizedKeysFile {d}/authorized_keys\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\nLogLevel ERROR\n")).unwrap();
+    let child = std::process::Command::new(bin).arg("-D").arg("-f").arg(dir.join("sshd_config")).arg("-E").arg(dir.join("sshd.log")).spawn().unwrap();
+    let t0 = Instant::now();
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "sshd did not start");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Some((child, port, dir))
+}
+
+#[test]
+fn the_machines_are_the_admins_only_and_a_machine_terminal_is_a_real_ssh_session() {
+    let _g = TERM_ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let (uo, ur) = (uniq("mt-o"), uniq("mt-r"));
+    let r = rig(&[("tok-o", &uo, "owner@x.test"), ("tok-r", &ur, "r@x.test")], "owner@x.test", 200, 6000);
+    // a restricted person: every machine operation is refused, and no ssh terminal opens whatever the page sends
+    for op in ["machine_status", "machine_new", "machine_runner_install", "machine_apps_plan", "machine_apps_copy", "machine_model_copy", "machine_task_run", "machine_terminal_spec"] {
+        let a = call(&r, "tok-r", "/api/op", json!({"op": op, "name": "x"}));
+        assert_eq!(a.body["ok"], false, "{op}: {:?}", a.body);
+    }
+    let a = call(&r, "tok-r", "/api/term/open", json!({"machine": "x"}));
+    assert_eq!(a.status, 403, "{:?}", a.body);
+    assert_eq!(r.app.term.count(), 0);
+    // the admin: an unknown machine is a clear error and no session
+    let rx = term_stream(&r, "tok-o", json!({"machine": "nope"}));
+    let (_, lines) = until_output(&rx, "never", 3);
+    let msg = lines.iter().find(|l| l["event"] == "error").map(|l| l["message"].to_string()).unwrap_or_default();
+    assert!(msg.contains("no machine called"), "{lines:?}");
+    assert_eq!(r.app.term.count(), 0);
+
+    let Some((sshd, port, dir)) = private_sshd("term") else {
+        eprintln!("SKIPPED the real ssh part: sshd is not installed");
+        return;
+    };
+    struct Reap(std::process::Child);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let _sshd = Reap(sshd);
+    // add a machine with a key Zohara Agent makes, let that key in, and test it, all through the API the page uses
+    let me = String::from_utf8(std::process::Command::new("id").arg("-un").output().unwrap().stdout).unwrap().trim().to_string();
+    let n = call(&r, "tok-o", "/api/op", json!({"op": "machine_new", "name": "vm1", "host": "127.0.0.1", "user": me, "port": port}));
+    assert_eq!(n.body["ok"], true, "{:?}", n.body);
+    let public = n.body["public_key"].as_str().unwrap().to_string();
+    assert!(public.starts_with("ssh-ed25519 ") && n.body["authorize_command"].as_str().unwrap().contains("authorized_keys") && !n.body.to_string().contains("PRIVATE KEY"));
+    std::fs::write(dir.join("authorized_keys"), format!("{public}\n")).unwrap();
+    let t = call(&r, "tok-o", "/api/op", json!({"op": "machine_test", "name": "vm1"}));
+    assert_eq!(t.body["ok"], true, "{:?}", t.body);
+    let st = call(&r, "tok-o", "/api/op", json!({"op": "machine_status", "name": "vm1"}));
+    assert_eq!((st.body["machines"][0]["reachable"].clone(), st.body["machines"][0]["installed"].clone()), (json!(true), json!(false)), "{:?}", st.body);
+    // the terminal: ssh itself, a pseudo-terminal, and the remote shell answers
+    let rx = term_stream(&r, "tok-o", json!({"machine": "vm1", "rows": 24, "cols": 100}));
+    let first = rx.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+    assert_eq!(first["event"], "term", "{first:?}");
+    let sid = first["id"].as_str().unwrap().to_string();
+    assert_eq!(call(&r, "tok-o", "/api/term/input", json!({"session": sid, "data": "echo remote-$((6*7)); tty; echo end-$((7*7))\n"})).status, 200);
+    let (text, _) = until_output(&rx, "end-49", 20);
+    assert!(text.contains("remote-42") && text.contains("/dev/pts/"), "{text}");
+    // the server's secrets are still not in the session's environment
+    assert!(!text.contains(testenv::SECRET));
+    call(&r, "tok-o", "/api/term/close", json!({"session": sid}));
+    let _ = std::fs::remove_dir_all(&dir);
+}

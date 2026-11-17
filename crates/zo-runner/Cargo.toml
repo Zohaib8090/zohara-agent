@@ -1,0 +1,16 @@
+[package]
+name = "zo-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "zohara-agent-runner: runs Zohara Agent's scheduled tasks on a Linux VM (no window, driven over SSH)"
+
+[[bin]]
+name = "zohara-agent-runner"
+path = "src/main.rs"
+
+[dependencies]
+zo-core = { path = "../zo-core" }
+
+[dev-dependencies]
+serde_json.workspace = true

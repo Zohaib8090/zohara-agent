@@ -405,6 +405,15 @@ fn change<T>(f: impl FnOnce(&mut Vec<Task>) -> T) -> T {
     r
 }
 
+/// Replaces the whole list with what `f` makes of it, as one step. For the VM runner, whose list is a copy of the owner's (see
+/// `runner::remote`).
+pub fn replace_all(f: impl FnOnce(Vec<Task>) -> Vec<Task>) {
+    change(|all| {
+        let old = std::mem::take(all);
+        *all = f(old);
+    })
+}
+
 // ── reading times written in words ──
 
 /// What a time written in words means.
