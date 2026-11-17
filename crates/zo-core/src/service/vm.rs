@@ -29,6 +29,7 @@ pub fn handles(op: &str) -> bool {
             | "machine_apps_sync"
             | "machine_task_run"
             | "machine_terminal"
+            | "machine_terminal_spec"
     )
 }
 
@@ -185,6 +186,15 @@ pub fn handle(op: &str, req: &Value) -> Result<Value, String> {
             let t = crate::term::open(&format!("ssh {n}"), None, Some(&line), false)?;
             Ok(json!({"term": t.id}))
         }
+        "machine_terminal_spec" => {
+            // for the cloud server's terminal (admin only, checked there): the ssh arguments and the path of a key file that lives for a minute
+            let n = name_of(req)?;
+            let (args, key) = ssh::terminal_command(n)?;
+            let path = key.path().to_string_lossy().into_owned();
+            key.remove_later(60);
+            crate::audit::log("machine_terminal", &json!({"machine": n}), "ok");
+            Ok(json!({"args": args, "key_file": path}))
+        }
         _ => Err("Unknown machine operation.".into()),
     }
 }
@@ -193,10 +203,10 @@ pub fn handle(op: &str, req: &Value) -> Result<Value, String> {
 mod tests {
     use super::*;
 
-    const OPS: [&str; 18] = [
+    const OPS: [&str; 19] = [
         "machine_status", "machine_new", "machine_pubkey", "machine_authorize", "machine_runner_install", "machine_runner_uninstall", "machine_runner_allow",
         "machine_runner_sync", "machine_model_plan", "machine_model_copy", "machine_model_clear", "machine_apps_plan", "machine_apps_copy", "machine_apps_revoke",
-        "machine_apps_check", "machine_apps_sync", "machine_task_run", "machine_terminal",
+        "machine_apps_check", "machine_apps_sync", "machine_task_run", "machine_terminal", "machine_terminal_spec",
     ];
 
     #[test]
